@@ -493,6 +493,53 @@ async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript(
 }
 
 #[tokio::test]
+async fn query_loop_synthesizes_terminal_user_update_when_tool_follow_up_turn_is_silent() {
+    let context = test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "EchoFixture".into(),
+                    input: r#"{"value":"123"}"#.into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new().register(Arc::new(EchoFixtureTool)),
+    );
+
+    let result = run_query_loop(&context, Message::user("perform the echo task")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.text() == "Final update: echoed 123"),
+        "{:?}",
+        result.messages
+    );
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::MessageCommitted(message)
+                if message.text() == "Final update: echoed 123"
+        )),
+        "{:?}",
+        result.events
+    );
+}
+
+#[tokio::test]
 async fn query_loop_records_usage_events_into_cost_tracker() {
     let context = test_context(vec![
         StreamEvent::MessageStart,

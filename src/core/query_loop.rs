@@ -1942,6 +1942,14 @@ fn finalize_normal_turn(
         };
     }
 
+    if !latest_visible_message_is_assistant(&state.messages) {
+        if let Some(summary) = state.pending_tool_use_summary.as_ref() {
+            let fallback = Message::assistant(synthesize_terminal_user_update(summary));
+            events.push(EngineEvent::MessageCommitted(fallback.clone()));
+            state.messages.push(fallback);
+        }
+    }
+
     let terminal = Terminal::Completed;
     events.push(EngineEvent::Terminal(terminal.clone()));
     NormalTurnFinalization::Return(QueryLoopResult {
@@ -1951,6 +1959,23 @@ fn finalize_normal_turn(
         transition: state.transition,
         events,
     })
+}
+
+fn latest_visible_message_is_assistant(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| !message.text().trim().is_empty())
+        .is_some_and(|message| matches!(message.role, crate::core::message::Role::Assistant))
+}
+
+fn synthesize_terminal_user_update(summary: &str) -> String {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        "Final update: completed the requested runtime work.".into()
+    } else {
+        format!("Final update: {trimmed}")
+    }
 }
 
 fn finalize_turn(
