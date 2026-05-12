@@ -34,8 +34,8 @@ use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    build_tui_screen, render_document_output, render_document_tui_output, render_output,
-    render_tui_screen_output, render_turn_document,
+    build_tui_loading_screen, build_tui_screen, render_document_output,
+    render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input, handle_normalized_input};
 use crate::interaction::dispatcher::NotificationDispatcher;
@@ -951,7 +951,12 @@ impl RuntimeBootstrap {
                     execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
                     break;
                 }
-                let output = handle_cli_input(&router, &engine, &app_state, line).await?;
+                let output = if self.cli.tui {
+                    self.handle_tui_input_with_loading(&router, &engine, &app_state, line)
+                        .await?
+                } else {
+                    handle_cli_input(&router, &engine, &app_state, line).await?
+                };
                 self.print_cli_turn_output(&output);
             }
             return Ok(());
@@ -1001,6 +1006,38 @@ impl RuntimeBootstrap {
             render_tui_screen_output(&screen)
         );
         println!("{rendered}");
+    }
+
+    fn print_tui_loading_frame(&self, request: &str, frame_index: usize) {
+        let rendered = format!(
+            "{}{}",
+            tui_clear_screen_prefix(),
+            render_tui_screen_output(&build_tui_loading_screen(request, frame_index))
+        );
+        println!("{rendered}");
+    }
+
+    async fn handle_tui_input_with_loading(
+        &self,
+        router: &CommandRouter,
+        engine: &QueryEngine,
+        app_state: &AppState,
+        line: String,
+    ) -> anyhow::Result<CliTurnOutput> {
+        self.print_tui_loading_frame(&line, 0);
+        let turn_future = handle_cli_input(router, engine, app_state, line.clone());
+        tokio::pin!(turn_future);
+        let mut frame_index = 1usize;
+
+        loop {
+            tokio::select! {
+                result = &mut turn_future => return result,
+                _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                    self.print_tui_loading_frame(&line, frame_index);
+                    frame_index = frame_index.wrapping_add(1);
+                }
+            }
+        }
     }
 
     fn should_exit_tui_input(&self, input: &str) -> bool {

@@ -75,6 +75,27 @@ pub fn render_tui_screen_output(screen: &TuiScreen) -> String {
     render_tui_screen_to_text(screen)
 }
 
+pub fn build_tui_loading_screen(request: &str, frame_index: usize) -> TuiScreen {
+    let spinner = tui_loading_spinner_frame(frame_index);
+    let request = truncate_for_tui(request, 96);
+
+    TuiScreen {
+        main: vec![
+            format!("{spinner} Working..."),
+            "The agent is still processing your request.".into(),
+        ],
+        panels: vec![TuiPanelSection {
+            title: "Status".into(),
+            lines: vec![
+                "[state] running".into(),
+                format!("[input] {request}"),
+            ],
+        }],
+        prompt: vec!["Prompt".into(), "  > waiting for response".into()],
+        footer: vec!["Controls: Ctrl+C stops the process.".into()],
+    }
+}
+
 pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     let mut main = Vec::new();
     let mut panels = Vec::new();
@@ -256,6 +277,21 @@ fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
     }));
     lines.push("╚═════════════════════════════════════════".to_string());
     lines.join("\n")
+}
+
+fn tui_loading_spinner_frame(frame_index: usize) -> &'static str {
+    const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
+    FRAMES[frame_index % FRAMES.len()]
+}
+
+fn truncate_for_tui(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn render_block_to_text(block: &RenderBlock) -> String {

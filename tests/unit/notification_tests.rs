@@ -14,8 +14,8 @@ use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
 use rust_agent::interaction::cli::renderer::{
-    build_tui_screen, render_document_output, render_document_tui_output, render_turn_document,
-    render_turn_output,
+    build_tui_loading_screen, build_tui_screen, render_document_output,
+    render_document_tui_output, render_turn_document, render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -797,6 +797,40 @@ fn cli_renderer_tui_screen_filters_assistant_delta_runtime_noise() {
     assert!(!rendered.contains("[delta]"), "{rendered}");
     assert!(!rendered.contains("版"), "{rendered}");
     assert!(rendered.contains("verify before shipping"), "{rendered}");
+}
+
+#[test]
+fn cli_renderer_builds_tui_loading_screen_with_visible_running_state() {
+    let screen = build_tui_loading_screen(
+        "compare the current tui implementation with docs and fix loading state",
+        2,
+    );
+
+    assert_eq!(screen.main.first().map(String::as_str), Some("| Working..."));
+    assert!(
+        screen
+            .main
+            .iter()
+            .any(|line| line.contains("still processing")),
+    );
+    assert_eq!(screen.panels.len(), 1);
+    assert_eq!(screen.panels[0].title, "Status");
+    assert!(
+        screen.panels[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("[state] running"))
+    );
+    assert!(
+        screen.panels[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("[input] compare the current tui implementation"))
+    );
+    assert_eq!(
+        screen.prompt.get(1).map(String::as_str),
+        Some("  > waiting for response")
+    );
 }
 
 #[test]
