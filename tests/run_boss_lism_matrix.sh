@@ -484,6 +484,16 @@ run_one() {
     fi
     run_with_program_timeout "$program_timeout_secs" "${cmd[@]}"
   ) >"$log_file" 2>&1
+  if [ "$usecase" = "u3_token_efficiency_rollout" ]; then
+    case "$mode" in
+      all_off)
+        cp -f "$api_log_file" "$out_dir/api_logs/u3_token_efficiency_rollout-off-run${run_id}.jsonl"
+        ;;
+      all_on)
+        cp -f "$api_log_file" "$out_dir/api_logs/u3_token_efficiency_rollout-on-run${run_id}.jsonl"
+        ;;
+    esac
+  fi
   echo "=== END $usecase $mode run$run_id $(date '+%F %T') ==="
 }
 
