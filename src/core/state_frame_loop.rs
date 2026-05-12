@@ -2502,6 +2502,80 @@ fn repeated_recovery_strategy_reason(
     None
 }
 
+fn repeated_successful_read_tailspin_reason(
+    usage: &LoopUsage,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<String> {
+    let target_path = parse_read_path(decision)?;
+    let read_count = usage
+        .tool_execution_records
+        .iter()
+        .filter(|record| record.kind == ToolExecutionOutcomeKind::Success)
+        .filter(|record| record.tool_name == "Read")
+        .filter(|record| {
+            observable_path_from_input(record.observable_input.as_ref())
+                .as_deref()
+                .is_some_and(|path| path == target_path)
+        })
+        .count();
+    if read_count < 2 {
+        return None;
+    }
+    Some(format!(
+        "repeated successful Read of {} already produced runtime evidence {} times; do not read the same path again without a different action or a closing state_patch",
+        target_path, read_count
+    ))
+}
+
+fn repeated_failed_read_tailspin_reason(
+    usage: &LoopUsage,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<String> {
+    let target_path = parse_read_path(decision)?;
+    let failed_count = usage
+        .tool_execution_records
+        .iter()
+        .filter(|record| record.kind != ToolExecutionOutcomeKind::Success)
+        .filter(|record| record.tool_name == "Read")
+        .filter(|record| {
+            observable_path_from_input(record.observable_input.as_ref())
+                .as_deref()
+                .is_some_and(|path| path == target_path)
+        })
+        .count();
+    if failed_count < 2 {
+        return None;
+    }
+    Some(format!(
+        "repeated failed Read of {} already returned tool feedback {} times; do not read the same unavailable path again",
+        target_path, failed_count
+    ))
+}
+
+fn repeated_successful_bash_tailspin_reason(
+    usage: &LoopUsage,
+    decision: &crate::core::state_frame::StateDecision,
+) -> Option<String> {
+    let command = parse_bash_command(decision)?;
+    let command_key = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bash_count = usage
+        .tool_execution_records
+        .iter()
+        .filter(|record| record.kind == ToolExecutionOutcomeKind::Success)
+        .filter(|record| record.tool_name == "Bash")
+        .filter_map(|record| observable_command_from_input(record.observable_input.as_ref()))
+        .map(|prior| prior.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|prior| prior == &command_key)
+        .count();
+    if bash_count < 2 {
+        return None;
+    }
+    Some(format!(
+        "repeated successful Bash command already produced runtime evidence {} times; do not run the same command again without using its result to close, block, or choose a different action",
+        bash_count
+    ))
+}
+
 fn record_recoverable_tool_failure(
     usage: &mut LoopUsage,
     outcome: &ToolOutcome,
@@ -3873,6 +3947,16 @@ fn observable_path_from_input(input: Option<&ObservableInput>) -> Option<String>
         .map(str::to_string)
 }
 
+fn observable_command_from_input(input: Option<&ObservableInput>) -> Option<String> {
+    let raw = input?.value.as_str();
+    let json: serde_json::Value = serde_json::from_str(raw).ok()?;
+    json.get("command")
+        .and_then(|value| value.as_str())
+        .or_else(|| json.get("Bash.command").and_then(|value| value.as_str()))
+        .or_else(|| json.get("cmd").and_then(|value| value.as_str()))
+        .map(str::to_string)
+}
+
 fn canonical_arg_shape(tool_name: &str) -> Option<&'static str> {
     match tool_name {
         "Read" => Some("Read.file_path"),
@@ -4746,6 +4830,79 @@ pub async fn run_decision_loop_with_tools(
                     total_usage.recovery_tier = Some("strategy_dedupe".into());
                     total_usage.recovery_outcome = Some("no_progress_escalation".into());
                     total_usage.terminal_blocker_kind = Some("same_invalid_strategy".into());
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason,
+                        usage: total_usage,
+                    });
+                }
+                if let Some(reason) =
+                    repeated_successful_read_tailspin_reason(&total_usage, &decision)
+                {
+                    if count_decision_feedback(&frame, "same_successful_read_tailspin") < 2 {
+                        push_decision_feedback(
+                            &mut frame,
+                            "same_successful_read_tailspin",
+                            true,
+                            "stop_repeating_read_and_close_or_choose_different_action",
+                            &reason,
+                        );
+                        total_usage.recovery_attempted = true;
+                        total_usage.recovery_tier = Some("decision_feedback".into());
+                        total_usage.recovery_outcome = Some("feedback_injected".into());
+                        frame.state = AgentState::Correcting;
+                        continue;
+                    }
+                    push_unique(
+                        &mut frame.recent_evidence,
+                        format!(
+                            "recovery_guard: reason={} target_path={} enforced_outcome=no_progress",
+                            reason,
+                            current_action_target_path(&decision).unwrap_or_else(|| "none".into())
+                        ),
+                    );
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("read_tailspin_dedupe".into());
+                    total_usage.recovery_outcome = Some("no_progress_escalation".into());
+                    total_usage.terminal_blocker_kind =
+                        Some("same_successful_read_tailspin".into());
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason,
+                        usage: total_usage,
+                    });
+                }
+                if let Some(reason) = repeated_failed_read_tailspin_reason(&total_usage, &decision)
+                    .or_else(|| repeated_successful_bash_tailspin_reason(&total_usage, &decision))
+                {
+                    if count_decision_feedback(&frame, "same_tool_tailspin") < 2 {
+                        push_decision_feedback(
+                            &mut frame,
+                            "same_tool_tailspin",
+                            true,
+                            "stop_repeating_tool_and_close_block_or_choose_different_action",
+                            &reason,
+                        );
+                        total_usage.recovery_attempted = true;
+                        total_usage.recovery_tier = Some("decision_feedback".into());
+                        total_usage.recovery_outcome = Some("feedback_injected".into());
+                        frame.state = AgentState::Correcting;
+                        continue;
+                    }
+                    push_unique(
+                        &mut frame.recent_evidence,
+                        format!(
+                            "recovery_guard: reason={} target_path={} enforced_outcome=no_progress",
+                            reason,
+                            current_action_target_path(&decision).unwrap_or_else(|| "none".into())
+                        ),
+                    );
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("tool_tailspin_dedupe".into());
+                    total_usage.recovery_outcome = Some("no_progress_escalation".into());
+                    total_usage.terminal_blocker_kind = Some("same_tool_tailspin".into());
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,

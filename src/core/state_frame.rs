@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -367,13 +369,15 @@ impl StateFrame {
             serde_json::to_string_pretty(&stable).unwrap_or_default(),
         ));
 
+        let (path_aliases, recent_evidence) = compact_prompt_recent_evidence(self);
         let dynamic = json!({
             "state_frame_dynamic_v1": {
                 "state": self.state,
                 "open_items": &self.open_items,
                 "blocked_items": &self.blocked_items,
                 "accepted_summary": &self.accepted_summary,
-                "recent_evidence": &self.recent_evidence,
+                "path_aliases": path_aliases,
+                "recent_evidence": recent_evidence,
                 "runtime_open_items": &self.runtime_open_items,
             }
         });
@@ -384,6 +388,240 @@ impl StateFrame {
         ));
         assembly
     }
+}
+
+fn compact_prompt_recent_evidence(frame: &StateFrame) -> (BTreeMap<String, String>, Vec<String>) {
+    let path_aliases = prompt_path_aliases(frame);
+    let mut compacted = Vec::new();
+    let mut seen = HashSet::new();
+    let mut empty_ledgers = BTreeSet::new();
+    let mut repeated_reads: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut latest_read_hydration: BTreeMap<String, (usize, String)> = BTreeMap::new();
+
+    for line in &frame.recent_evidence {
+        if prompt_contract_fact_is_redundant(line) {
+            continue;
+        }
+        if let Some(name) = empty_ledger_name(line) {
+            empty_ledgers.insert(name.to_string());
+            continue;
+        }
+        if prompt_write_read_hydration_is_redundant(line) {
+            continue;
+        }
+        if let Some(path) = prompt_read_hydration_path(line) {
+            let entry = latest_read_hydration
+                .entry(path)
+                .or_insert((0, String::new()));
+            entry.0 += 1;
+            entry.1 = line.clone();
+            continue;
+        }
+        if let Some((path, ref_id)) = prompt_read_success_path_and_ref(line) {
+            let entry = repeated_reads.entry(path).or_insert((0, String::new()));
+            entry.0 += 1;
+            entry.1 = ref_id;
+            continue;
+        }
+        push_prompt_line(&mut compacted, &mut seen, line, &path_aliases);
+    }
+
+    if !empty_ledgers.is_empty() {
+        let line = format!(
+            "fact: empty_ledgers {}",
+            empty_ledgers.into_iter().collect::<Vec<_>>().join(",")
+        );
+        push_prompt_line(&mut compacted, &mut seen, &line, &path_aliases);
+    }
+
+    for (path, (count, latest_ref)) in repeated_reads {
+        let line = format!("fact: repeated_read path={path} count={count} latest_ref={latest_ref}");
+        push_prompt_line(&mut compacted, &mut seen, &line, &path_aliases);
+    }
+    for (_path, (count, latest_line)) in latest_read_hydration {
+        push_prompt_line(&mut compacted, &mut seen, &latest_line, &path_aliases);
+        if count > 1 {
+            let line = format!("fact: repeated_read_hydration count={count}");
+            push_prompt_line(&mut compacted, &mut seen, &line, &path_aliases);
+        }
+    }
+
+    (path_aliases, compacted)
+}
+
+fn push_prompt_line(
+    items: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    line: &str,
+    aliases: &BTreeMap<String, String>,
+) {
+    let line = apply_prompt_path_aliases(line, aliases);
+    if seen.insert(line.clone()) {
+        items.push(line);
+    }
+}
+
+fn prompt_contract_fact_is_redundant(line: &str) -> bool {
+    line.starts_with("fact: review_mode ")
+        || line.starts_with("fact: task_profile ")
+        || line.starts_with("fact: requires_source_evidence ")
+        || line.starts_with("fact: declared_artifact_contract ")
+        || line.starts_with("fact: required_actions ")
+        || line.starts_with("fact: required_evidence ")
+}
+
+fn empty_ledger_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("fact: ")?;
+    let (name, value) = rest.split_once(' ')?;
+    let value = value.trim();
+    if value == "none" || value == "none recorded" {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn prompt_write_read_hydration_is_redundant(line: &str) -> bool {
+    line.starts_with("hydrated_context: ")
+        && line.contains(" source=tool:Write ")
+        && line.contains(" match_reason=call_tool_read ")
+}
+
+fn prompt_read_hydration_path(line: &str) -> Option<String> {
+    if !(line.starts_with("hydrated_context: ")
+        && line.contains(" source=tool:Read ")
+        && (line.contains(" match_reason=call_tool_read ")
+            || line.contains(" match_reason=call_tool_edit ")))
+    {
+        return None;
+    }
+    line.strip_prefix("hydrated_context: file_snippet:")
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .filter(|path| !path.is_empty())
+}
+
+fn prompt_read_success_path_and_ref(line: &str) -> Option<(String, String)> {
+    if !(line.starts_with("fact: file_facts ") && line.contains(" kind=read_observation ")) {
+        return None;
+    }
+    let path = prompt_field_value(line, "path")?;
+    let ref_id = prompt_field_value(line, "ref").unwrap_or_else(|| "unknown".into());
+    Some((path, ref_id))
+}
+
+fn prompt_field_value(line: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}=");
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+        .map(|value| value.trim().trim_matches(',').to_string())
+        .filter(|value| !value.is_empty() && value != "none" && value != "none recorded")
+}
+
+fn prompt_path_aliases(frame: &StateFrame) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    if let Some(target) = frame.stage_execution_contract.declared_artifacts.first() {
+        if !target.path.trim().is_empty() {
+            aliases.insert("$TARGET_DIR".into(), target.path.clone());
+        }
+    }
+
+    let mut paths = BTreeSet::new();
+    collect_prompt_paths(&frame.objective, &mut paths);
+    for item in frame
+        .recent_evidence
+        .iter()
+        .chain(frame.open_items.iter())
+        .chain(frame.accepted_summary.iter())
+    {
+        collect_prompt_paths(item, &mut paths);
+    }
+    for artifact in &frame.stage_execution_contract.declared_artifacts {
+        collect_prompt_paths(&artifact.path, &mut paths);
+        for evidence in &artifact.required_evidence {
+            collect_prompt_paths(evidence, &mut paths);
+        }
+    }
+    for verification in &frame.stage_execution_contract.verifications {
+        if let Some(path) = verification.target_path.as_deref() {
+            collect_prompt_paths(path, &mut paths);
+        }
+        for evidence in &verification.required_evidence {
+            collect_prompt_paths(evidence, &mut paths);
+        }
+    }
+
+    insert_first_matching_alias(&mut aliases, &paths, "$LOG_OFF", |path| {
+        path.ends_with(".jsonl") && path.contains("-off-")
+    });
+    insert_first_matching_alias(&mut aliases, &paths, "$LOG_ON", |path| {
+        path.ends_with(".jsonl") && path.contains("-on-")
+    });
+    insert_first_matching_alias(&mut aliases, &paths, "$VALIDATOR", |path| {
+        path.ends_with("/validator.py")
+    });
+    insert_first_matching_alias(&mut aliases, &paths, "$SUMMARY", |path| {
+        path.ends_with("/summary.txt")
+    });
+    insert_first_matching_alias(&mut aliases, &paths, "$CONCLUSION", |path| {
+        path.ends_with("/conclusion.md")
+    });
+    insert_first_matching_alias(&mut aliases, &paths, "$RESULTS", |path| {
+        path.ends_with("/validator_results.md")
+    });
+
+    aliases
+}
+
+fn insert_first_matching_alias<F>(
+    aliases: &mut BTreeMap<String, String>,
+    paths: &BTreeSet<String>,
+    alias: &str,
+    predicate: F,
+) where
+    F: Fn(&str) -> bool,
+{
+    if aliases.contains_key(alias) {
+        return;
+    }
+    if let Some(path) = paths.iter().find(|path| predicate(path)) {
+        aliases.insert(alias.into(), path.clone());
+    }
+}
+
+fn collect_prompt_paths(text: &str, paths: &mut BTreeSet<String>) {
+    for token in text.split(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | '|')) {
+        let Some(start) = token.find('/') else {
+            continue;
+        };
+        let candidate = token[start..]
+            .trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '.' | ':' | ';' | ')' | '(' | ']' | '[' | '}' | '{' | '<' | '>' | '`'
+                )
+            })
+            .to_string();
+        if candidate.starts_with('/') && candidate.contains('/') && candidate.len() > 4 {
+            paths.insert(candidate);
+        }
+    }
+}
+
+fn apply_prompt_path_aliases(line: &str, aliases: &BTreeMap<String, String>) -> String {
+    let mut pairs = aliases
+        .iter()
+        .map(|(alias, path)| (alias.as_str(), path.as_str()))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|(_, a), (_, b)| b.len().cmp(&a.len()));
+
+    let mut out = line.to_string();
+    for (alias, path) in pairs {
+        if !path.is_empty() {
+            out = out.replace(path, alias);
+        }
+    }
+    out
 }
 
 /// Which high-level decision the LLM is returning.
@@ -724,8 +962,8 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActorRole, AgentState, DecisionKind, ReviewMode, StageExecutionContract, StateBudget,
-        StateFrame, TaskProfile, validate_state_decision,
+        ActorRole, AgentState, DecisionKind, DeclaredArtifactContract, ReviewMode,
+        StageExecutionContract, StateBudget, StateFrame, TaskProfile, validate_state_decision,
     };
     use crate::core::prompt_segment::PromptSegmentKind;
     use serde_json::{Map, Value};
@@ -910,6 +1148,99 @@ mod tests {
                 .any(|segment| segment.kind == PromptSegmentKind::StateFrame
                     && segment.content.contains("second dynamic fact"))
         );
+    }
+
+    #[test]
+    fn prompt_assembly_compacts_redundant_contract_facts_without_mutating_frame() {
+        let mut frame = StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "write report".into(),
+            stage_execution_contract: StageExecutionContract {
+                review_mode: Some(ReviewMode::IndependentReview),
+                task_profile: Some(TaskProfile::IndependentReview),
+                requires_source_evidence: Some(false),
+                declared_artifacts: vec![DeclaredArtifactContract {
+                    ref_id: "artifact:step0:0".into(),
+                    path: "/private/tmp/example-target".into(),
+                    kind: "directory".into(),
+                    required_actions: vec!["create".into(), "write".into()],
+                    required_evidence: vec!["artifact:step0:0".into()],
+                }],
+                ..StageExecutionContract::default()
+            },
+            open_items: Vec::new(),
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: vec![
+                "fact: review_mode independent_review".into(),
+                "fact: task_profile independent_review".into(),
+                "fact: requires_source_evidence not_required".into(),
+                "fact: declared_artifact_contract ref=artifact:step0:0 path=/private/tmp/example-target kind=directory required_actions=create | write required_evidence=artifact:step0:0".into(),
+                "fact: test_failures none recorded".into(),
+                "fact: review_verdicts none recorded".into(),
+                "tool_outcome: ref=tool_outcome:1 tool=Write kind=success recoverable=false path=/private/tmp/example-target/validator.py".into(),
+            ],
+            allowed_actions: vec!["write_file".into()],
+            allowed_tools: vec!["Write".into()],
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: None,
+            budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
+        };
+        let original = frame.recent_evidence.clone();
+        let assembly = frame.to_prompt_assembly("stable instruction");
+        frame.recent_evidence.push("later mutation".into());
+        let prompt = assembly.assemble();
+
+        assert_eq!(&original[..], &frame.recent_evidence[..original.len()]);
+        assert!(prompt.contains("\"path_aliases\""));
+        assert!(prompt.contains("$TARGET_DIR"));
+        assert!(prompt.contains("$VALIDATOR"));
+        assert!(prompt.contains("fact: empty_ledgers review_verdicts,test_failures"));
+        assert!(!prompt.contains("fact: review_mode independent_review"));
+        assert!(!prompt.contains("fact: declared_artifact_contract ref=artifact:step0:0"));
+        assert!(prompt.contains("tool_outcome: ref=tool_outcome:1"));
+    }
+
+    #[test]
+    fn prompt_assembly_removes_redundant_write_read_hydration_and_compacts_repeated_reads() {
+        let frame = StateFrame {
+            role: ActorRole::Worker,
+            state: AgentState::Executing,
+            objective: "write report".into(),
+            stage_execution_contract: StageExecutionContract::default(),
+            open_items: Vec::new(),
+            blocked_items: Vec::new(),
+            accepted_summary: Vec::new(),
+            recent_evidence: vec![
+                "hydrated_context: file_snippet:/private/tmp/demo/validator.py source=tool:Write match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:1:read source=tool:Write source_event_id=tool-read:runtime:1 freshness=after-runtime-read excerpt=wrote /private/tmp/demo/validator.py".into(),
+                "hydrated_context: file_snippet:/private/tmp/demo/validator.py source=tool:Write match_reason=call_tool_edit trace=fact_name=file_facts ref=filefact:runtime:1:edit source=tool:Write source_event_id=tool-edit:runtime:1 freshness=after-runtime-edit excerpt=wrote /private/tmp/demo/validator.py".into(),
+                "fact: file_facts ref=filefact:runtime:7:read:0 path=/private/tmp/demo/summary.txt kind=read_observation source=tool:Read source_event_id=tool-read:runtime:7 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /private/tmp/demo/summary.txt".into(),
+                "fact: file_facts ref=filefact:runtime:8:read:0 path=/private/tmp/demo/summary.txt kind=read_observation source=tool:Read source_event_id=tool-read:runtime:8 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for /private/tmp/demo/summary.txt".into(),
+                "hydrated_context: file_snippet:/private/tmp/demo/summary.txt source=tool:Read match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:7:read source=tool:Read source_event_id=tool-read:runtime:7 freshness=after-runtime-read excerpt=old".into(),
+                "hydrated_context: file_snippet:/private/tmp/demo/summary.txt source=tool:Read match_reason=call_tool_read trace=fact_name=file_facts ref=filefact:runtime:8:read source=tool:Read source_event_id=tool-read:runtime:8 freshness=after-runtime-read excerpt=new".into(),
+            ],
+            allowed_actions: Vec::new(),
+            allowed_tools: Vec::new(),
+            toolset_id: None,
+            skillset_id: None,
+            required_output_schema: None,
+            budget: StateBudget::default(),
+            runtime_open_items: Vec::new(),
+        };
+        let prompt = frame.to_prompt_assembly("stable instruction").assemble();
+
+        assert!(!prompt.contains("source=tool:Write match_reason=call_tool_read"));
+        assert!(prompt.contains("match_reason=call_tool_edit"));
+        assert!(prompt.contains(
+            "fact: repeated_read path=$SUMMARY count=2 latest_ref=filefact:runtime:8:read:0"
+        ));
+        assert!(!prompt.contains("excerpt=old"));
+        assert!(prompt.contains("excerpt=new"));
+        assert!(prompt.contains("fact: repeated_read_hydration count=2"));
+        assert!(!prompt.contains("\"$PATH1\""));
     }
 }
 
