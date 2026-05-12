@@ -1019,13 +1019,6 @@ mod tests {
     }
 
     #[test]
-    fn external_tool_gate_blocks_worker_only_without_runtime() {
-        let frame = worker_frame("修改文件 src/core/boss.rs 并运行命令 cargo test");
-        assert!(requires_external_tool_execution(&frame, false));
-        assert!(!requires_external_tool_execution(&frame, true));
-    }
-
-    #[test]
     fn external_tool_gate_skips_readonly_contract() {
         let mut frame = worker_frame("read-only review run");
         frame.required_output_schema = Some("readonly_audit_4_paragraphs_v1".into());

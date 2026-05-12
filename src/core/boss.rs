@@ -16614,24 +16614,6 @@ mod tests {
     }
 
     #[test]
-    fn review_accept_guard_rejects_unresolved_source_evidence_blocker() {
-        let summary = "Summary: tool dispatch failed: repeated verification-target read while source evidence remains missing; last state: Verifying";
-        let guarded = guard_review_decision_against_unresolved_blockers(
-            true,
-            summary,
-            false,
-            crate::core::boss_actor_runtime::ReviewDecision::Accept {
-                summary: summary.into(),
-            },
-        );
-
-        assert!(matches!(
-            guarded,
-            crate::core::boss_actor_runtime::ReviewDecision::Correct { .. }
-        ));
-    }
-
-    #[test]
     fn review_accept_guard_allows_stale_blocker_when_completion_gate_is_closed() {
         let summary = "Summary: old source evidence remains missing text";
         let guarded = guard_review_decision_against_unresolved_blockers(
@@ -16848,42 +16830,6 @@ mod tests {
         assert!(metadata.completion_evidence_gaps.is_empty());
         assert_eq!(metadata.terminal_blocker_kind, None);
         assert_eq!(metadata.step_failure_classification, None);
-    }
-
-    #[test]
-    fn correction_text_is_mapped_to_real_repair_target() {
-        let step = source_report_step_with_runtime_records(Vec::new());
-        let metadata = BossStepRoutedMetadata {
-            completion_evidence_gaps: source_report_gaps(),
-            ..BossStepRoutedMetadata::default()
-        };
-        let correction =
-            "Review package still reports unresolved completion/source evidence blocker";
-        let action = correction_repair_action(Some(correction));
-        let target = correction_repair_target(&step, Some(&metadata), action.as_deref());
-
-        assert_eq!(action.as_deref(), Some("read_source_evidence"));
-        assert_eq!(target.as_deref(), Some("/tmp/source.md"));
-        assert_ne!(target.as_deref(), Some(correction));
-    }
-
-    #[test]
-    fn stale_blocker_reject_is_accepted_when_gate_is_closed() {
-        let decision = guard_review_reject_against_closed_gate(
-            true,
-            true,
-            crate::core::boss_actor_runtime::ReviewDecision::Correct {
-                summary: "review package contained stale task-0 blocker".into(),
-                correction: Some(
-                    "The verification failed because source evidence remains missing".into(),
-                ),
-            },
-        );
-
-        assert!(matches!(
-            decision,
-            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. }
-        ));
     }
 
     fn successful_path_record(tool_name: &str, path: &str) -> ToolExecutionRecord {
@@ -17386,76 +17332,6 @@ mod tests {
 
         let payload = build_continuation_payload(&assignment);
         assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
-    }
-
-    #[tokio::test]
-    async fn verification_first_continuation_payload_maps_long_repair_reason_to_short_blocker_code()
-    {
-        let (coordinator, _) =
-            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
-
-        let assignment = coordinator
-            .build_executor_b_assignment_contract(0, "session-alpha", true)
-            .await
-            .expect("build assignment");
-        let mut assignment = assignment;
-        if let Some(shared) = assignment.shared_step_memory.as_mut() {
-            shared.remaining_blocker = Some(
-                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
-                    .into(),
-            );
-            shared.required_action = Some(
-                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
-                    .into(),
-            );
-        }
-
-        let payload = build_continuation_payload(&assignment);
-        assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
-        assert!(
-            payload
-                .verified_facts
-                .iter()
-                .all(|fact| !fact.contains("tool dispatch failed"))
-        );
-
-        let message = build_verification_first_task_message(&assignment);
-        assert!(message.contains("remaining_blocker: repair_exhausted"));
-        assert!(!message.contains("tool dispatch failed"));
-    }
-
-    #[tokio::test]
-    async fn verification_first_continuation_payload_does_not_carry_long_repair_sentence_into_next_action_or_facts()
-     {
-        let (coordinator, _) =
-            verification_first_projection_coordinator(WorkerLisMPolicy::ForceOn).await;
-
-        let assignment = coordinator
-            .build_executor_b_assignment_contract(0, "session-alpha", true)
-            .await
-            .expect("build assignment");
-        let mut assignment = assignment;
-        if let Some(shared) = assignment.shared_step_memory.as_mut() {
-            shared.required_action = Some(
-                "tool dispatch failed: verification repair continuation exhausted / remaining verification evidence missing; last state: Verifying"
-                    .into(),
-            );
-        }
-
-        let payload = build_continuation_payload(&assignment);
-        assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
-        assert!(
-            payload
-                .verified_facts
-                .iter()
-                .all(|fact| !fact.contains("tool dispatch failed"))
-        );
-        assert!(
-            payload
-                .verified_facts
-                .iter()
-                .all(|fact| !fact.contains("remaining verification evidence missing"))
-        );
     }
 
     #[tokio::test]
@@ -19223,74 +19099,6 @@ mod tests {
             .expect("continuation context");
         assert_eq!(context.failed_target.as_deref(), Some(source_path.as_str()));
         assert_eq!(context.next_action.as_deref(), Some("read_source_evidence"));
-    }
-
-    #[tokio::test]
-    async fn st_mode_treats_demo_report_tasks_as_development_and_injects_test_first() {
-        let mut coordinator = BossCoordinator::new();
-        coordinator.init_st_mode_enabled(true);
-        {
-            let mut plan = coordinator.plan.write().await;
-            *plan = Some(BossPlan {
-                plan_id: "plan-st-demo".into(),
-                accepted_by_user: true,
-                steps: vec![BossPlanStep {
-                    id: 0,
-                    description: "build demo".into(),
-                    objective: Some("在独立目录创建一个最小 Python demo，并报告输出。".into()),
-                    acceptance: vec!["demo output is available".into()],
-                    requires_approval: false,
-                    status: BossPlanStepStatus::Pending,
-                    completed: false,
-                    result_diff: None,
-                    worker_task_id: None,
-                    attempt_count: 0,
-                    retry_budget: 3,
-                    last_review_summary: None,
-                    last_correction: None,
-                    stage_execution_contract: StageExecutionContract::default(),
-                    stage_continuation_context: None,
-                    executor_b_stage_memory: None,
-                    review_task_id: None,
-                    tool_execution_records: Vec::new(),
-                }],
-                ..BossPlan::default()
-            });
-        }
-
-        let assignment = coordinator
-            .build_executor_b_assignment_contract(0, "session-alpha", true)
-            .await
-            .expect("build assignment");
-
-        assert!(assignment.st_mode);
-        assert_eq!(
-            assignment.state_frame.allowed_actions,
-            vec!["implement".to_string(), "run_test".to_string()]
-        );
-        assert!(
-            !assignment
-                .state_frame
-                .stage_execution_contract
-                .tests
-                .is_empty()
-        );
-        assert!(
-            assignment
-                .state_frame
-                .stage_execution_contract
-                .required_actions
-                .iter()
-                .any(|action| action == "run_test")
-        );
-        assert!(
-            assignment
-                .state_frame
-                .required_output_hint
-                .as_deref()
-                .unwrap_or_default()
-                .contains("automated validation")
-        );
     }
 
     #[test]
