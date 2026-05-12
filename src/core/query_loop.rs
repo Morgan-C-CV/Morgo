@@ -1402,6 +1402,21 @@ fn infer_verify_read_blocker(verification_result: &str, detail: &str) -> String 
 
 fn batch_follow_up_message(state: &LoopState, report: &ToolExecutionReport) -> String {
     let mut message = format!("tool batch result:\n{}", report_detail_or_summary(report));
+    if should_block_repeated_empty_discovery_after_prior_evidence(state, report) {
+        message.push_str(
+            "\nRuntime gate: this discovery batch produced no new evidence after prior concrete evidence. Do not call Glob/Grep/ToolSearch again for the same question.",
+        );
+        if let Some(read_hint) =
+            truncated_read_continuation_hint(state.pending_tool_use_summary.as_deref())
+        {
+            message.push_str("\nNext action: ");
+            message.push_str(&read_hint);
+        } else {
+            message.push_str(
+                "\nNext action: answer directly from the evidence you already have, or issue one specific Read only if a concrete gap remains.",
+            );
+        }
+    }
     if state.prompt_only_discovery_locked
         && report
             .records
@@ -1467,6 +1482,61 @@ fn should_discourage_repeated_discovery_search(report: &ToolExecutionReport) -> 
         }
     }
     has_non_empty_read_or_glob && has_empty_discovery
+}
+
+fn should_block_repeated_empty_discovery_after_prior_evidence(
+    state: &LoopState,
+    report: &ToolExecutionReport,
+) -> bool {
+    let Some(prior_summary) = state.pending_tool_use_summary.as_deref() else {
+        return false;
+    };
+    if prior_summary.trim().is_empty() {
+        return false;
+    }
+    !report.records.is_empty() && report.records.iter().all(is_empty_discovery_record)
+}
+
+fn is_empty_discovery_record(record: &ToolExecutionRecord) -> bool {
+    if !is_broad_discovery_tool(&record.tool_name) {
+        return false;
+    }
+    let summary = record.summary.to_ascii_lowercase();
+    let detail = record.detail.as_deref().unwrap_or_default().trim();
+    detail.is_empty()
+        || summary.contains("(0 chars)")
+        || summary.contains("found no matches")
+        || summary.contains("returned no matches")
+}
+
+fn truncated_read_continuation_hint(prior_summary: Option<&str>) -> Option<String> {
+    let summary = prior_summary?.trim();
+    let path = extract_truncation_field(summary, "path=")?;
+    let offset = extract_truncation_field(summary, "offset=")?
+        .parse::<usize>()
+        .ok()?;
+    let returned_chars = extract_truncation_field(summary, "returned_chars=")?
+        .parse::<usize>()
+        .ok()?;
+    let total_chars = extract_truncation_field(summary, "total_chars=")?
+        .parse::<usize>()
+        .ok()?;
+    let next_offset = offset.saturating_add(returned_chars);
+    if next_offset >= total_chars {
+        return None;
+    }
+    let next_limit = (total_chars - next_offset).min(5_000);
+    Some(format!(
+        "continue the same Read with file_path={path}, offset={next_offset}, limit={next_limit}."
+    ))
+}
+
+fn extract_truncation_field<'a>(value: &'a str, key: &str) -> Option<&'a str> {
+    let start = value.find(key)? + key.len();
+    let tail = &value[start..];
+    let end = tail.find([',', ']']).unwrap_or(tail.len());
+    let field = tail[..end].trim().trim_matches('.');
+    (!field.is_empty()).then_some(field)
 }
 
 fn should_lock_prompt_only_discovery(state: &LoopState, report: &ToolExecutionReport) -> bool {
@@ -1767,7 +1837,10 @@ fn record_detail_or_summary(record: &ToolExecutionRecord) -> String {
 fn report_detail_or_summary(report: &ToolExecutionReport) -> String {
     report
         .detail
-        .clone()
+        .as_deref()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(ToString::to_string)
         .unwrap_or_else(|| report.summary.clone())
 }
 
@@ -2405,6 +2478,74 @@ mod tests {
         };
 
         assert!(!should_discourage_repeated_discovery_search(&report));
+    }
+
+    #[test]
+    fn repeated_empty_discovery_after_prior_truncated_read_adds_directed_read_recovery() {
+        let mut state = LoopState::new(&QueryParams::default());
+        state.pending_tool_use_summary = Some(
+            "Read succeeded\n[Read truncated: path=/tmp/ui.md, offset=0, returned_chars=3000, total_chars=3477. Use Read with offset=3000 and limit<=5000 to continue.]".into(),
+        );
+        let report = ToolExecutionReport {
+            records: vec![
+                ToolExecutionRecord {
+                    tool_name: "Glob".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Glob succeeded (0 chars)".into(),
+                    detail: Some(String::new()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 0,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+                ToolExecutionRecord {
+                    tool_name: "Grep".into(),
+                    outcome: "success".into(),
+                    kind: ToolExecutionOutcomeKind::Success,
+                    summary: "Grep found no matches".into(),
+                    detail: Some(String::new()),
+                    pending_approval: None,
+                    report_modifier: ToolReportModifier::None,
+                    observable_input: None,
+                    batch_context: ToolBatchContext {
+                        batch_index: 1,
+                        batch_size: 2,
+                        executed_in_batch: true,
+                    },
+                },
+            ],
+            summary: "Glob succeeded (0 chars); Grep found no matches".into(),
+            detail: Some("\n".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        let follow_up = batch_follow_up_message(&state, &report);
+
+        assert!(follow_up.contains("tool batch result:\nGlob succeeded (0 chars); Grep found no matches"));
+        assert!(follow_up.contains("Do not call Glob/Grep/ToolSearch again"));
+        assert!(follow_up.contains("file_path=/tmp/ui.md, offset=3000, limit=477"));
+    }
+
+    #[test]
+    fn report_detail_or_summary_falls_back_to_summary_when_detail_is_blank() {
+        let report = ToolExecutionReport {
+            records: Vec::new(),
+            summary: "Glob succeeded (0 chars); Grep found no matches".into(),
+            detail: Some("\n".into()),
+            report_modifier: ToolReportModifier::None,
+            context_modifier: ToolReportContextModifier::None,
+        };
+
+        assert_eq!(
+            report_detail_or_summary(&report),
+            "Glob succeeded (0 chars); Grep found no matches"
+        );
     }
 
     #[test]
