@@ -447,8 +447,9 @@ fn normalize_task_profile(raw: &str) -> Option<&'static str> {
         "target_verification" | "target verification" | "verification" => {
             Some("target_verification")
         }
-        "code_change" | "code change" | "implementation" | "implement" | "development"
-        | "dev" => Some("code_change"),
+        "code_change" | "code change" | "implementation" | "implement" | "development" | "dev" => {
+            Some("code_change")
+        }
         _ => None,
     }
 }
@@ -521,10 +522,7 @@ fn normalize_state_patch(
         .or_else(|| root.get("review_mode"));
     let task_profile = patch
         .and_then(|m| m.get("task_profile").or_else(|| m.get("task_type")))
-        .or_else(|| {
-            root.get("task_profile")
-                .or_else(|| root.get("task_type"))
-        });
+        .or_else(|| root.get("task_profile").or_else(|| root.get("task_type")));
     let requires_source_evidence = patch
         .and_then(|m| {
             m.get("requires_source_evidence")

@@ -2714,10 +2714,12 @@ fn build_stage_execution_contract(
     required_actions.sort();
     required_actions.dedup();
     let mut required_evidence = step.stage_execution_contract.required_evidence.clone();
-    required_evidence.extend(target_artifacts
-        .iter()
-        .map(|artifact| artifact.path.clone())
-        .collect::<Vec<_>>());
+    required_evidence.extend(
+        target_artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<Vec<_>>(),
+    );
     required_evidence.extend(
         verifications
             .iter()
@@ -2737,7 +2739,10 @@ fn build_stage_execution_contract(
         declared_artifacts,
         verifications,
         tests,
-        content_evidence_targets: step.stage_execution_contract.content_evidence_targets.clone(),
+        content_evidence_targets: step
+            .stage_execution_contract
+            .content_evidence_targets
+            .clone(),
         required_actions,
         required_evidence,
     }
@@ -9737,17 +9742,15 @@ impl BossCoordinator {
                 }
                 contract
             };
-        let content_evidence_targets = if effective_stage_execution_contract
-            .requires_source_evidence
-            == Some(false)
-        {
-            Vec::new()
-        } else {
-            collect_content_evidence_targets(
-                &relevant_file_handles,
-                &effective_stage_execution_contract,
-            )
-        };
+        let content_evidence_targets =
+            if effective_stage_execution_contract.requires_source_evidence == Some(false) {
+                Vec::new()
+            } else {
+                collect_content_evidence_targets(
+                    &relevant_file_handles,
+                    &effective_stage_execution_contract,
+                )
+            };
         let mut content_evidence_targets = content_evidence_targets;
         if content_evidence_targets.is_empty() && source_evidence_repair {
             for target in verification_gap_required_targets(step, routed_metadata.as_ref()) {

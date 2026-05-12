@@ -14,7 +14,7 @@ use crate::core::state_frame_hydration::{
     HydrationSummary, NeededContextSelector, hydrate_needed_context, parse_needed_context_selector,
 };
 use crate::service::api::client::ModelProviderClient;
-use crate::service::api::streaming::StreamEvent;
+use crate::service::api::streaming::{StopReason, StreamEvent};
 use crate::state::permission_context::ToolPermissionContext;
 use crate::tool::definition::ObservableInput;
 use crate::tool::definition::{ToolCall, ToolResult};
@@ -149,11 +149,14 @@ struct ArtifactRepairTurn {
     write_target_file: bool,
 }
 
-/// Collect text and token usage from a stream of events.
-fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage, Option<String>) {
+/// Collect text, token usage, and terminal provider state from a stream of events.
+fn collect_text_and_usage(
+    events: Vec<StreamEvent>,
+) -> (String, LoopUsage, Option<String>, Option<StopReason>) {
     let mut text = String::new();
     let mut usage = LoopUsage::default();
     let mut error_reason = None;
+    let mut stop_reason = None;
     for event in events {
         match event {
             StreamEvent::TextDelta(t) => text.push_str(&t),
@@ -173,10 +176,13 @@ fn collect_text_and_usage(events: Vec<StreamEvent>) -> (String, LoopUsage, Optio
                     ));
                 }
             }
+            StreamEvent::MessageStop { stop_reason: stop } => {
+                stop_reason = Some(stop);
+            }
             _ => {}
         }
     }
-    (text, usage, error_reason)
+    (text, usage, error_reason, stop_reason)
 }
 
 const STATE_DECISION_INSTRUCTION: &str = "\
@@ -255,7 +261,8 @@ fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
          Canonical decision values: continue, request_context, call_tool, handoff, accept, reject, done.\n\
          If `decision` is `call_tool`, `next_action` MUST be an object of the form `{{\"action_type\":\"Read\",\"args\":{{\"file_path\":\"path/to/file.rs\"}}}}`.\n\
          Never return string-valued `next_action` like `\"invoke_parsing_tool\"`.\n\
-         If the previous output was truncated or too long, do not emit giant inline `Bash.command` payloads, heredocs, or embedded file bodies; prefer `Write` with structured args or a short `Read`/`Edit`/`Bash` call.\n\
+         If the previous output was truncated or too long, do not emit giant inline `Bash.command` payloads, heredocs, or embedded file bodies. Return a short executable next step: either a small `Write` with content under 2500 characters, a narrow `Edit`, or a short `Bash` command that calls an existing script/file.\n\
+         Never repair a truncated tool-writing response with a bare `request_context`; if no external context is missing, use `call_tool` or `continue` with a concrete state_patch.\n\
          Alias mapping you must normalize before responding: executed -> executing, completed -> done, success -> done.\n\
          Do not return explanations, wrappers, validation prose, or keys outside the canonical schema.\n\
          Please respond with canonical StateDecision JSON only."
@@ -330,7 +337,8 @@ fn append_runtime_contract_facts(frame: &mut StateFrame) {
             );
         }
     }
-    if let Some(requires_source_evidence) = frame.stage_execution_contract.requires_source_evidence {
+    if let Some(requires_source_evidence) = frame.stage_execution_contract.requires_source_evidence
+    {
         push_unique(
             &mut frame.recent_evidence,
             format!(
@@ -1564,6 +1572,30 @@ fn independent_review_has_runtime_success(usage: &LoopUsage) -> bool {
         .any(|record| record.kind == ToolExecutionOutcomeKind::Success)
 }
 
+fn independent_review_runtime_success_satisfies(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    if !completion_contract_requirement(frame, "verification_evidence") {
+        return independent_review_has_runtime_success(usage);
+    }
+
+    let target_paths = declared_target_paths(frame);
+    if target_paths.is_empty() {
+        return false;
+    }
+    usage.tool_execution_records.iter().any(|record| {
+        record.kind == ToolExecutionOutcomeKind::Success
+            && observable_path_from_input(record.observable_input.as_ref())
+                .as_deref()
+                .is_some_and(|path| path_matches_target_scope(path, &target_paths))
+    })
+}
+
+fn independent_review_terminal_context_active(frame: &StateFrame) -> bool {
+    matches!(
+        frame.state,
+        AgentState::Reviewing | AgentState::Verifying | AgentState::Done
+    )
+}
+
 fn independent_review_can_close_with_refs(
     frame: &StateFrame,
     usage: &LoopUsage,
@@ -1598,7 +1630,7 @@ fn independent_review_can_close_with_refs(
         || verification_read_anchor_closed(frame, evidence_refs)
         || verification_runtime_read_anchor_closed(frame, usage)
         || completion_gate_required_reads_closed(frame, usage)
-        || independent_review_has_runtime_success(usage)
+        || independent_review_runtime_success_satisfies(frame, usage)
 }
 
 fn independent_review_can_close(frame: &StateFrame, usage: &LoopUsage) -> bool {
@@ -2269,7 +2301,8 @@ fn independent_review_terminal_outcome(
     usage: &mut LoopUsage,
 ) -> Option<LoopOutcome> {
     if !independent_review_enabled(frame)
-        || !independent_review_has_runtime_success(usage)
+        || !independent_review_terminal_context_active(frame)
+        || !independent_review_runtime_success_satisfies(frame, usage)
         || runtime_open_items_pending(frame)
     {
         return None;
@@ -2628,6 +2661,20 @@ fn inject_request_context_recovery_gate(frame: &mut StateFrame, usage: &mut Loop
         return false;
     }
 
+    let missing_artifact_refs = missing_artifact_evidence_refs(frame);
+    if !missing_artifact_refs.is_empty() {
+        let block = CompletionGateBlock {
+            status: CompletionEvidenceStatus::MissingArtifactEvidence,
+            required_action: "write_artifact".into(),
+            reason: "artifact evidence missing requires creating or writing the declared target"
+                .into(),
+            missing_evidence_refs: missing_artifact_refs,
+        };
+        inject_completion_gate_block(frame, &block);
+        record_completion_gate_recovery(frame, usage, &block);
+        return true;
+    }
+
     let verification_gap = matches!(
         usage.completion_evidence_status,
         Some(CompletionEvidenceStatus::MissingVerificationEvidence)
@@ -2952,6 +2999,36 @@ fn fallback_reason_label(tier: FallbackTier, requested: &[String], escalate: boo
     format!("{base}:{}", fallback_requested_summary(requested))
 }
 
+fn count_decision_feedback(frame: &StateFrame, category: &str) -> usize {
+    let prefix = format!("decision_feedback: category={category} ");
+    frame
+        .recent_evidence
+        .iter()
+        .filter(|line| line.starts_with(&prefix))
+        .count()
+}
+
+fn push_decision_feedback(
+    frame: &mut StateFrame,
+    category: &str,
+    recoverable: bool,
+    recommended_next_action: &str,
+    summary: &str,
+) -> bool {
+    let seq = count_decision_feedback(frame, category) + 1;
+    push_unique(
+        &mut frame.recent_evidence,
+        format!(
+            "decision_feedback: category={} recoverable={} recommended_next_action={} seq={} summary={}",
+            category,
+            recoverable,
+            recommended_next_action,
+            seq,
+            compact_tool_excerpt(summary, 260)
+        ),
+    )
+}
+
 fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     let mut changed = false;
     for item in &patch.open_items_add {
@@ -3044,7 +3121,8 @@ fn apply_state_patch(frame: &mut StateFrame, patch: &StatePatch) -> bool {
     if let Some(requires_source_evidence) = patch.requires_source_evidence {
         if frame.stage_execution_contract.requires_source_evidence != Some(requires_source_evidence)
         {
-            frame.stage_execution_contract.requires_source_evidence = Some(requires_source_evidence);
+            frame.stage_execution_contract.requires_source_evidence =
+                Some(requires_source_evidence);
             frame
                 .recent_evidence
                 .retain(|line| !line.starts_with("fact: requires_source_evidence "));
@@ -3083,6 +3161,20 @@ fn primary_declared_target_path(frame: &StateFrame) -> Option<&str> {
 
 fn has_explicit_implementation_target(frame: &StateFrame) -> bool {
     primary_declared_target_path(frame).is_some()
+}
+
+const MAX_INLINE_WRITE_CONTENT_CHARS: usize = 2500;
+
+fn parse_write_content(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
+    let next_action = decision.next_action.as_ref()?;
+    if !next_action.action_type.eq_ignore_ascii_case("Write") {
+        return None;
+    }
+    next_action
+        .args
+        .get("content")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
 }
 
 fn validate_decision_for_frame(
@@ -3131,6 +3223,19 @@ fn validate_decision_for_frame(
                     reason: "Edit requires exact non-empty old_string; if you do not yet know the replacement span, request Read first".into(),
                     raw_json: String::new(),
                 });
+            }
+            if next_action.action_type.eq_ignore_ascii_case("Write") {
+                if let Some(content) = parse_write_content(decision) {
+                    let content_chars = content.chars().count();
+                    if content_chars > MAX_INLINE_WRITE_CONTENT_CHARS {
+                        return Err(RepairNeeded {
+                            reason: format!(
+                                "Write.content is too large for StateDecision output: {content_chars} chars > {MAX_INLINE_WRITE_CONTENT_CHARS}; return a smaller executable step, split the artifact across turns, or use a short Bash command that calls an existing file/script"
+                            ),
+                            raw_json: String::new(),
+                        });
+                    }
+                }
             }
         }
         return Ok(());
@@ -4084,27 +4189,55 @@ pub async fn run_decision_loop_with_tools(
         total_usage.original_prompt_chars += prompt_chars;
         total_usage.sent_prompt_chars += prompt_chars;
         let events = client.stream_message(&Message::user(prompt)).await;
-        let (text, iter_usage, stream_error) = collect_text_and_usage(events);
+        let (text, iter_usage, stream_error, stop_reason) = collect_text_and_usage(events);
         total_usage.input_tokens += iter_usage.input_tokens;
         total_usage.uncached_input_tokens += iter_usage.uncached_input_tokens;
         total_usage.output_tokens += iter_usage.output_tokens;
         total_usage.cache_read_tokens += iter_usage.cache_read_tokens;
         total_usage.cache_write_tokens += iter_usage.cache_write_tokens;
+        if matches!(stop_reason, Some(StopReason::MaxTokens)) {
+            push_decision_feedback(
+                &mut frame,
+                "model_output_truncated",
+                true,
+                "retry_with_smaller_call_tool_or_continue_patch",
+                "provider stopped with max_tokens; previous model output may be truncated",
+            );
+        }
         if let Some(reason) = stream_error {
             if text.trim().is_empty() {
-                finalize_worker_usage_report(&frame, &mut total_usage);
-                return Ok(LoopOutcome::ToolDispatchFailed {
-                    last_state: frame.state,
-                    reason,
-                    usage: total_usage,
-                });
+                if count_decision_feedback(&frame, "provider_stream_error") >= 2 {
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::ToolDispatchFailed {
+                        last_state: frame.state,
+                        reason,
+                        usage: total_usage,
+                    });
+                }
+                push_decision_feedback(
+                    &mut frame,
+                    "provider_stream_error",
+                    true,
+                    "retry_with_shorter_state_decision",
+                    &reason,
+                );
+                total_usage.recovery_attempted = true;
+                total_usage.recovery_tier = Some("decision_feedback".into());
+                total_usage.recovery_outcome = Some("feedback_injected".into());
+                continue;
             }
         }
 
         // Repair loop: retry on JSON parse failure.
         let decision = match parse_and_validate_decision(&frame, &text) {
             Ok(d) => d,
-            Err(first_repair) => {
+            Err(mut first_repair) => {
+                if matches!(stop_reason, Some(StopReason::MaxTokens)) {
+                    first_repair.reason = format!(
+                        "{}; provider_stop_reason=max_tokens; output was truncated",
+                        first_repair.reason
+                    );
+                }
                 let mut last_repair = first_repair;
                 let mut resolved = None;
                 for _attempt in 0..config.repair_budget {
@@ -4116,21 +4249,43 @@ pub async fn run_decision_loop_with_tools(
                     total_usage.original_prompt_chars += repair_prompt_chars;
                     total_usage.sent_prompt_chars += repair_prompt_chars;
                     let repair_events = client.stream_message(&Message::user(repair_prompt)).await;
-                    let (repaired_text, repair_usage, repair_error) =
+                    let (repaired_text, repair_usage, repair_error, repair_stop_reason) =
                         collect_text_and_usage(repair_events);
                     total_usage.input_tokens += repair_usage.input_tokens;
                     total_usage.uncached_input_tokens += repair_usage.uncached_input_tokens;
                     total_usage.output_tokens += repair_usage.output_tokens;
                     total_usage.cache_read_tokens += repair_usage.cache_read_tokens;
                     total_usage.cache_write_tokens += repair_usage.cache_write_tokens;
+                    if matches!(repair_stop_reason, Some(StopReason::MaxTokens)) {
+                        push_decision_feedback(
+                            &mut frame,
+                            "model_output_truncated",
+                            true,
+                            "retry_with_smaller_call_tool_or_continue_patch",
+                            "repair response also stopped with max_tokens; use a shorter canonical StateDecision",
+                        );
+                    }
                     if let Some(reason) = repair_error {
                         if repaired_text.trim().is_empty() {
-                            finalize_worker_usage_report(&frame, &mut total_usage);
-                            return Ok(LoopOutcome::ToolDispatchFailed {
-                                last_state: frame.state,
-                                reason,
-                                usage: total_usage,
-                            });
+                            if count_decision_feedback(&frame, "provider_stream_error") >= 2 {
+                                finalize_worker_usage_report(&frame, &mut total_usage);
+                                return Ok(LoopOutcome::ToolDispatchFailed {
+                                    last_state: frame.state,
+                                    reason,
+                                    usage: total_usage,
+                                });
+                            }
+                            push_decision_feedback(
+                                &mut frame,
+                                "provider_stream_error",
+                                true,
+                                "retry_with_shorter_state_decision",
+                                &reason,
+                            );
+                            total_usage.recovery_attempted = true;
+                            total_usage.recovery_tier = Some("decision_feedback".into());
+                            total_usage.recovery_outcome = Some("feedback_injected".into());
+                            continue;
                         }
                     }
                     match parse_and_validate_decision(&frame, &repaired_text) {
@@ -4138,12 +4293,38 @@ pub async fn run_decision_loop_with_tools(
                             resolved = Some(d);
                             break;
                         }
-                        Err(r) => last_repair = r,
+                        Err(mut r) => {
+                            if matches!(repair_stop_reason, Some(StopReason::MaxTokens)) {
+                                r.reason = format!(
+                                    "{}; provider_stop_reason=max_tokens; repair output was truncated",
+                                    r.reason
+                                );
+                            }
+                            last_repair = r;
+                        }
                     }
                 }
                 match resolved {
                     Some(d) => d,
                     None => {
+                        if count_decision_feedback(&frame, "state_decision_repair_failed") < 2 {
+                            push_decision_feedback(
+                                &mut frame,
+                                "state_decision_repair_failed",
+                                true,
+                                "return_short_canonical_state_decision",
+                                &format!(
+                                    "{}; raw_excerpt={}",
+                                    last_repair.reason,
+                                    compact_tool_excerpt(&last_repair.raw_json, 160)
+                                ),
+                            );
+                            total_usage.recovery_attempted = true;
+                            total_usage.recovery_tier = Some("decision_feedback".into());
+                            total_usage.recovery_outcome = Some("feedback_injected".into());
+                            frame.state = AgentState::Correcting;
+                            continue;
+                        }
                         finalize_worker_usage_report(&frame, &mut total_usage);
                         return Ok(LoopOutcome::RepairExhausted {
                             raw_json: last_repair.raw_json,
@@ -4390,6 +4571,24 @@ pub async fn run_decision_loop_with_tools(
                     if inject_request_context_recovery_gate(&mut frame, &mut total_usage) {
                         continue;
                     }
+                    if count_decision_feedback(&frame, "request_context_no_hydration_progress") < 2
+                    {
+                        push_decision_feedback(
+                            &mut frame,
+                            "request_context_no_hydration_progress",
+                            true,
+                            "use_allowed_call_tool_or_continue_with_state_patch",
+                            &format!(
+                                "needed_context={} produced no new hydrated context",
+                                fallback_requested_summary(&decision.needed_context)
+                            ),
+                        );
+                        total_usage.recovery_attempted = true;
+                        total_usage.recovery_tier = Some("decision_feedback".into());
+                        total_usage.recovery_outcome = Some("feedback_injected".into());
+                        frame.state = AgentState::Correcting;
+                        continue;
+                    }
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {
                         last_state: frame.state,
@@ -4410,6 +4609,20 @@ pub async fn run_decision_loop_with_tools(
                     return Ok(outcome);
                 }
                 if let Some(reason) = repeated_recovery_strategy_reason(&total_usage, &decision) {
+                    if count_decision_feedback(&frame, "same_invalid_strategy") < 2 {
+                        push_decision_feedback(
+                            &mut frame,
+                            "same_invalid_strategy",
+                            true,
+                            "change_tool_args_or_choose_next_recovery_action",
+                            &reason,
+                        );
+                        total_usage.recovery_attempted = true;
+                        total_usage.recovery_tier = Some("decision_feedback".into());
+                        total_usage.recovery_outcome = Some("feedback_injected".into());
+                        frame.state = AgentState::Correcting;
+                        continue;
+                    }
                     push_unique(
                         &mut frame.recent_evidence,
                         format!(
@@ -4469,6 +4682,7 @@ pub async fn run_decision_loop_with_tools(
                     Ok((changed, record, ref_write_count)) => {
                         total_usage.tool_dispatch_success_count += 1;
                         total_usage.tool_dispatch_ref_write_count += ref_write_count;
+                        let tool_name = record.tool_name.clone();
                         total_usage.last_effective_tool_action = Some(record.tool_name.clone());
                         total_usage.last_failure_outcome = None;
                         clear_recovery_after_success(&mut total_usage);
@@ -4489,6 +4703,23 @@ pub async fn run_decision_loop_with_tools(
                             return Ok(outcome);
                         }
                         if !changed {
+                            if count_decision_feedback(&frame, "call_tool_no_state_progress") < 2 {
+                                push_decision_feedback(
+                                    &mut frame,
+                                    "call_tool_no_state_progress",
+                                    true,
+                                    "return_continue_with_state_patch_or_use_different_tool_action",
+                                    &format!(
+                                        "tool={} succeeded but produced no new StateFrame evidence",
+                                        tool_name
+                                    ),
+                                );
+                                total_usage.recovery_attempted = true;
+                                total_usage.recovery_tier = Some("decision_feedback".into());
+                                total_usage.recovery_outcome = Some("feedback_injected".into());
+                                frame.state = AgentState::Correcting;
+                                continue;
+                            }
                             finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::NoProgress {
                                 last_state: frame.state,
@@ -4523,6 +4754,25 @@ pub async fn run_decision_loop_with_tools(
                         );
                         total_usage.tool_execution_records.push(error.record);
                         if !changed {
+                            if count_decision_feedback(&frame, "call_tool_failure_feedback_repeat")
+                                < 2
+                            {
+                                push_decision_feedback(
+                                    &mut frame,
+                                    "call_tool_failure_feedback_repeat",
+                                    true,
+                                    "read_tool_feedback_and_change_tool_args",
+                                    &format!(
+                                        "tool dispatch failed but feedback was already present: {}",
+                                        error.reason
+                                    ),
+                                );
+                                total_usage.recovery_attempted = true;
+                                total_usage.recovery_tier = Some("decision_feedback".into());
+                                total_usage.recovery_outcome = Some("feedback_injected".into());
+                                frame.state = AgentState::Correcting;
+                                continue;
+                            }
                             finalize_worker_usage_report(&frame, &mut total_usage);
                             return Ok(LoopOutcome::NoProgress {
                                 last_state: frame.state,
@@ -4573,12 +4823,12 @@ pub async fn run_decision_loop_with_tools(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionLoopConfig, LoopOutcome, LoopUsage, RecoveryAttempt, StateFrameToolRuntime,
-        append_runtime_contract_facts, apply_state_patch, build_state_decision_repair_prompt,
-        classify_tool_outcome, evaluate_completion_evidence, execute_call_tool,
-        missing_test_evidence_refs, parse_and_validate_decision, push_tool_failure_feedback,
-        push_tool_outcome_evidence, run_decision_loop, run_decision_loop_with_tools,
-        tool_backed_hydration_path,
+        DecisionLoopConfig, LoopOutcome, LoopUsage, MAX_INLINE_WRITE_CONTENT_CHARS,
+        RecoveryAttempt, StateFrameToolRuntime, append_runtime_contract_facts, apply_state_patch,
+        build_state_decision_repair_prompt, classify_tool_outcome, collect_text_and_usage,
+        evaluate_completion_evidence, execute_call_tool, missing_test_evidence_refs,
+        parse_and_validate_decision, push_tool_failure_feedback, push_tool_outcome_evidence,
+        run_decision_loop, run_decision_loop_with_tools, tool_backed_hydration_path,
     };
     use crate::core::state_frame::validate_state_decision;
     use crate::core::state_frame::{
@@ -4588,7 +4838,9 @@ mod tests {
     };
     use crate::core::state_frame_hydration::hydrate_needed_context;
     use crate::service::api::client::ModelProviderClient;
-    use crate::service::api::streaming::{ProviderFailureDisposition, StreamError, StreamEvent};
+    use crate::service::api::streaming::{
+        ProviderFailureDisposition, StopReason, StreamError, StreamEvent,
+    };
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use crate::tool::builtin::bash::BashTool;
     use crate::tool::builtin::file_edit::FileEditTool;
@@ -4627,6 +4879,112 @@ mod tests {
         assert!(prompt.contains("`next_action` MUST be an object"));
         assert!(prompt.contains("Never return string-valued `next_action`"));
         assert!(prompt.contains("giant inline `Bash.command` payloads"));
+        assert!(prompt.contains("content under 2500 characters"));
+        assert!(prompt.contains(
+            "Never repair a truncated tool-writing response with a bare `request_context`"
+        ));
+    }
+
+    #[test]
+    fn collect_text_and_usage_preserves_max_tokens_stop_reason() {
+        let (text, usage, error, stop_reason) = collect_text_and_usage(vec![
+            StreamEvent::TextDelta("partial".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::MaxTokens,
+            },
+        ]);
+
+        assert_eq!(text, "partial");
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(error, None);
+        assert_eq!(stop_reason, Some(StopReason::MaxTokens));
+    }
+
+    #[test]
+    fn oversized_inline_write_content_is_rejected_for_repair() {
+        let mut frame = make_clean_frame();
+        frame.allowed_tools.push("Write".into());
+        let content = "x".repeat(MAX_INLINE_WRITE_CONTENT_CHARS + 1);
+        let decision_json = format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Write","args":{{"file_path":"/tmp/large.py","content":"{}"}}}}}}"#,
+            content
+        );
+
+        let err = parse_and_validate_decision(&frame, &decision_json)
+            .expect_err("oversized inline Write should be rejected");
+        assert!(err.reason.contains("Write.content is too large"));
+        assert!(err.reason.contains("use a short Bash command"));
+    }
+
+    #[test]
+    fn max_token_parse_repair_exhaustion_returns_feedback_then_recovers() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let malformed = "{\"state\":\"executing\",\"decision\":\"call_tool\",\"next_action\":{\"action_type\":\"Write\",\"args\":{\"file_path\":\"/tmp/validator.py\",\"content\":\"# truncated";
+        let still_malformed = r#"{"state":"executing","decision":"call_tool""#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![
+                StreamEvent::TextDelta(malformed.into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::MaxTokens,
+                },
+            ],
+            vec![StreamEvent::TextDelta(still_malformed.into())],
+            vec![StreamEvent::TextDelta(still_malformed.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_clean_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    repair_budget: 2,
+                },
+            ))
+            .expect("loop should not error");
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert!(usage.recovery_attempted);
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("feedback_injected"));
+            }
+            other => panic!("expected Done after decision feedback recovery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_context_no_hydration_progress_returns_feedback_then_recovers() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request_json =
+            r#"{"state":"executing","decision":"request_context","needed_context":[]}"#;
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(request_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                make_clean_frame(),
+                DecisionLoopConfig {
+                    max_iterations: 3,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should not error");
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.hydration_ref_missing, 0);
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("feedback_injected"));
+            }
+            other => panic!("expected Done after request_context feedback recovery, got {other:?}"),
+        }
     }
 
     #[async_trait::async_trait]
@@ -4796,7 +5154,10 @@ mod tests {
             frame.stage_execution_contract.task_profile,
             Some(TaskProfile::CodeChange)
         );
-        assert_eq!(frame.stage_execution_contract.requires_source_evidence, Some(false));
+        assert_eq!(
+            frame.stage_execution_contract.requires_source_evidence,
+            Some(false)
+        );
         assert!(
             frame
                 .recent_evidence
@@ -4837,9 +5198,12 @@ mod tests {
             frame.runtime_open_items,
             vec!["Run the validator script and capture the summary.".to_string()]
         );
-        assert!(frame.open_items.iter().any(|item| {
-            item == "Run the validator script and capture the summary."
-        }));
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| { item == "Run the validator script and capture the summary." })
+        );
 
         let changed = apply_state_patch(
             &mut frame,
@@ -4851,9 +5215,12 @@ mod tests {
 
         assert!(changed);
         assert!(frame.runtime_open_items.is_empty());
-        assert!(!frame.open_items.iter().any(|item| {
-            item == "Run the validator script and capture the summary."
-        }));
+        assert!(
+            !frame
+                .open_items
+                .iter()
+                .any(|item| { item == "Run the validator script and capture the summary." })
+        );
     }
 
     #[test]
@@ -4861,6 +5228,7 @@ mod tests {
         let mut frame = make_clean_frame();
         frame.open_items.clear();
         frame.recent_evidence.clear();
+        frame.state = AgentState::Verifying;
         frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
         frame.runtime_open_items = vec!["Run the validator script and capture the summary.".into()];
 
@@ -5534,14 +5902,17 @@ mod tests {
             r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Bash","args":{{"command":"cat > \"{}\" <<'HTML'\n<!doctype html><title>RustAgent</title>\nHTML\n"}}}}}}"#,
             index_path.display()
         );
-        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let done_json = format!(
+            r#"{{"state":"done","decision":"done","state_patch":{{"open_items_remove":["create static site files in {}"]}}}}"#,
+            temp_dir.display()
+        );
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(read_dir_json.clone().into())],
             vec![StreamEvent::TextDelta(mkdir_json.into())],
             vec![StreamEvent::TextDelta(read_dir_json.into())],
             vec![StreamEvent::TextDelta(planning_json.into())],
             vec![StreamEvent::TextDelta(write_json.into())],
-            vec![StreamEvent::TextDelta(done_json.into())],
+            vec![StreamEvent::TextDelta(done_json)],
         ]);
         let registry = ToolRegistry::new()
             .register(Arc::new(BashTool))
@@ -6042,11 +6413,8 @@ mod tests {
             .expect("loop should not error");
         match outcome {
             LoopOutcome::RepairExhausted { usage, .. } => {
-                assert_eq!(usage.recovery_tier.as_deref(), Some("artifact_repair_turn"));
-                assert_eq!(
-                    usage.recovery_outcome.as_deref(),
-                    Some("repair_turn_injected")
-                );
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("feedback_injected"));
                 let report = usage.worker_report.expect("worker report");
                 assert!(
                     report
@@ -6090,14 +6458,8 @@ mod tests {
                         .map(|s| s.as_str()),
                     Some("missing_verification_evidence")
                 );
-                assert_eq!(
-                    usage.recovery_tier.as_deref(),
-                    Some("verification_repair_continuation")
-                );
-                assert_eq!(
-                    usage.recovery_outcome.as_deref(),
-                    Some("repair_turn_injected")
-                );
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("feedback_injected"));
             }
             other => panic!("expected RepairExhausted, got {other:?}"),
         }
@@ -8857,6 +9219,8 @@ mod tests {
         );
         let client = ModelProviderClient::with_scripted_turns(vec![
             vec![StreamEvent::TextDelta(edit_json.clone())],
+            vec![StreamEvent::TextDelta(edit_json.clone())],
+            vec![StreamEvent::TextDelta(edit_json.clone())],
             vec![StreamEvent::TextDelta(edit_json)],
         ]);
         let mut frame = make_frame();
@@ -8876,7 +9240,7 @@ mod tests {
                 &client,
                 frame,
                 DecisionLoopConfig {
-                    max_iterations: 2,
+                    max_iterations: 4,
                     ..DecisionLoopConfig::default()
                 },
                 Some(tool_runtime),
@@ -9008,15 +9372,18 @@ mod tests {
     #[test]
     fn provider_stream_error_is_reported_instead_of_json_eof() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let client =
-            ModelProviderClient::with_scripted_turns(vec![vec![StreamEvent::Error(StreamError {
+        let done_json = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::Error(StreamError {
                 provider_id: "openai".into(),
                 kind: "empty_response_body".into(),
                 message: "provider returned empty response body".into(),
                 retryable: false,
                 disposition: ProviderFailureDisposition::PreStreamTerminal,
                 status_code: None,
-            })]]);
+            })],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
         let outcome = rt
             .block_on(run_decision_loop(
                 &client,
@@ -9025,11 +9392,12 @@ mod tests {
             ))
             .expect("loop should not error");
         match outcome {
-            LoopOutcome::ToolDispatchFailed { reason, .. } => {
-                assert!(reason.contains("provider_error"));
-                assert!(reason.contains("empty response body"));
+            LoopOutcome::Done { usage, .. } => {
+                assert!(usage.recovery_attempted);
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert_eq!(usage.recovery_outcome.as_deref(), Some("feedback_injected"));
             }
-            other => panic!("expected ToolDispatchFailed, got {other:?}"),
+            other => panic!("expected Done after provider feedback recovery, got {other:?}"),
         }
     }
 }

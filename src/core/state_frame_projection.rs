@@ -561,10 +561,8 @@ fn build_stage_execution_contract(
     let task_profile = step
         .and_then(|step| step.stage_execution_contract.task_profile)
         .or(readonly_analysis.then_some(TaskProfile::ReadOnlyAnalysis));
-    let requires_source_evidence = step.and_then(|step| {
-        step.stage_execution_contract
-            .requires_source_evidence
-    });
+    let requires_source_evidence =
+        step.and_then(|step| step.stage_execution_contract.requires_source_evidence);
     let derived_verifications = || {
         artifact_ledgers
             .iter()
