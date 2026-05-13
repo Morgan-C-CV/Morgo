@@ -9,7 +9,8 @@ use base64::Engine as _;
 use clap::Parser;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind, poll, read,
+    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags, poll, read,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -271,7 +272,17 @@ struct TuiRawModeGuard;
 impl TuiRawModeGuard {
     fn activate() -> anyhow::Result<Self> {
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )?;
         enable_raw_mode()?;
         Ok(Self)
     }
@@ -281,7 +292,12 @@ impl Drop for TuiRawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -4182,6 +4198,8 @@ impl RuntimeBootstrap {
                             selection.dragging = false;
                             if !tui_has_selection(&rendered_content, &selection) {
                                 selection.clear();
+                            } else if tui_detect_xterm_js() {
+                                let _ = copy_selected_text(&rendered_content, &selection);
                             }
                         }
                         MouseEventKind::ScrollUp => {
