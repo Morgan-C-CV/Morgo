@@ -170,7 +170,11 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
             tool_name, content, ..
         } => {
             let mut lines = vec![format!("Tool: {tool_name}")];
-            lines.extend(content.lines().map(|line| line.to_string()));
+            if tool_name == "Bash" {
+                lines.extend(render_bash_result_lines(content));
+            } else {
+                lines.extend(content.lines().map(|line| line.to_string()));
+            }
             RenderBlock::Panel(render_panel(PanelKind::ToolResult, "Tool result", lines))
         }
         other => RenderBlock::RawRuntime(other.to_legacy_line()),
@@ -246,6 +250,21 @@ fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -
     lines.push(action.unwrap_or_else(|| "Action: approve or deny".into()));
 
     render_panel(PanelKind::Approval, "Approval required", lines)
+}
+
+fn render_bash_result_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(|line| {
+            if let Some(command) = line.strip_prefix("command:") {
+                format!("Command: {}", command.trim())
+            } else if let Some(exit_code) = line.strip_prefix("exit_code:") {
+                format!("Exit code: {}", exit_code.trim())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
 }
 
 fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -> RenderPanel {
