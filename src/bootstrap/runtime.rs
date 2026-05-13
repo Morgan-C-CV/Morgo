@@ -344,6 +344,60 @@ fn model_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugg
     }
 }
 
+fn model_use_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
+    if args.is_empty() || (args.len() == 1 && !trailing_space) {
+        let query = args.first().copied().unwrap_or("").to_ascii_lowercase();
+        let mut suggestions = model_level_suggestions();
+        if !query.is_empty() {
+            suggestions.retain(|suggestion| {
+                suggestion.label.to_ascii_lowercase().contains(&query)
+                    || suggestion.detail.to_ascii_lowercase().contains(&query)
+            });
+        }
+        return suggestions;
+    }
+
+    let selected_level = args[0];
+    let option_query = args.get(1).copied().unwrap_or("");
+    if option_query.is_empty() && trailing_space {
+        return Vec::new();
+    }
+
+    if option_query.starts_with('-') || "--workspace".starts_with(option_query) {
+        let replacement = format!("/model use {selected_level} --workspace");
+        return vec![heuristic_suggestion(
+            format!("{replacement} "),
+            "--workspace",
+            "Persist this level as the workspace default for future sessions",
+            "35",
+        )];
+    }
+
+    Vec::new()
+}
+
+fn model_clear_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
+    if args.is_empty() && !trailing_space {
+        return vec![heuristic_suggestion(
+            "/model clear --workspace ",
+            "--workspace",
+            "Clear the workspace default and fall back to registry active_level",
+            "35",
+        )];
+    }
+
+    if args.len() == 1 && !trailing_space && "--workspace".starts_with(args[0]) {
+        return vec![heuristic_suggestion(
+            "/model clear --workspace ",
+            "--workspace",
+            "Clear the workspace default and fall back to registry active_level",
+            "35",
+        )];
+    }
+
+    Vec::new()
+}
+
 fn permissions_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
         heuristic_suggestion("/permissions show ", "show", "Show mode, rules, and pending approval", "33"),
@@ -697,42 +751,6 @@ fn heuristic_suggestion(
     }
 }
 
-fn model_use_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
-    if args.is_empty() || (args.len() == 1 && !trailing_space) {
-        let query = args.first().copied().unwrap_or("").to_ascii_lowercase();
-        let mut suggestions = model_level_suggestions();
-        if !query.is_empty() {
-            suggestions.retain(|suggestion| {
-                suggestion.label.to_ascii_lowercase().contains(&query)
-                    || suggestion.detail.to_ascii_lowercase().contains(&query)
-            });
-        }
-        return suggestions;
-    }
-
-    let selected_level = args[0];
-    let replacement = format!("/model use {selected_level} --workspace");
-    vec![heuristic_suggestion(
-        format!("{replacement} "),
-        "--workspace",
-        "Persist this level as the workspace default for future sessions",
-        "35",
-    )]
-}
-
-fn model_clear_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
-    if args.is_empty() || (args.len() == 1 && !trailing_space) {
-        vec![heuristic_suggestion(
-            "/model clear --workspace ",
-            "--workspace",
-            "Clear the workspace default and fall back to registry active_level",
-            "35",
-        )]
-    } else {
-        Vec::new()
-    }
-}
-
 fn model_level_suggestions() -> Vec<TuiSuggestion> {
     let registry = load_tui_model_registry();
     [
@@ -743,16 +761,19 @@ fn model_level_suggestions() -> Vec<TuiSuggestion> {
     ]
     .into_iter()
     .map(|(level, accent_color)| {
-        let detail = registry
+        let combo_summary = registry
             .as_ref()
             .and_then(|registry| registry.levels.get(&level).map(|profile| (registry, profile)))
             .and_then(|(registry, profile_name)| registry.profiles.get(profile_name).map(|spec| (profile_name, spec)))
             .and_then(|(profile_name, spec)| {
                 crate::bootstrap::model_profiles::build_model_profile_display_view(profile_name, spec)
                     .ok()
-                    .map(|view| format!("{} {} via {}", view.model, level.as_str(), view.provider_id))
-            })
-            .unwrap_or_else(|| format!("{} reasoning tier", level.as_str()));
+                    .map(|view| format!("Mapped to {} via {}", view.model, view.provider_id))
+            });
+        let detail = match combo_summary {
+            Some(summary) => format!("{} · {}", model_level_combo_copy(level), summary),
+            None => model_level_combo_copy(level).to_string(),
+        };
         heuristic_suggestion(
             format!("/model use {} ", level.as_str()),
             level.as_str(),
@@ -761,6 +782,15 @@ fn model_level_suggestions() -> Vec<TuiSuggestion> {
         )
     })
     .collect()
+}
+
+fn model_level_combo_copy(level: ModelLevel) -> &'static str {
+    match level {
+        ModelLevel::Low => "Fastest and most cost-efficient. Best for quick questions, small edits, and rapid iteration.",
+        ModelLevel::Medium => "Balanced speed and quality. Best default for everyday coding, review, and analysis.",
+        ModelLevel::High => "Stronger reasoning with more consistency. Best for larger changes, debugging, and refactors.",
+        ModelLevel::Xhigh => "Maximum capability for the hardest work. Best for multi-step tasks, ambiguous problems, and deep investigations.",
+    }
 }
 
 fn load_tui_model_registry() -> Option<crate::bootstrap::model_profiles::ModelProfileRegistry> {
@@ -844,11 +874,13 @@ fn autocomplete_slash_command(
     suggestions: &[TuiSuggestion],
     selected_suggestion: usize,
 ) -> Option<String> {
-    if !is_single_token_slash_input(input) {
+    if !input.starts_with('/') {
         return None;
     }
     let selected = suggestions.get(selected_suggestion)?;
-    if selected.replacement.trim_end() == input.trim_end() {
+    let current = input.trim_end();
+    let replacement = selected.replacement.trim_end();
+    if replacement == current || !replacement.starts_with(current) {
         None
     } else {
         Some(selected.replacement.clone())
@@ -866,10 +898,6 @@ fn apply_selected_suggestion(
     suggestions
         .get(selected_suggestion)
         .map(|suggestion| suggestion.replacement.clone())
-}
-
-fn is_single_token_slash_input(input: &str) -> bool {
-    input.starts_with('/') && !input[1..].chars().any(char::is_whitespace)
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -965,7 +993,21 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_model_use_shows_reasoning_levels_with_descriptions() {
+    fn tui_model_enter_autocomplete_advances_to_use_stage() {
+        let app_state = test_app_state();
+        let suggestions = heuristic_tui_suggestions(&app_state, "/model")
+            .expect("model suggestions");
+        let use_index = suggestions
+            .iter()
+            .position(|item| item.label == "use")
+            .expect("use suggestion present");
+        let completed = super::autocomplete_slash_command("/model", &suggestions, use_index)
+            .expect("enter should autocomplete to use stage");
+        assert_eq!(completed, "/model use ");
+    }
+
+    #[test]
+    fn tui_model_use_shows_combo_descriptions() {
         let app_state = test_app_state();
         let suggestions =
             heuristic_tui_suggestions(&app_state, "/model use ").expect("model use suggestions");
@@ -979,7 +1021,10 @@ mod tui_output_tests {
         assert!(suggestions.iter().any(|item| item.label == "medium"));
         assert!(suggestions.iter().any(|item| item.label == "high"));
         assert!(suggestions.iter().any(|item| item.label == "xhigh"));
-        assert!(rendered.contains("medium"));
+        assert!(rendered.contains("Fastest and most cost-efficient"));
+        assert!(rendered.contains("Balanced speed and quality"));
+        assert!(!rendered.contains("reasoning tier"));
+        assert!(!rendered.contains("当前组合"));
     }
 
     #[test]
