@@ -1064,14 +1064,16 @@ async fn submit_turn_aggregates_the_same_streamed_event_sequence() {
             stop_reason: StopReason::EndTurn,
         },
     ]];
-    let mut stream_engine = QueryEngine::new(test_context_with_turns(
-        turns.clone(),
-        ToolRegistry::new(),
-    ));
+    let mut stream_engine =
+        QueryEngine::new(test_context_with_turns(turns.clone(), ToolRegistry::new()));
     let mut submit_engine = QueryEngine::new(test_context_with_turns(turns, ToolRegistry::new()));
 
-    let submit_result = submit_engine.submit_turn(Message::user("compare paths")).await;
-    let mut receiver = stream_engine.stream_turn(Message::user("compare paths")).await;
+    let submit_result = submit_engine
+        .submit_turn(Message::user("compare paths"))
+        .await;
+    let mut receiver = stream_engine
+        .stream_turn(Message::user("compare paths"))
+        .await;
     let mut streamed_events = Vec::new();
     while let Some(event) = receiver.recv().await {
         streamed_events.push(event);
@@ -1122,7 +1124,9 @@ async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
         registry,
     ));
 
-    let mut receiver = engine.stream_turn(Message::user("cancel via receiver drop")).await;
+    let mut receiver = engine
+        .stream_turn(Message::user("cancel via receiver drop"))
+        .await;
 
     let first = timeout(Duration::from_millis(50), receiver.recv())
         .await
@@ -1184,7 +1188,9 @@ async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
         registry,
     ));
 
-    let mut receiver = engine.stream_turn(Message::user("cancel via app token")).await;
+    let mut receiver = engine
+        .stream_turn(Message::user("cancel via app token"))
+        .await;
 
     let first = timeout(Duration::from_millis(50), receiver.recv())
         .await

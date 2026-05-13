@@ -835,10 +835,7 @@ async fn consume_model_stream(
                     None => TurnOutcome {
                         state: state.clone(),
                         events: fallback_events,
-                        decision: TurnDecision::Return(
-                            state.clone(),
-                            Terminal::AbortedStreaming,
-                        ),
+                        decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
                     },
                 };
             }
@@ -853,10 +850,7 @@ async fn consume_model_stream(
                 None => TurnOutcome {
                     state: state.clone(),
                     events: fallback_events,
-                    decision: TurnDecision::Return(
-                        state.clone(),
-                        Terminal::AbortedStreaming,
-                    ),
+                    decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
                 },
             };
         }

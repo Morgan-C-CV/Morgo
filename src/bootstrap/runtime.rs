@@ -1390,10 +1390,7 @@ fn wrap_tui_input_lines(input: &str, available_cols: usize) -> TuiWrappedInputLa
     TuiWrappedInputLayout { lines }
 }
 
-fn tui_cursor_position(
-    layout: &TuiWrappedInputLayout,
-    cursor_index: usize,
-) -> (usize, usize) {
+fn tui_cursor_position(layout: &TuiWrappedInputLayout, cursor_index: usize) -> (usize, usize) {
     let line_index = layout
         .lines
         .iter()
@@ -1465,10 +1462,7 @@ fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> Tu
 }
 
 fn display_width_for_chars(chars: &[char]) -> usize {
-    chars
-        .iter()
-        .map(|ch| tui_char_display_width(*ch))
-        .sum()
+    chars.iter().map(|ch| tui_char_display_width(*ch)).sum()
 }
 
 fn move_tui_cursor_vertically(
@@ -1509,7 +1503,10 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
     let base = match status {
         TuiTurnStatus::Idle => String::new(),
         TuiTurnStatus::Working(duration) => {
-            format!("• Working ({} • esc to interrupt)", format_tui_elapsed(duration))
+            format!(
+                "• Working ({} • esc to interrupt)",
+                format_tui_elapsed(duration)
+            )
         }
         TuiTurnStatus::Worked(duration) => {
             let label = format!(" Worked for {} ", format_tui_elapsed(duration));
@@ -1798,9 +1795,7 @@ fn max_tui_content_scroll_offset(content_line_count: usize, content_height: usiz
     content_line_count.saturating_sub(content_height)
 }
 
-fn tui_document_line_count(
-    document: &crate::interaction::cli::renderer::RenderDocument,
-) -> usize {
+fn tui_document_line_count(document: &crate::interaction::cli::renderer::RenderDocument) -> usize {
     let mut screen = build_tui_screen(document);
     screen.prompt.clear();
     let content = render_tui_screen_output(&screen);
@@ -1840,18 +1835,17 @@ fn tui_visible_content_height(input: &str, suggestions: &[TuiSuggestion]) -> usi
     tui_content_height_for_layout(usize::from(rows.max(3)), input, suggestions)
 }
 
-fn tui_jump_by(
-    current_scroll_top: usize,
-    delta: isize,
-    max_scroll_top: usize,
-) -> (usize, bool) {
+fn tui_jump_by(current_scroll_top: usize, delta: isize, max_scroll_top: usize) -> (usize, bool) {
     if delta >= 0 {
         let next = current_scroll_top
             .saturating_add(delta as usize)
             .min(max_scroll_top);
         (next, next >= max_scroll_top)
     } else {
-        (current_scroll_top.saturating_sub(delta.unsigned_abs()), false)
+        (
+            current_scroll_top.saturating_sub(delta.unsigned_abs()),
+            false,
+        )
     }
 }
 
@@ -1900,10 +1894,9 @@ fn tui_compute_wheel_step(
                 } else {
                     WHEEL_DECAY_CAP_FAST
                 };
-                state.multiplier = (1.0
-                    + (state.multiplier - 1.0) * momentum
-                    + WHEEL_DECAY_STEP * momentum)
-                    .min(cap);
+                state.multiplier =
+                    (1.0 + (state.multiplier - 1.0) * momentum + WHEEL_DECAY_STEP * momentum)
+                        .min(cap);
             }
             state.multiplier.max(1.0)
         }
@@ -1927,15 +1920,15 @@ fn normalize_tui_newlines(text: &str) -> String {
 #[cfg(test)]
 mod tui_output_tests {
     use super::{
-        backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
-        normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
-        status_line_for_tui, tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
-        TuiExitGesture, TuiTurnStatus,
+        TuiExitGesture, TuiTurnStatus, backspace_input_char, delete_input_char,
+        heuristic_tui_suggestions, insert_input_char, normalize_tui_newlines,
+        render_command_suggestion_line, render_fixed_tui_layout, status_line_for_tui,
+        tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
-    use crate::cost::tracker::CostTracker;
     use crate::core::message::Message;
+    use crate::cost::tracker::CostTracker;
     use crate::interaction::dispatcher::NotificationDispatcher;
     use crate::interaction::telegram::gateway::TelegramGateway;
     use crate::security::audit::AuditLog;
@@ -3252,253 +3245,279 @@ impl RuntimeBootstrap {
                     pending_exit_gesture = None;
 
                     match key.code {
-                KeyCode::Char('s' | 'S')
-                    if key
-                        .modifiers
-                        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
-                {
-                    if active_turn_started_at.is_none() {
-                        set_tui_mouse_capture(false)?;
-                        selection_mode = true;
-                    }
-                }
-                KeyCode::Enter => {
-                    if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-                        insert_input_char(&mut input, &mut cursor_index, '\n');
-                        selected_suggestion = 0;
-                        continue;
-                    }
-                    if input.trim().is_empty() {
-                        continue;
-                    }
-                    if let Some(completed) =
-                        autocomplete_slash_command(&input, &suggestions, selected_suggestion)
-                    {
-                        input = completed;
-                        cursor_index = input.chars().count();
-                        continue;
-                    }
+                        KeyCode::Char('s' | 'S')
+                            if key
+                                .modifiers
+                                .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                        {
+                            if active_turn_started_at.is_none() {
+                                set_tui_mouse_capture(false)?;
+                                selection_mode = true;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if key
+                                .modifiers
+                                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                            {
+                                insert_input_char(&mut input, &mut cursor_index, '\n');
+                                selected_suggestion = 0;
+                                continue;
+                            }
+                            if input.trim().is_empty() {
+                                continue;
+                            }
+                            if let Some(completed) = autocomplete_slash_command(
+                                &input,
+                                &suggestions,
+                                selected_suggestion,
+                            ) {
+                                input = completed;
+                                cursor_index = input.chars().count();
+                                continue;
+                            }
 
-                    let line = input.trim().to_string();
-                    input.clear();
-                    cursor_index = 0;
-                    selected_suggestion = 0;
-                    follow_content_tail = true;
-                    content_scroll_top = usize::MAX;
-                    active_turn_started_at = Some(Instant::now());
-                    last_turn_duration = None;
+                            let line = input.trim().to_string();
+                            input.clear();
+                            cursor_index = 0;
+                            selected_suggestion = 0;
+                            follow_content_tail = true;
+                            content_scroll_top = usize::MAX;
+                            active_turn_started_at = Some(Instant::now());
+                            last_turn_duration = None;
 
-                    self.print_tui_interactive_frame(
-                        app_state,
-                        &current_document,
-                        "",
-                        &[],
-                        0,
-                        0,
-                        TuiTurnStatus::Working(Duration::ZERO),
-                        0,
-                    );
+                            self.print_tui_interactive_frame(
+                                app_state,
+                                &current_document,
+                                "",
+                                &[],
+                                0,
+                                0,
+                                TuiTurnStatus::Working(Duration::ZERO),
+                                0,
+                            );
 
-                    if self.should_exit_tui_input(&line) {
-                        self.print_tui_message("Exiting TUI session.");
-                        execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
-                        break;
-                    }
+                            if self.should_exit_tui_input(&line) {
+                                self.print_tui_message("Exiting TUI session.");
+                                execute_runtime_shutdown(app_state.clone(), "interactive_exit")
+                                    .await;
+                                break;
+                            }
 
-                    let output = self
-                        .handle_tui_input_with_loading(
-                            router,
-                            engine,
-                            app_state,
-                            line,
-                            |snapshot| {
-                                let next_document = render_turn_document(snapshot);
-                                if next_document != current_document {
-                                    current_document = next_document;
-                                    if follow_content_tail {
-                                        content_scroll_top = usize::MAX;
-                                    } else {
-                                        let max_scroll_top = max_tui_scroll_top_for_document(
-                                            &current_document,
-                                            "",
-                                            &[],
-                                        );
-                                        content_scroll_top = content_scroll_top.min(max_scroll_top);
-                                    }
-                                    self.print_tui_interactive_frame(
-                                        app_state,
-                                        &current_document,
-                                        "",
-                                        &[],
-                                        0,
-                                        0,
-                                        TuiTurnStatus::Working(
-                                            active_turn_started_at
-                                                .map(|instant| instant.elapsed())
-                                                .unwrap_or_default(),
-                                        ),
-                                        0,
-                                    );
+                            let output = self
+                                .handle_tui_input_with_loading(
+                                    router,
+                                    engine,
+                                    app_state,
+                                    line,
+                                    |snapshot| {
+                                        let next_document = render_turn_document(snapshot);
+                                        if next_document != current_document {
+                                            current_document = next_document;
+                                            if follow_content_tail {
+                                                content_scroll_top = usize::MAX;
+                                            } else {
+                                                let max_scroll_top =
+                                                    max_tui_scroll_top_for_document(
+                                                        &current_document,
+                                                        "",
+                                                        &[],
+                                                    );
+                                                content_scroll_top =
+                                                    content_scroll_top.min(max_scroll_top);
+                                            }
+                                            self.print_tui_interactive_frame(
+                                                app_state,
+                                                &current_document,
+                                                "",
+                                                &[],
+                                                0,
+                                                0,
+                                                TuiTurnStatus::Working(
+                                                    active_turn_started_at
+                                                        .map(|instant| instant.elapsed())
+                                                        .unwrap_or_default(),
+                                                ),
+                                                0,
+                                            );
+                                        }
+                                    },
+                                )
+                                .await?;
+                            current_document = render_turn_document(&output);
+                            if follow_content_tail {
+                                content_scroll_top = usize::MAX;
+                            } else {
+                                let max_scroll_top =
+                                    max_tui_scroll_top_for_document(&current_document, "", &[]);
+                                content_scroll_top = content_scroll_top.min(max_scroll_top);
+                            }
+                            last_turn_duration =
+                                active_turn_started_at.map(|started_at| started_at.elapsed());
+                            active_turn_started_at = None;
+                        }
+                        KeyCode::Backspace => {
+                            if backspace_input_char(&mut input, &mut cursor_index) {
+                                selected_suggestion = 0;
+                            }
+                        }
+                        KeyCode::Delete => {
+                            if delete_input_char(&mut input, cursor_index) {
+                                selected_suggestion = 0;
+                            }
+                        }
+                        KeyCode::Tab => {
+                            if let Some(completed) =
+                                apply_selected_suggestion(&input, &suggestions, selected_suggestion)
+                            {
+                                input = completed;
+                                cursor_index = input.chars().count();
+                            }
+                        }
+                        KeyCode::Left => {
+                            cursor_index = cursor_index.saturating_sub(1);
+                        }
+                        KeyCode::Right => {
+                            cursor_index = (cursor_index + 1).min(input.chars().count());
+                        }
+                        KeyCode::Home => {
+                            cursor_index = 0;
+                        }
+                        KeyCode::End => {
+                            cursor_index = input.chars().count();
+                        }
+                        KeyCode::Up => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                let max_scroll_top = max_tui_scroll_top_for_document(
+                                    &current_document,
+                                    &input,
+                                    &suggestions,
+                                );
+                                content_scroll_top = if follow_content_tail {
+                                    max_scroll_top
+                                } else {
+                                    content_scroll_top
                                 }
-                            },
-                        )
-                        .await?;
-                    current_document = render_turn_document(&output);
-                    if follow_content_tail {
-                        content_scroll_top = usize::MAX;
-                    } else {
-                        let max_scroll_top =
-                            max_tui_scroll_top_for_document(&current_document, "", &[]);
-                        content_scroll_top = content_scroll_top.min(max_scroll_top);
-                    }
-                    last_turn_duration =
-                        active_turn_started_at.map(|started_at| started_at.elapsed());
-                    active_turn_started_at = None;
-                }
-                KeyCode::Backspace => {
-                    if backspace_input_char(&mut input, &mut cursor_index) {
-                        selected_suggestion = 0;
-                    }
-                }
-                KeyCode::Delete => {
-                    if delete_input_char(&mut input, cursor_index) {
-                        selected_suggestion = 0;
-                    }
-                }
-                KeyCode::Tab => {
-                    if let Some(completed) =
-                        apply_selected_suggestion(&input, &suggestions, selected_suggestion)
-                    {
-                        input = completed;
-                        cursor_index = input.chars().count();
-                    }
-                }
-                KeyCode::Left => {
-                    cursor_index = cursor_index.saturating_sub(1);
-                }
-                KeyCode::Right => {
-                    cursor_index = (cursor_index + 1).min(input.chars().count());
-                }
-                KeyCode::Home => {
-                    cursor_index = 0;
-                }
-                KeyCode::End => {
-                    cursor_index = input.chars().count();
-                }
-                KeyCode::Up => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        let max_scroll_top =
-                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                        content_scroll_top = if follow_content_tail {
-                            max_scroll_top
-                        } else {
-                            content_scroll_top
+                                .saturating_sub(1);
+                                follow_content_tail = false;
+                            } else if !suggestions.is_empty() {
+                                selected_suggestion = (selected_suggestion + suggestions.len() - 1)
+                                    % suggestions.len();
+                            } else if let Some(next_cursor) = move_tui_cursor_vertically(
+                                &input,
+                                cursor_index,
+                                usize::from(size().unwrap_or((100, 32)).0.max(1)),
+                                -1,
+                            ) {
+                                cursor_index = next_cursor;
+                            } else {
+                                let max_scroll_top = max_tui_scroll_top_for_document(
+                                    &current_document,
+                                    &input,
+                                    &suggestions,
+                                );
+                                content_scroll_top = if follow_content_tail {
+                                    max_scroll_top
+                                } else {
+                                    content_scroll_top
+                                }
+                                .saturating_sub(1);
+                                follow_content_tail = false;
+                            }
                         }
-                        .saturating_sub(1);
-                        follow_content_tail = false;
-                    } else if !suggestions.is_empty() {
-                        selected_suggestion =
-                            (selected_suggestion + suggestions.len() - 1) % suggestions.len();
-                    } else if let Some(next_cursor) =
-                        move_tui_cursor_vertically(&input, cursor_index, usize::from(size().unwrap_or((100, 32)).0.max(1)), -1)
-                    {
-                        cursor_index = next_cursor;
-                    } else {
-                        let max_scroll_top =
-                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                        content_scroll_top = if follow_content_tail {
-                            max_scroll_top
-                        } else {
-                            content_scroll_top
+                        KeyCode::Down => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                let max_scroll_top = max_tui_scroll_top_for_document(
+                                    &current_document,
+                                    &input,
+                                    &suggestions,
+                                );
+                                let next_scroll_top = if follow_content_tail {
+                                    max_scroll_top
+                                } else {
+                                    content_scroll_top
+                                }
+                                .saturating_add(1)
+                                .min(max_scroll_top);
+                                follow_content_tail = next_scroll_top >= max_scroll_top;
+                                content_scroll_top = if follow_content_tail {
+                                    usize::MAX
+                                } else {
+                                    next_scroll_top
+                                };
+                            } else if !suggestions.is_empty() {
+                                selected_suggestion = (selected_suggestion + 1) % suggestions.len();
+                            } else if let Some(next_cursor) = move_tui_cursor_vertically(
+                                &input,
+                                cursor_index,
+                                usize::from(size().unwrap_or((100, 32)).0.max(1)),
+                                1,
+                            ) {
+                                cursor_index = next_cursor;
+                            } else {
+                                let max_scroll_top = max_tui_scroll_top_for_document(
+                                    &current_document,
+                                    &input,
+                                    &suggestions,
+                                );
+                                let next_scroll_top = if follow_content_tail {
+                                    max_scroll_top
+                                } else {
+                                    content_scroll_top
+                                }
+                                .saturating_add(1)
+                                .min(max_scroll_top);
+                                follow_content_tail = next_scroll_top >= max_scroll_top;
+                                content_scroll_top = if follow_content_tail {
+                                    usize::MAX
+                                } else {
+                                    next_scroll_top
+                                };
+                            }
                         }
-                        .saturating_sub(1);
-                        follow_content_tail = false;
-                    }
-                }
-                KeyCode::Down => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        let max_scroll_top =
-                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                        let next_scroll_top = if follow_content_tail {
-                            max_scroll_top
-                        } else {
-                            content_scroll_top
+                        KeyCode::PageUp => {
+                            let page =
+                                (tui_visible_content_height(&input, &suggestions) / 2).max(1);
+                            let max_scroll_top = max_tui_scroll_top_for_document(
+                                &current_document,
+                                &input,
+                                &suggestions,
+                            );
+                            let current_scroll_top = if follow_content_tail {
+                                max_scroll_top
+                            } else {
+                                content_scroll_top
+                            };
+                            let (next_scroll_top, sticky) =
+                                tui_jump_by(current_scroll_top, -(page as isize), max_scroll_top);
+                            follow_content_tail = sticky;
+                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
-                        .saturating_add(1)
-                        .min(max_scroll_top);
-                        follow_content_tail = next_scroll_top >= max_scroll_top;
-                        content_scroll_top = if follow_content_tail {
-                            usize::MAX
-                        } else {
-                            next_scroll_top
-                        };
-                    } else if !suggestions.is_empty() {
-                        selected_suggestion = (selected_suggestion + 1) % suggestions.len();
-                    } else if let Some(next_cursor) =
-                        move_tui_cursor_vertically(&input, cursor_index, usize::from(size().unwrap_or((100, 32)).0.max(1)), 1)
-                    {
-                        cursor_index = next_cursor;
-                    } else {
-                        let max_scroll_top =
-                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                        let next_scroll_top = if follow_content_tail {
-                            max_scroll_top
-                        } else {
-                            content_scroll_top
+                        KeyCode::PageDown => {
+                            let page =
+                                (tui_visible_content_height(&input, &suggestions) / 2).max(1);
+                            let max_scroll_top = max_tui_scroll_top_for_document(
+                                &current_document,
+                                &input,
+                                &suggestions,
+                            );
+                            let current_scroll_top = if follow_content_tail {
+                                max_scroll_top
+                            } else {
+                                content_scroll_top
+                            };
+                            let (next_scroll_top, sticky) =
+                                tui_jump_by(current_scroll_top, page as isize, max_scroll_top);
+                            follow_content_tail = sticky;
+                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
-                        .saturating_add(1)
-                        .min(max_scroll_top);
-                        follow_content_tail = next_scroll_top >= max_scroll_top;
-                        content_scroll_top = if follow_content_tail {
-                            usize::MAX
-                        } else {
-                            next_scroll_top
-                        };
-                    }
-                }
-                KeyCode::PageUp => {
-                    let page = (tui_visible_content_height(&input, &suggestions) / 2).max(1);
-                    let max_scroll_top =
-                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                    let current_scroll_top = if follow_content_tail {
-                        max_scroll_top
-                    } else {
-                        content_scroll_top
-                    };
-                    let (next_scroll_top, sticky) =
-                        tui_jump_by(current_scroll_top, -(page as isize), max_scroll_top);
-                    follow_content_tail = sticky;
-                    content_scroll_top = if sticky {
-                        usize::MAX
-                    } else {
-                        next_scroll_top
-                    };
-                }
-                KeyCode::PageDown => {
-                    let page = (tui_visible_content_height(&input, &suggestions) / 2).max(1);
-                    let max_scroll_top =
-                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                    let current_scroll_top = if follow_content_tail {
-                        max_scroll_top
-                    } else {
-                        content_scroll_top
-                    };
-                    let (next_scroll_top, sticky) =
-                        tui_jump_by(current_scroll_top, page as isize, max_scroll_top);
-                    follow_content_tail = sticky;
-                    content_scroll_top = if sticky {
-                        usize::MAX
-                    } else {
-                        next_scroll_top
-                    };
-                }
-                KeyCode::Char(ch) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        insert_input_char(&mut input, &mut cursor_index, ch);
-                        selected_suggestion = 0;
-                    }
-                }
-                _ => {}
+                        KeyCode::Char(ch) => {
+                            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                                insert_input_char(&mut input, &mut cursor_index, ch);
+                                selected_suggestion = 0;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -3520,11 +3539,7 @@ impl RuntimeBootstrap {
                             let (next_scroll_top, sticky) =
                                 tui_jump_by(current_scroll_top, -(step as isize), max_scroll_top);
                             follow_content_tail = sticky;
-                            content_scroll_top = if sticky {
-                                usize::MAX
-                            } else {
-                                next_scroll_top
-                            };
+                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
                         MouseEventKind::ScrollDown => {
                             let step = tui_compute_wheel_step(
@@ -3536,11 +3551,7 @@ impl RuntimeBootstrap {
                             let (next_scroll_top, sticky) =
                                 tui_jump_by(current_scroll_top, step as isize, max_scroll_top);
                             follow_content_tail = sticky;
-                            content_scroll_top = if sticky {
-                                usize::MAX
-                            } else {
-                                next_scroll_top
-                            };
+                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
                         _ => {}
                     }

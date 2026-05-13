@@ -165,7 +165,8 @@ impl QueryContext {
         }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);
-        permission_context = permission_context.with_cancellation_token(app_state.cancellation_token.clone());
+        permission_context =
+            permission_context.with_cancellation_token(app_state.cancellation_token.clone());
         let tool_registry = if permission_context
             .boss_actor_policy
             .is_some_and(|policy| policy.may_spawn())

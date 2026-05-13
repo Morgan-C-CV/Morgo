@@ -34,12 +34,7 @@ fn record_persistence_failure(
     context
         .app_state
         .service_observability_tracker
-        .record_runtime_lifecycle_failure(
-            phase,
-            &reason,
-            &context.app_state.active_session_id,
-            1,
-        );
+        .record_runtime_lifecycle_failure(phase, &reason, &context.app_state.active_session_id, 1);
     tracing::error!(
         "session persistence failed: phase={} session_id={} reason={}",
         phase,
@@ -73,7 +68,11 @@ impl StreamingTurnState {
             tool_refs: Vec::new(),
             milestone: Some(SessionMilestone::UserInputCommitted),
         };
-        self.append_history_entry("engine.persist_user_input", entry, SessionMilestone::UserInputCommitted);
+        self.append_history_entry(
+            "engine.persist_user_input",
+            entry,
+            SessionMilestone::UserInputCommitted,
+        );
     }
 
     fn handle_query_event(&mut self, event: EngineEvent) {
@@ -158,7 +157,11 @@ impl StreamingTurnState {
         entry: SessionHistoryEntry,
         milestone: SessionMilestone,
     ) {
-        match self.context.app_state.append_current_session_history_entry(entry) {
+        match self
+            .context
+            .app_state
+            .append_current_session_history_entry(entry)
+        {
             Ok(()) => {
                 if self.store_present {
                     self.emit(EngineEvent::SessionMilestoneWritten(milestone));
@@ -348,15 +351,14 @@ impl QueryEngine {
                     state.handle_query_event(event);
                 })
             };
-            let mut result =
-                run_query_loop_with_params_and_sink(
-                    &context,
-                    background_input,
-                    params,
-                    Some(sink),
-                    Some(turn_cancellation),
-                )
-                .await;
+            let mut result = run_query_loop_with_params_and_sink(
+                &context,
+                background_input,
+                params,
+                Some(sink),
+                Some(turn_cancellation),
+            )
+            .await;
             let mut state = stream_state
                 .lock()
                 .expect("streaming turn state should not be poisoned");
