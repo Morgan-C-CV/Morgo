@@ -704,7 +704,7 @@ async fn registry_denies_unsafe_bash_in_plan_mode() {
 
     assert_eq!(
         denied,
-        ToolResult::Denied("bash command is not allowed in plan mode".into())
+        ToolResult::Denied("bash command denied [plan_mode]: command is not allowed in plan mode".into())
     );
 }
 
@@ -735,7 +735,10 @@ async fn registry_returns_pending_approval_for_ask_only_bash() {
             approval: rust_agent::tool::result::PendingApprovalPayload {
                 code: Some("privileged_system".into()),
                 summary: "Bash pending approval".into(),
-                detail: Some("command touches privileged system state".into()),
+                detail: Some(
+                    "command: sudo whoami\nreason: command touches privileged system state\nnext_step: approve or deny this Bash command"
+                        .into(),
+                ),
                 approval_kind: Some("tool_permission".into()),
                 escalation_reasons: vec!["classifier.privileged_system".into()],
             },

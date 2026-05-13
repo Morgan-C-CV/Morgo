@@ -125,17 +125,19 @@ impl Tool for BashTool {
                     .any(|variant| command_matches_rule(variant, rule))
             })
         {
-            return PermissionDecision::Deny {
-                message: "tool Bash denied by explicit rule".into(),
-                reason: crate::tool::definition::PermissionDecisionReason::Rule,
-            };
+            return bash_deny(
+                "explicit_rule",
+                "command denied by explicit Bash policy rule",
+                crate::tool::definition::PermissionDecisionReason::Rule,
+            );
         }
 
         if matches!(permissions.mode(), PermissionMode::Plan) && !policy.safe_in_plan_mode {
-            return PermissionDecision::Deny {
-                message: "bash command is not allowed in plan mode".into(),
-                reason: crate::tool::definition::PermissionDecisionReason::Mode,
-            };
+            return bash_deny(
+                "plan_mode",
+                "command is not allowed in plan mode",
+                crate::tool::definition::PermissionDecisionReason::Mode,
+            );
         }
 
         if permissions
@@ -149,8 +151,9 @@ impl Tool for BashTool {
             })
         {
             return bash_ask(
+                &input.command,
                 "bash_explicit_ask_rule",
-                "Bash command requires approval by explicit ask rule",
+                "command requires approval by explicit Bash policy rule",
                 vec!["explicit_ask_rule".into()],
             );
         }
@@ -170,6 +173,7 @@ impl Tool for BashTool {
 
         if input.dangerously_disable_sandbox {
             return bash_ask(
+                &input.command,
                 "sandbox_disable",
                 "command requests disabling sandbox protections",
                 vec!["sandbox_disable".into()],
@@ -178,13 +182,15 @@ impl Tool for BashTool {
 
         match classify_bash_command(&input.command) {
             ClassifierDecision::Deny { code, warning } => {
-                return PermissionDecision::Deny {
-                    message: format_bash_denial(code, &warning),
-                    reason: crate::tool::definition::PermissionDecisionReason::Safety,
-                };
+                return bash_deny(code, &warning, crate::tool::definition::PermissionDecisionReason::Safety);
             }
             ClassifierDecision::Ask { code, warning } => {
-                return bash_ask(code, &warning, vec![format!("classifier.{code}")]);
+                return bash_ask(
+                    &input.command,
+                    code,
+                    &warning,
+                    vec![format!("classifier.{code}")],
+                );
             }
             ClassifierDecision::Allow => {}
         }
@@ -202,6 +208,7 @@ impl Tool for BashTool {
                         reason,
                     } => {
                         return bash_ask(
+                            &input.command,
                             "capability_escalation",
                             &format!(
                                 "command requires {} capability but workspace allows {}; reason={}",
@@ -221,19 +228,21 @@ impl Tool for BashTool {
                         allowed_tier,
                         reason,
                     } => {
-                        return PermissionDecision::Deny {
-                            message: format!(
-                                "bash command denied [capability_denied]: requires {} but workspace allows {}; reason={}",
+                        return bash_deny(
+                            "capability_denied",
+                            &format!(
+                                "requires {} but workspace allows {}; reason={}",
                                 required_tier.as_str(),
                                 allowed_tier.as_str(),
                                 reason.as_str(),
                             ),
-                            reason: crate::tool::definition::PermissionDecisionReason::Safety,
-                        };
+                            crate::tool::definition::PermissionDecisionReason::Safety,
+                        );
                     }
                 }
             } else {
                 return bash_ask(
+                    &input.command,
                     "policy_escalation",
                     &format_policy_warning(&policy),
                     policy.escalation_reasons.clone(),
@@ -287,17 +296,41 @@ fn format_bash_denial(code: &str, warning: &str) -> String {
     format!("bash command denied [{code}]: {warning}")
 }
 
-fn bash_ask(code: &str, warning: &str, escalation_reasons: Vec<String>) -> PermissionDecision {
+fn format_bash_approval_detail(command: &str, warning: &str) -> String {
+    format!(
+        "command: {}\nreason: {}\nnext_step: approve or deny this Bash command",
+        command.trim(),
+        warning
+    )
+}
+
+fn bash_ask(
+    command: &str,
+    code: &str,
+    warning: &str,
+    escalation_reasons: Vec<String>,
+) -> PermissionDecision {
     PermissionDecision::Ask {
         message: format_bash_warning(code, warning),
         reason: crate::tool::definition::PermissionDecisionReason::Safety,
         metadata: Some(PermissionApprovalMetadata {
             code: Some(code.to_string()),
             summary: Some("Bash pending approval".into()),
-            detail: Some(warning.to_string()),
+            detail: Some(format_bash_approval_detail(command, warning)),
             approval_kind: Some("tool_permission".into()),
             escalation_reasons,
         }),
+    }
+}
+
+fn bash_deny(
+    code: &str,
+    warning: &str,
+    reason: crate::tool::definition::PermissionDecisionReason,
+) -> PermissionDecision {
+    PermissionDecision::Deny {
+        message: format_bash_denial(code, warning),
+        reason,
     }
 }
 
@@ -308,7 +341,7 @@ fn format_policy_warning(policy: &permissions::BashPolicyDecision) -> String {
         policy.escalation_reasons.join(", ")
     };
     format!(
-        "bash command warning [policy_escalation]: explicit approval required; sandbox={:?}; reasons={reasons}",
+        "explicit approval required; sandbox={:?}; reasons={reasons}",
         policy.sandbox_policy
     )
 }
