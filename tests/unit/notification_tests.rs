@@ -449,6 +449,83 @@ fn cli_renderer_renders_approval_and_tool_result_panels() {
 }
 
 #[test]
+fn cli_renderer_approval_panel_keeps_reason_and_actions_structurally_separate_from_body_text() {
+    let turn = CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "Bash approval required: command requires explicit approval by ask rule.".into(),
+                code: Some("explicit_ask_rule".into()),
+                summary: Some("Bash approval required".into()),
+                detail: Some(
+                    "Reason: explicit approval is required by ask rule for Bash.\nChoose approve to run it, or deny to keep it from executing."
+                        .into(),
+                ),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["explicit_ask_rule".into()],
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "verification passed".into(),
+                summary: Some("Read succeeded".into()),
+                detail: Some("verification passed".into()),
+            }),
+        ],
+    };
+
+    let document = render_turn_document(&turn);
+    let approval_panel = document
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
+                if panel.kind
+                    == rust_agent::interaction::cli::renderer::PanelKind::Approval =>
+            {
+                Some(panel)
+            }
+            _ => None,
+        })
+        .expect("approval panel present");
+
+    assert_eq!(approval_panel.title, "Approval required");
+    assert!(
+        approval_panel.lines.iter().any(|line| line == "Tool: Bash"),
+        "approval panel should keep tool name in the approval block; lines={:?}",
+        approval_panel.lines
+    );
+    assert!(
+        approval_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Reason:")),
+        "approval panel should render reason context as its own labeled line, not bury it in generic body text; lines={:?}",
+        approval_panel.lines
+    );
+    assert!(
+        approval_panel.lines.iter().any(|line| {
+            line.starts_with("Action:")
+                && line.to_lowercase().contains("approve")
+                && line.to_lowercase().contains("deny")
+        }),
+        "approval panel should render approve/deny guidance as a distinct action line; lines={:?}",
+        approval_panel.lines
+    );
+
+    let rendered = render_turn_output(&turn);
+    assert!(
+        rendered.contains("== Approval required ==")
+            && rendered.contains("[panel:approval]"),
+        "approval panel should remain structurally distinct from plain assistant prose; rendered={rendered:?}"
+    );
+    assert!(
+        !rendered.contains("== Tool result ==\n  [panel:approval]"),
+        "approval panel should not collapse into the success/tool-result panel structure; rendered={rendered:?}"
+    );
+}
+
+#[test]
 fn surface_and_remote_views_preserve_structured_tool_fields() {
     let turn = CliTurnOutput {
         primary_text: "Status".into(),
