@@ -119,6 +119,38 @@ async fn read_tool_returns_file_contents() {
 }
 
 #[tokio::test]
+async fn read_tool_raw_string_input_keeps_legacy_bare_text_shape() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-read-raw-legacy"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("sample.txt");
+    fs::write(&file, "legacy raw read output")
+        .await
+        .expect("write sample file");
+
+    let result = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: file.to_string_lossy().into_owned(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("raw-string read should succeed");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result for raw-string read");
+    };
+    assert_eq!(text, "legacy raw read output");
+    assert!(
+        !text.contains("path=") && !text.contains("offset=") && !text.contains("returned_chars="),
+        "legacy raw-string input should keep bare text shape until that compatibility path is intentionally removed; text={text:?}"
+    );
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn read_tool_truncates_large_files_and_supports_offsets() {
     let dir = std::env::temp_dir().join(unique_name("rust-agent-read-large"));
     fs::create_dir_all(&dir).await.expect("create dir");

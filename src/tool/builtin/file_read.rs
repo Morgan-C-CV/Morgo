@@ -41,7 +41,7 @@ fn slice_contents(contents: &str, offset: usize, limit: usize) -> (String, bool,
     (text, end < total_chars, total_chars)
 }
 
-fn format_read_result(path: &Path, offset: usize, slice: &str, total_chars: usize) -> String {
+fn format_read_result(path: &Path, offset: usize, slice: &str) -> String {
     format!(
         "path={}\noffset={}\nreturned_chars={}\n\n{}",
         path.display(),
@@ -131,7 +131,7 @@ impl Tool for FileReadTool {
             )));
         }
         let (slice, truncated, total_chars) = slice_contents(&contents, offset, limit);
-        let formatted = format_read_result(path, offset, &slice, total_chars);
+        let formatted = format_read_result(path, offset, &slice);
         if truncated || offset > 0 || total_chars > slice.chars().count() {
             return Ok(ToolResult::Text(format!(
                 "{formatted}\n\n[Read truncated: path={}, offset={}, returned_chars={}, total_chars={}. Use Read with offset={} and limit<={} to continue.]",
