@@ -2363,7 +2363,7 @@ fn initialize_runtime_matrix_locks_surface_mode_env_flag_visibility() {
         initialized_tool_names(InteractionSurface::Cli, SessionMode::Headless, false);
     assert!(cli_headless.contains(&"Read"));
     assert!(cli_headless.contains(&"Agent"));
-    assert!(!cli_headless.contains(&"Bash"));
+    assert!(cli_headless.contains(&"Bash"));
     assert!(!cli_headless.contains(&"WebSearch"));
     assert!(!cli_headless.contains(&"WebFetch"));
     assert!(!cli_headless.contains(&"Mcp"));

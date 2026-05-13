@@ -476,6 +476,9 @@ impl ToolRegistry {
             .filter(|tool| {
                 let metadata = tool.metadata();
                 if metadata.is_open_world && !context.include_open_world_tools {
+                    if should_keep_bash_in_default_headless_coding_surface(&metadata, context) {
+                        return true;
+                    }
                     return false;
                 }
                 match context.runtime_role {
@@ -686,6 +689,16 @@ impl ToolRegistry {
             Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
         }
     }
+}
+
+fn should_keep_bash_in_default_headless_coding_surface(
+    metadata: &ToolMetadata,
+    context: ToolAssemblyContext,
+) -> bool {
+    metadata.name == "Bash"
+        && context.runtime_role == RuntimeRole::Coordinator
+        && context.surface == InteractionSurface::Cli
+        && context.session_mode == SessionMode::Headless
 }
 
 fn merge_permission_decisions(
