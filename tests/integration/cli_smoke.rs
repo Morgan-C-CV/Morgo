@@ -830,3 +830,133 @@ async fn cli_smoke_coding_loop_surfaces_bash_denial_with_clear_next_step() {
         "denial smoke should clear the pending approval after rejection"
     );
 }
+
+#[tokio::test]
+async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let target = workspace.path().join("smoke_approval_resume_target.txt");
+    let marker = workspace.path().join("approved_execution_marker.txt");
+    std::fs::write(&target, "status = \"todo\"\n").expect("seed approval-resume smoke target");
+
+    let target_display = target.to_string_lossy().to_string();
+    let read_input = serde_json::json!({
+        "file_path": target_display,
+    })
+    .to_string();
+    let bash_input = serde_json::json!({
+        "command": format!(
+            "grep -n 'status = \"todo\"' {} && printf 'approved\\n' > {} && printf 'verification ok\\n'",
+            target.display(),
+            marker.display()
+        ),
+        "timeout": 5_000
+    })
+    .to_string();
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(workspace.path()));
+    permission_context.add_always_allow_rule("Edit");
+    permission_context.add_always_ask_rule("Bash");
+
+    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Inspecting the target file before verification.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "I need approval before running the verification command.".into(),
+                ),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: bash_input.clone(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+        ],
+        permission_context,
+    ));
+
+    let pending_result = engine
+        .submit_turn(Message::user(
+            "Read the local file and run the verification command, but pause for approval if Bash needs it.",
+        ))
+        .await;
+
+    assert_eq!(
+        pending_result.state,
+        QueryLoopState::Interrupted,
+        "approval-resume smoke should first stop in pending approval"
+    );
+    assert_eq!(
+        pending_result.terminal,
+        Terminal::AbortedTools,
+        "approval-resume smoke should first stop at the approval barrier"
+    );
+    assert!(
+        pending_result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::PendingApproval { tool_name, .. } if tool_name == "Bash"
+        )),
+        "approval-resume smoke must first reach a real pending approval event"
+    );
+    assert!(
+        engine.context.app_state.permission_context.pending_approval().is_some(),
+        "approval-resume smoke should leave a pending approval before approval replay"
+    );
+    assert!(
+        !marker.exists(),
+        "approval-resume smoke should not execute the pending Bash command before approval"
+    );
+
+    let approved = engine
+        .context
+        .app_state
+        .resolve_pending_approval(true)
+        .await
+        .expect("approval should resolve");
+
+    let CommandResult::Message(approved_message) = approved else {
+        panic!("expected message result after approving pending Bash");
+    };
+    assert!(
+        approved_message.contains("exit_code: 0"),
+        "approval-resume smoke should surface a successful Bash execution after approval; message={approved_message:?}"
+    );
+    assert!(
+        approved_message.contains("stdout:\n")
+            || approved_message.contains("verification ok")
+            || approved_message.contains("status = \"todo\""),
+        "approval-resume smoke should preserve verification output after approval; message={approved_message:?}"
+    );
+    assert!(
+        engine.context.app_state.permission_context.pending_approval().is_none(),
+        "approval-resume smoke should clear the pending approval after approval replay"
+    );
+    assert!(
+        marker.exists(),
+        "approval-resume smoke should execute the original pending Bash command after approval"
+    );
+
+    let marker_contents = std::fs::read_to_string(&marker).expect("read approval marker");
+    assert_eq!(
+        marker_contents,
+        "approved\n",
+        "approval-resume smoke should run the approved Bash command exactly once"
+    );
+}
