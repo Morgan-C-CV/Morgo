@@ -1240,6 +1240,57 @@ async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
 }
 
 #[tokio::test]
+async fn engine_stream_turn_parent_cancellation_aborts_worker_mailbox_wait() {
+    let mut context = test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("worker done".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]],
+        ToolRegistry::new(),
+    );
+    context.app_state.runtime_role = RuntimeRole::Worker;
+    context.agent_id = Some("worker-mailbox".into());
+
+    let mut engine = QueryEngine::new(context);
+    let mut receiver = engine
+        .stream_turn(Message::user("wait for mailbox follow-up"))
+        .await;
+
+    let first = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+    assert!(matches!(first, EngineEvent::AssistantDelta(text) if text == "worker done"));
+
+    let committed = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected the committed message before mailbox wait")
+        .expect("receiver should stay open");
+    assert!(matches!(
+        committed,
+        EngineEvent::MessageCommitted(ref message) if message == &Message::assistant("worker done")
+    ));
+
+    engine.context.app_state.cancellation_token.cancel();
+
+    let terminal = timeout(Duration::from_millis(200), async {
+        while let Some(event) = receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("mailbox wait should abort promptly on parent cancellation");
+
+    assert_eq!(terminal, Terminal::AbortedStreaming);
+}
+
+#[tokio::test]
 async fn cli_streaming_callback_receives_multiple_delta_updates_before_completion() {
     let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
