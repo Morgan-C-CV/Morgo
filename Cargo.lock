@@ -1564,6 +1564,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "wasmtime",
  "wat",
 ]

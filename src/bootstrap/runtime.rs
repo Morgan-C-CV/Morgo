@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
@@ -1282,22 +1283,39 @@ fn char_to_byte_index(value: &str, char_index: usize) -> usize {
 fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> TuiInputViewport {
     const PROMPT_VISIBLE_WIDTH: usize = 2;
     const CURSOR_BASE_COLUMN: usize = 3;
-    let visible_width = total_cols.saturating_sub(PROMPT_VISIBLE_WIDTH).max(1);
+    let visible_width = total_cols
+        .saturating_sub(PROMPT_VISIBLE_WIDTH + 1)
+        .max(1);
     let chars = input.chars().collect::<Vec<_>>();
     let char_len = chars.len();
     let clamped_cursor = cursor_index.min(char_len);
-    let start_char = clamped_cursor.saturating_sub(visible_width.saturating_sub(1));
-    let visible_input = chars
-        .iter()
-        .skip(start_char)
-        .take(visible_width)
-        .collect::<String>();
+    let mut start_char = 0usize;
+
+    while display_width_for_chars(&chars[start_char..clamped_cursor]) > visible_width
+        && start_char < clamped_cursor
+    {
+        start_char += 1;
+    }
+
+    let mut end_char = clamped_cursor;
+    while end_char < char_len
+        && display_width_for_chars(&chars[start_char..=end_char]) <= visible_width
+    {
+        end_char += 1;
+    }
+
+    let visible_input = chars[start_char..end_char].iter().collect::<String>();
+    let cursor_display_offset = display_width_for_chars(&chars[start_char..clamped_cursor]);
 
     TuiInputViewport {
         visible_input,
         start_char,
-        cursor_column: CURSOR_BASE_COLUMN + (clamped_cursor - start_char),
+        cursor_column: CURSOR_BASE_COLUMN + cursor_display_offset,
     }
+}
+
+fn display_width_for_chars(chars: &[char]) -> usize {
+    chars.iter().map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0)).sum()
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -1347,8 +1365,9 @@ fn render_fixed_tui_layout(
     let viewport = tui_input_viewport(input, cursor_index, width);
     let title_text = " INPUT ";
     let title_padding = " ".repeat(width.saturating_sub(title_text.chars().count()));
-    let input_padding =
-        " ".repeat(width.saturating_sub(2 + viewport.visible_input.chars().count()));
+    let input_padding = " ".repeat(
+        width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())),
+    );
     let input_row = height;
     let cursor_col = viewport.cursor_column.min(width).max(1);
 
@@ -1428,6 +1447,14 @@ mod tui_output_tests {
         assert_eq!(viewport.visible_input, "fghij");
         assert_eq!(viewport.start_char, 5);
         assert_eq!(viewport.cursor_column, 8);
+    }
+
+    #[test]
+    fn tui_input_viewport_accounts_for_wide_cjk_characters() {
+        let viewport = tui_input_viewport("ab中文cd", "ab中文cd".chars().count(), 10);
+        assert_eq!(viewport.visible_input, "b中文cd");
+        assert_eq!(viewport.start_char, 1);
+        assert_eq!(viewport.cursor_column, 10);
     }
 
     fn test_app_state() -> AppState {
