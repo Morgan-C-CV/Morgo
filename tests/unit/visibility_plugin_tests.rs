@@ -9,12 +9,16 @@ use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::lism::LisMCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
 use rust_agent::command::builtin::plugins::{PluginSlashCommand, PluginsCommand};
+use rust_agent::command::builtin::resume::ResumeCommand;
 use rust_agent::command::builtin::skills::{SkillSlashCommand, SkillsCommand};
 use rust_agent::command::builtin::status::StatusCommand;
 use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
+use rust_agent::core::message::Message;
+use rust_agent::history::resume::RestoredSession;
 use rust_agent::history::session::{SessionId, SessionSnapshot};
+use rust_agent::history::transcript::Transcript;
 use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::CliTurnOutput;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -362,6 +366,109 @@ async fn cli_doctor_prioritizes_coding_blockers_before_secondary_diagnostics() {
     assert!(
         blocker_anchor < later_anchor,
         "/doctor should show coding blockers before plugin/secondary diagnostics; text={text}"
+    );
+}
+
+#[tokio::test]
+async fn cli_resume_summary_surfaces_last_task_and_working_state_before_full_history() {
+    let root = unique_temp_path("rust-agent-resume-summary");
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    let snapshot = SessionSnapshot {
+        session_id: SessionId("resume-coding-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: Some("2026-05-13T10:30:00Z".into()),
+        prompt_seed: None,
+    };
+    let history = rust_agent::history::session::SessionHistory {
+        entries: vec![
+            rust_agent::history::session::SessionHistoryEntry {
+                message: Message::user("inspect RustAgent/Agent/src/command/builtin/resume.rs"),
+                timestamp: Some("2026-05-13T10:20:00Z".into()),
+                tool_refs: vec!["Read".into()],
+                milestone: None,
+            },
+            rust_agent::history::session::SessionHistoryEntry {
+                message: Message::assistant(
+                    "I found the resume command still returns only the current session id.",
+                ),
+                timestamp: Some("2026-05-13T10:21:00Z".into()),
+                tool_refs: vec![],
+                milestone: None,
+            },
+        ],
+    };
+    app_state.active_session_id = "resume-coding-session".into();
+    app_state.session = Some(snapshot.clone());
+    app_state.history = Some(history.clone());
+    app_state.restored_session = Some(RestoredSession {
+        snapshot: snapshot.clone(),
+        history: history.clone(),
+        transcript: Transcript::from(history.clone()),
+    });
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "cargo test --manifest-path RustAgent/Agent/Cargo.toml resume".into(),
+            message: "approval needed before running cargo test".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+
+    let result = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+
+    assert!(
+        text.contains("Resume summary:")
+            || text.contains("Restore target:")
+            || text.contains("Session summary:"),
+        "/resume should start with a concise restore-target summary before full restore instructions or raw history; text={text}"
+    );
+    assert!(
+        text.contains("inspect RustAgent/Agent/src/command/builtin/resume.rs")
+            || text.to_ascii_lowercase().contains("last task")
+            || text.to_ascii_lowercase().contains("recent task"),
+        "/resume summary should surface the most recent coding task or equivalent working objective; text={text}"
+    );
+    assert!(
+        text.contains("cwd") || text.to_ascii_lowercase().contains("working directory"),
+        "/resume summary should surface cwd before falling back to generic resume instructions; text={text}"
+    );
+    assert!(
+        text.contains("mode") || text.to_ascii_lowercase().contains("pending approval"),
+        "/resume summary should surface mode or pending approval as part of the restore decision; text={text}"
+    );
+
+    let summary_anchor = text
+        .find("Resume summary:")
+        .or_else(|| text.find("Restore target:"))
+        .or_else(|| text.find("Session summary:"))
+        .expect("summary section should be present");
+    let restore_anchor = text
+        .find("rust-agent --resume <SESSION_ID>")
+        .or_else(|| text.find("--continue-session"))
+        .expect("restore instructions should still be present");
+    assert!(
+        summary_anchor < restore_anchor,
+        "/resume should show restore summary before raw resume instructions or full history; text={text}"
     );
 }
 

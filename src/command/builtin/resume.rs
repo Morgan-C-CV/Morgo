@@ -3,8 +3,10 @@ use async_trait::async_trait;
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
+use crate::core::message::Role;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
+use crate::state::permission_context::PermissionMode;
 
 pub struct ResumeCommand;
 
@@ -35,8 +37,42 @@ impl Command for ResumeCommand {
         // 当 TUI 日志选择器开发完毕且选中某个 session_id 时，需要能够要求用户输入 /confirm，
         // 将外围循环跳出、应用新装载的 AppState，重入大循环（即实现热重载会话恢复）。
         let current_id = &app_state.active_session_id;
+        let cwd = app_state.current_working_directory();
+        let permission_mode = match app_state.permission_context.mode() {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::BypassPermissions => "bypass_permissions",
+            PermissionMode::Plan => "plan",
+        };
+        let pending_approval = app_state.permission_context.pending_approval();
+        let last_task = app_state
+            .restored_session
+            .as_ref()
+            .map(|restored| &restored.history)
+            .or(app_state.history.as_ref())
+            .and_then(|history| {
+                history
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.message.role == Role::User)
+                    .map(|entry| entry.message.content.trim().to_string())
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "none recorded".into());
+        let mode_line = if let Some(pending) = pending_approval {
+            format!(
+                "mode: {} | pending approval: {}",
+                permission_mode, pending.tool_name
+            )
+        } else {
+            format!("mode: {permission_mode}")
+        };
         Ok(CommandResult::Message(format!(
-            "Current Session ID: {}\n\nSession auto-saves locally (SQLite/JSON persistence). To restore later:\n  rust-agent --resume <SESSION_ID>\nOptionally use --continue-session to auto-resume the latest one.",
+            "Resume summary:\n- cwd: {}\n- {}\n- last task: {}\n\nCurrent Session ID: {}\n\nSession auto-saves locally (SQLite/JSON persistence). To restore later:\n  rust-agent --resume <SESSION_ID>\nOptionally use --continue-session to auto-resume the latest one.",
+            cwd.display(),
+            mode_line,
+            last_task,
             current_id
         )))
     }
