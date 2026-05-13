@@ -156,12 +156,11 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
     match item {
         SurfaceItem::TaskUpdate(task) => RenderBlock::Panel(render_task_panel(task)),
         SurfaceItem::ApprovalRequired {
-            tool_name, message, ..
-        } => RenderBlock::Panel(render_panel(
-            PanelKind::Approval,
-            "Approval required",
-            vec![format!("Tool: {tool_name}"), message.clone()],
-        )),
+            tool_name,
+            message,
+            detail,
+            ..
+        } => RenderBlock::Panel(render_approval_panel(tool_name, message, detail.as_deref())),
         SurfaceItem::RuntimeNotice { kind, message, .. } => RenderBlock::Panel(render_panel(
             PanelKind::Notice,
             format!("Notice: {kind}"),
@@ -220,6 +219,33 @@ fn render_task_panel(task_event: &TaskView) -> RenderPanel {
             format!("[task] next_action: {}", task_event.next_action),
         ],
     )
+}
+
+fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -> RenderPanel {
+    let mut lines = vec![format!("Tool: {tool_name}")];
+    let mut reason = None;
+    let mut action = None;
+
+    if let Some(detail) = detail {
+        for raw_line in detail.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if raw_line.starts_with("Reason:") {
+                reason = Some(raw_line.to_string());
+            } else if raw_line.starts_with("Choose ") || raw_line.starts_with("Action:") {
+                action = Some(format!(
+                    "Action: {}",
+                    raw_line
+                        .trim_start_matches("Action:")
+                        .trim_start_matches("Choose ")
+                        .trim()
+                ));
+            }
+        }
+    }
+
+    lines.push(reason.unwrap_or_else(|| format!("Reason: {message}")));
+    lines.push(action.unwrap_or_else(|| "Action: approve or deny".into()));
+
+    render_panel(PanelKind::Approval, "Approval required", lines)
 }
 
 fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -> RenderPanel {
