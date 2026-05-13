@@ -4,10 +4,17 @@ use crate::core::events::{
     SessionMilestone,
 };
 use crate::core::message::Message;
-use crate::core::query_loop::{QueryLoopResult, QueryParams, run_query_loop_with_params};
+use crate::core::query_loop::{
+    QueryLoopEventSink, QueryLoopResult, QueryLoopState, QueryParams, Terminal,
+    run_query_loop_with_params_and_sink,
+};
 use crate::history::session::SessionHistoryEntry;
+use crate::state::app_state::SessionPersistFailure;
 use crate::task::types::TaskEvent;
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
+
+const STREAM_TURN_BUFFER: usize = 64;
 
 fn record_runtime_observability(context: &QueryContext, runtime: &RuntimeEventEnvelope) {
     if let Some(service_failure) = runtime.service_failure.as_ref() {
@@ -16,6 +23,168 @@ fn record_runtime_observability(context: &QueryContext, runtime: &RuntimeEventEn
             .service_observability_tracker
             .record_service_failure(service_failure);
     }
+}
+
+fn record_persistence_failure(
+    context: &QueryContext,
+    phase: &str,
+    error: &SessionPersistFailure,
+) -> String {
+    let reason = error.reason();
+    context
+        .app_state
+        .service_observability_tracker
+        .record_runtime_lifecycle_failure(
+            phase,
+            &reason,
+            &context.app_state.active_session_id,
+            1,
+        );
+    tracing::error!(
+        "session persistence failed: phase={} session_id={} reason={}",
+        phase,
+        context.app_state.active_session_id,
+        reason
+    );
+    reason
+}
+
+struct StreamingTurnState {
+    context: QueryContext,
+    surface_tx: mpsc::UnboundedSender<EngineEvent>,
+    emitted_events: Vec<EngineEvent>,
+    store_present: bool,
+}
+
+impl StreamingTurnState {
+    fn new(context: QueryContext, surface_tx: mpsc::UnboundedSender<EngineEvent>) -> Self {
+        Self {
+            store_present: context.app_state.session_store.is_some(),
+            context,
+            surface_tx,
+            emitted_events: Vec::new(),
+        }
+    }
+
+    fn persist_user_input(&mut self, input: &Message) {
+        let entry = SessionHistoryEntry {
+            message: input.clone(),
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: Some(SessionMilestone::UserInputCommitted),
+        };
+        self.append_history_entry("engine.persist_user_input", entry, SessionMilestone::UserInputCommitted);
+    }
+
+    fn handle_query_event(&mut self, event: EngineEvent) {
+        match event {
+            EngineEvent::MessageCommitted(message) => {
+                self.emit(EngineEvent::MessageCommitted(message.clone()));
+                self.append_history_entry(
+                    "engine.persist_assistant_message",
+                    SessionHistoryEntry {
+                        message,
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: Some(SessionMilestone::AssistantMessageCommitted),
+                    },
+                    SessionMilestone::AssistantMessageCommitted,
+                );
+            }
+            EngineEvent::ToolResultCommitted {
+                tool_name,
+                content,
+                summary,
+                detail,
+                kind,
+                report_modifier,
+            } => {
+                self.emit(EngineEvent::ToolResultCommitted {
+                    tool_name: tool_name.clone(),
+                    content: content.clone(),
+                    summary: summary.clone(),
+                    detail: detail.clone(),
+                    kind: kind.clone(),
+                    report_modifier: report_modifier.clone(),
+                });
+                self.append_history_entry(
+                    "engine.persist_tool_result",
+                    SessionHistoryEntry {
+                        message: Message::assistant(format!(
+                            "tool {tool_name} result: {}",
+                            detail.clone().unwrap_or_else(|| summary.clone())
+                        )),
+                        timestamp: None,
+                        tool_refs: vec![tool_name],
+                        milestone: Some(SessionMilestone::ToolResultCommitted),
+                    },
+                    SessionMilestone::ToolResultCommitted,
+                );
+            }
+            EngineEvent::CompactPlanIssued { kind, message } => {
+                let runtime = runtime_event_for_compact_plan(
+                    &kind,
+                    &message,
+                    Some(ServiceFailureCode::CompactRecoveryError),
+                );
+                record_runtime_observability(&self.context, &runtime);
+                self.emit(EngineEvent::RuntimeEvent(runtime));
+                self.emit(EngineEvent::CompactPlanIssued { kind, message });
+            }
+            EngineEvent::Terminal(terminal) => {
+                let runtime = runtime_event_for_terminal(&terminal);
+                record_runtime_observability(&self.context, &runtime);
+                self.emit(EngineEvent::RuntimeEvent(runtime));
+                self.emit(EngineEvent::Terminal(terminal));
+                if self.store_present {
+                    self.emit(EngineEvent::SessionMilestoneWritten(
+                        SessionMilestone::TurnCompleted,
+                    ));
+                }
+            }
+            EngineEvent::Transition(transition) => {
+                let runtime = runtime_event_for_transition(&transition);
+                record_runtime_observability(&self.context, &runtime);
+                self.emit(EngineEvent::RuntimeEvent(runtime));
+                self.emit(EngineEvent::Transition(transition));
+            }
+            other => self.emit(other),
+        }
+    }
+
+    fn append_history_entry(
+        &mut self,
+        phase: &str,
+        entry: SessionHistoryEntry,
+        milestone: SessionMilestone,
+    ) {
+        match self.context.app_state.append_current_session_history_entry(entry) {
+            Ok(()) => {
+                if self.store_present {
+                    self.emit(EngineEvent::SessionMilestoneWritten(milestone));
+                }
+            }
+            Err(error) => {
+                let reason = record_persistence_failure(&self.context, phase, &error);
+                self.emit(EngineEvent::Notice {
+                    kind: "persistence",
+                    message: format!("session history append failed during {phase}: {reason}"),
+                    code: None,
+                    service_failure: None,
+                });
+            }
+        }
+    }
+
+    fn emit(&mut self, event: EngineEvent) {
+        self.emitted_events.push(event.clone());
+        let _ = self.surface_tx.send(event);
+    }
+}
+
+struct StreamingTurnHandle {
+    receiver: mpsc::Receiver<EngineEvent>,
+    completion: oneshot::Receiver<QueryLoopResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,26 +206,35 @@ impl QueryEngine {
     }
 
     pub async fn stream_turn(&mut self, input: Message) -> mpsc::Receiver<EngineEvent> {
-        let result = self.submit_turn(input).await;
-        let (tx, rx) = mpsc::channel(result.events.len().max(1));
-        for event in result.events {
-            if tx.send(event).await.is_err() {
-                break;
-            }
-        }
-        rx
+        self.start_turn(input).receiver
     }
 
     pub async fn submit_turn(&mut self, input: Message) -> QueryLoopResult {
-        let user_input = input.clone();
-        let mut result = run_query_loop_with_params(
-            &self.context,
-            input,
-            self.query_params_for_input(&user_input),
-        )
-        .await;
-        result.events = self.persist_turn(user_input, result.events.clone());
-        result
+        let fallback_input = input.clone();
+        let StreamingTurnHandle {
+            mut receiver,
+            completion,
+        } = self.start_turn(input);
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            events.push(event);
+        }
+        match completion.await {
+            Ok(mut result) => {
+                result.events = events;
+                result
+            }
+            Err(_) => QueryLoopResult {
+                state: QueryLoopState::Failed,
+                terminal: Terminal::ModelError {
+                    message: "streaming turn task terminated unexpectedly".into(),
+                    code: None,
+                },
+                messages: vec![fallback_input],
+                transition: None,
+                events,
+            },
+        }
     }
 
     pub fn drain_task_events(&self) -> Vec<TaskEvent> {
@@ -87,114 +265,13 @@ impl QueryEngine {
             tool_refs: Vec::new(),
             milestone: Some(milestone.clone()),
         }));
-        let _ = self
+        if let Err(error) = self
             .context
             .app_state
-            .append_current_session_history_entries(entries);
-    }
-
-    fn persist_turn(&mut self, input: Message, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
-        let store_present = self.context.app_state.session_store.is_some();
-        let mut persisted_events = Vec::new();
-        let mut history_entries = vec![SessionHistoryEntry {
-            message: input,
-            timestamp: None,
-            tool_refs: Vec::new(),
-            milestone: Some(SessionMilestone::UserInputCommitted),
-        }];
-        let compact_plan_code = compact_plan_code_from_events(&events);
-
-        if store_present {
-            persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                SessionMilestone::UserInputCommitted,
-            ));
+            .append_current_session_history_entries(entries)
+        {
+            let _ = record_persistence_failure(&self.context, "engine.persist_messages", &error);
         }
-
-        for event in events {
-            match &event {
-                EngineEvent::MessageCommitted(message) => {
-                    history_entries.push(SessionHistoryEntry {
-                        message: message.clone(),
-                        timestamp: None,
-                        tool_refs: Vec::new(),
-                        milestone: Some(SessionMilestone::AssistantMessageCommitted),
-                    });
-                    if store_present {
-                        persisted_events.push(event.clone());
-                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                            SessionMilestone::AssistantMessageCommitted,
-                        ));
-                    } else {
-                        persisted_events.push(event.clone());
-                    }
-                }
-                EngineEvent::ToolResultCommitted {
-                    tool_name,
-                    content,
-                    summary,
-                    detail,
-                    kind,
-                    report_modifier,
-                } => {
-                    history_entries.push(SessionHistoryEntry {
-                        message: Message::assistant(format!(
-                            "tool {tool_name} result: {}",
-                            detail.clone().unwrap_or_else(|| summary.clone())
-                        )),
-                        timestamp: None,
-                        tool_refs: vec![tool_name.clone()],
-                        milestone: Some(SessionMilestone::ToolResultCommitted),
-                    });
-                    if store_present {
-                        persisted_events.push(EngineEvent::ToolResultCommitted {
-                            tool_name: tool_name.clone(),
-                            content: content.clone(),
-                            summary: summary.clone(),
-                            detail: detail.clone(),
-                            kind: kind.clone(),
-                            report_modifier: report_modifier.clone(),
-                        });
-                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                            SessionMilestone::ToolResultCommitted,
-                        ));
-                    } else {
-                        persisted_events.push(event.clone());
-                    }
-                }
-                EngineEvent::CompactPlanIssued { kind, message } => {
-                    let runtime =
-                        runtime_event_for_compact_plan(kind, message, compact_plan_code.clone());
-                    record_runtime_observability(&self.context, &runtime);
-                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
-                    persisted_events.push(event.clone());
-                }
-                EngineEvent::Terminal(terminal) => {
-                    let runtime = runtime_event_for_terminal(terminal);
-                    record_runtime_observability(&self.context, &runtime);
-                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
-                    persisted_events.push(event.clone());
-                    if store_present {
-                        persisted_events.push(EngineEvent::SessionMilestoneWritten(
-                            SessionMilestone::TurnCompleted,
-                        ));
-                    }
-                }
-                EngineEvent::Transition(transition) => {
-                    let runtime = runtime_event_for_transition(transition);
-                    record_runtime_observability(&self.context, &runtime);
-                    persisted_events.push(EngineEvent::RuntimeEvent(runtime));
-                    persisted_events.push(event.clone());
-                }
-                _ => persisted_events.push(event.clone()),
-            }
-        }
-
-        let _ = self
-            .context
-            .app_state
-            .append_current_session_history_entries(history_entries);
-
-        persisted_events
     }
 
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
@@ -211,6 +288,58 @@ impl QueryEngine {
             .map(|entry| entry.message)
             .collect();
         params
+    }
+
+    fn start_turn(&mut self, input: Message) -> StreamingTurnHandle {
+        let params = self.query_params_for_input(&input);
+        let context = self.context.clone();
+        let background_input = input.clone();
+        let (surface_tx, surface_rx) = mpsc::channel(STREAM_TURN_BUFFER);
+        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            while let Some(event) = bridge_rx.recv().await {
+                if surface_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let stream_state = Arc::new(Mutex::new(StreamingTurnState::new(
+                context.clone(),
+                bridge_tx,
+            )));
+            {
+                let mut state = stream_state
+                    .lock()
+                    .expect("streaming turn state should not be poisoned");
+                state.persist_user_input(&background_input);
+            }
+            let sink: QueryLoopEventSink = {
+                let stream_state = Arc::clone(&stream_state);
+                Arc::new(move |event| {
+                    let mut state = stream_state
+                        .lock()
+                        .expect("streaming turn state should not be poisoned");
+                    state.handle_query_event(event);
+                })
+            };
+            let mut result =
+                run_query_loop_with_params_and_sink(&context, background_input, params, Some(sink))
+                    .await;
+            let mut state = stream_state
+                .lock()
+                .expect("streaming turn state should not be poisoned");
+            result.events = std::mem::take(&mut state.emitted_events);
+            let _ = completion_tx.send(result);
+        });
+
+        StreamingTurnHandle {
+            receiver: surface_rx,
+            completion: completion_rx,
+        }
     }
 }
 
@@ -337,13 +466,6 @@ fn runtime_event_for_compact_plan(
         code,
         service_failure,
     }
-}
-
-fn compact_plan_code_from_events(events: &[EngineEvent]) -> Option<ServiceFailureCode> {
-    events.iter().find_map(|event| match event {
-        EngineEvent::CompactPlanIssued { .. } => Some(ServiceFailureCode::CompactRecoveryError),
-        _ => None,
-    })
 }
 
 #[cfg(test)]

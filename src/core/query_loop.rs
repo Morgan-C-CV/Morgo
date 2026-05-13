@@ -14,6 +14,7 @@ use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_record
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
 };
+use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
@@ -158,6 +159,58 @@ pub struct QueryLoopResult {
     pub events: Vec<EngineEvent>,
 }
 
+pub(crate) type QueryLoopEventSink = Arc<dyn Fn(EngineEvent) + Send + Sync>;
+
+#[derive(Clone)]
+struct EventCollector {
+    events: Vec<EngineEvent>,
+    sink: Option<QueryLoopEventSink>,
+}
+
+impl EventCollector {
+    fn new(sink: Option<QueryLoopEventSink>) -> Self {
+        Self {
+            events: Vec::new(),
+            sink,
+        }
+    }
+
+    fn from_events(events: Vec<EngineEvent>, sink: Option<QueryLoopEventSink>) -> Self {
+        Self { events, sink }
+    }
+
+    fn push(&mut self, event: EngineEvent) {
+        if let Some(sink) = self.sink.as_ref() {
+            sink(event.clone());
+        }
+        self.events.push(event);
+    }
+
+    fn as_slice(&self) -> &[EngineEvent] {
+        &self.events
+    }
+
+    fn clone_events(&self) -> Vec<EngineEvent> {
+        self.events.clone()
+    }
+
+    fn take(&mut self) -> Vec<EngineEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn replace(&mut self, events: Vec<EngineEvent>) {
+        self.events = events;
+    }
+
+    fn into_events(self) -> Vec<EngineEvent> {
+        self.events
+    }
+
+    fn sink_clone(&self) -> Option<QueryLoopEventSink> {
+        self.sink.clone()
+    }
+}
+
 pub async fn run_query_loop(context: &QueryContext, input: Message) -> QueryLoopResult {
     run_query_loop_with_params(context, input, QueryParams::default()).await
 }
@@ -167,9 +220,18 @@ pub async fn run_query_loop_with_params(
     input: Message,
     params: QueryParams,
 ) -> QueryLoopResult {
+    run_query_loop_with_params_and_sink(context, input, params, None).await
+}
+
+pub(crate) async fn run_query_loop_with_params_and_sink(
+    context: &QueryContext,
+    input: Message,
+    params: QueryParams,
+    sink: Option<QueryLoopEventSink>,
+) -> QueryLoopResult {
     let mut state = LoopState::new(&params);
     state.messages.extend(inbox_messages(context, None));
-    let mut events = Vec::new();
+    let mut events = EventCollector::new(sink.clone());
     let mut current_input = input;
     state.messages.push(current_input.clone());
 
@@ -221,15 +283,15 @@ pub async fn run_query_loop_with_params(
                 state,
                 QueryLoopState::Completed,
                 Terminal::Completed,
-                events,
+                EventCollector::from_events(events.take(), sink.clone()),
             );
         }
 
-        let turn_events = std::mem::take(&mut events);
+        let turn_events = events.take();
         let turn_outcome = consume_model_stream(
             context,
             &mut state,
-            turn_events,
+            EventCollector::from_events(turn_events, sink.clone()),
             streamed,
             prepared.prompt.chars().count(),
             params.max_output_tokens_recovery_limit,
@@ -287,7 +349,7 @@ fn check_turn_limits(
     context: &QueryContext,
     state: &LoopState,
     params: &QueryParams,
-    events: &[EngineEvent],
+    events: &EventCollector,
 ) -> Option<QueryLoopResult> {
     if let Some(max_turns) = params.max_turns {
         if state.turn_count >= max_turns {
@@ -297,7 +359,7 @@ fn check_turn_limits(
                 state.clone(),
                 QueryLoopState::Failed,
                 Terminal::MaxTurns { count },
-                events.to_vec(),
+                EventCollector::from_events(events.clone_events(), events.sink_clone()),
             ));
         }
     }
@@ -309,7 +371,7 @@ fn prepare_turn(
     state: &mut LoopState,
     params: &QueryParams,
     current_input: &Message,
-    events: &mut Vec<EngineEvent>,
+    events: &mut EventCollector,
 ) -> Result<PreparedTurn, QueryLoopResult> {
     let prepared_prompt = if state.turn_count == 0 && params.messages.is_empty() {
         context.compose_turn_prompt(&current_input.text())
@@ -345,7 +407,7 @@ fn prepare_turn(
                     Terminal::MaxBudget {
                         budget_usd_cents: prepared.token_estimate as u64,
                     },
-                    events.clone(),
+                    EventCollector::from_events(events.clone_events(), events.sink_clone()),
                 ));
             }
             state.transition = Some(Continue::TokenBudgetContinuation);
@@ -354,7 +416,7 @@ fn prepare_turn(
                 state.clone(),
                 QueryLoopState::Completed,
                 Terminal::Completed,
-                events.clone(),
+                EventCollector::from_events(events.clone_events(), events.sink_clone()),
             ));
         }
     }
@@ -404,7 +466,7 @@ fn prepare_turn(
                 state.clone(),
                 QueryLoopState::Compacting,
                 Terminal::Completed,
-                events.clone(),
+                EventCollector::from_events(events.clone_events(), events.sink_clone()),
             ));
         }
     }
@@ -415,7 +477,7 @@ fn prepare_turn(
 fn process_user_input(
     context: &QueryContext,
     state: &mut LoopState,
-    events: &mut Vec<EngineEvent>,
+    events: &mut EventCollector,
 ) -> Option<QueryLoopResult> {
     let prompt_hook = run_hook(&context.hook_registry, HookEvent::UserPromptSubmit);
     for message in prompt_hook.messages.clone() {
@@ -437,7 +499,7 @@ fn process_user_input(
             },
             messages: state.messages.clone(),
             transition: state.transition.clone(),
-            events: events.clone(),
+            events: events.clone_events(),
         });
     }
     None
@@ -490,7 +552,7 @@ async fn decide_next_turn(
     state: &mut LoopState,
     turn_outcome: TurnOutcome,
     current_input: &mut Message,
-    events: &mut Vec<EngineEvent>,
+    events: &mut EventCollector,
 ) -> NextTurnDecision {
     match turn_outcome.decision {
         TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_turn(
@@ -498,10 +560,14 @@ async fn decide_next_turn(
             loop_state,
             terminal_state(&terminal),
             terminal,
-            turn_outcome.events,
+            EventCollector::from_events(turn_outcome.events, events.sink_clone()),
         )),
         TurnDecision::FinalizeNormalTurn(loop_state) => {
-            match finalize_normal_turn(context, loop_state, turn_outcome.events) {
+            match finalize_normal_turn(
+                context,
+                loop_state,
+                EventCollector::from_events(turn_outcome.events, events.sink_clone()),
+            ) {
                 NormalTurnFinalization::Return(result) => NextTurnDecision::Return(result),
                 NormalTurnFinalization::Continue {
                     loop_state,
@@ -512,7 +578,7 @@ async fn decide_next_turn(
                     state.messages.push(next_input.clone());
                     state.turn_count += 1;
                     state.transition = Some(Continue::StopHookBlocking);
-                    *events = next_events;
+                    events.replace(next_events);
                     events.push(EngineEvent::Transition(Continue::StopHookBlocking));
                     *current_input = next_input;
                     state
@@ -527,7 +593,7 @@ async fn decide_next_turn(
             state.messages.push(next_input.clone());
             state.turn_count += 1;
             state.transition = Some(continue_reason.clone());
-            *events = turn_outcome.events;
+            events.replace(turn_outcome.events);
             events.push(EngineEvent::Transition(continue_reason));
             *current_input = next_input;
             state
@@ -541,7 +607,7 @@ async fn decide_next_turn(
                 state.messages.push(next_input.clone());
                 state.turn_count += 1;
                 state.transition = Some(Continue::NextTurn);
-                *events = turn_outcome.events;
+                events.replace(turn_outcome.events);
                 events.push(EngineEvent::Transition(Continue::NextTurn));
                 *current_input = next_input;
                 state
@@ -549,7 +615,11 @@ async fn decide_next_turn(
                     .extend(inbox_messages(context, context.agent_id.as_deref()));
                 return NextTurnDecision::Continue;
             }
-            match finalize_normal_turn(context, turn_outcome.state, turn_outcome.events) {
+            match finalize_normal_turn(
+                context,
+                turn_outcome.state,
+                EventCollector::from_events(turn_outcome.events, events.sink_clone()),
+            ) {
                 NormalTurnFinalization::Return(result) => NextTurnDecision::Return(result),
                 NormalTurnFinalization::Continue {
                     loop_state,
@@ -560,7 +630,7 @@ async fn decide_next_turn(
                     state.messages.push(next_input.clone());
                     state.turn_count += 1;
                     state.transition = Some(Continue::StopHookBlocking);
-                    *events = next_events;
+                    events.replace(next_events);
                     events.push(EngineEvent::Transition(Continue::StopHookBlocking));
                     *current_input = next_input;
                     state
@@ -575,7 +645,7 @@ async fn decide_next_turn(
 
 fn record_usage_notice(
     context: &QueryContext,
-    engine_events: &mut Vec<EngineEvent>,
+    engine_events: &mut EventCollector,
     usage: crate::service::api::streaming::UsageEvent,
     prompt_chars: usize,
     response_chars: usize,
@@ -603,7 +673,7 @@ fn record_usage_notice(
 async fn consume_model_stream(
     context: &QueryContext,
     state: &mut LoopState,
-    mut engine_events: Vec<EngineEvent>,
+    mut engine_events: EventCollector,
     stream_events: Vec<StreamEvent>,
     prompt_chars: usize,
     max_output_tokens_recovery_limit: usize,
@@ -650,7 +720,7 @@ async fn consume_model_stream(
                     let code = classify_service_failure_code(&error);
                     return TurnOutcome {
                         state: state.clone(),
-                        events: engine_events,
+                        events: engine_events.into_events(),
                         decision: TurnDecision::Return(
                             state.clone(),
                             Terminal::ModelError {
@@ -686,13 +756,13 @@ async fn consume_model_stream(
             if context.is_subagent() {
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::AwaitMailbox,
                 };
             }
             return TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::FinalizeNormalTurn(state.clone()),
             };
         }
@@ -704,7 +774,7 @@ async fn consume_model_stream(
                 state.messages.push(error_message);
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::Return(
                         state.clone(),
                         Terminal::ModelError {
@@ -733,7 +803,7 @@ async fn consume_model_stream(
                 });
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::ContinueWith(
                         Message::user(
                             "Please continue and finish the response after max output token escalation.",
@@ -752,7 +822,7 @@ async fn consume_model_stream(
                 });
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::ContinueWith(
                         Message::user(
                             "Please continue from where you were interrupted due to max output tokens.",
@@ -763,7 +833,7 @@ async fn consume_model_stream(
             }
             return TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
             };
         }
@@ -773,7 +843,7 @@ async fn consume_model_stream(
                 let code = classify_service_failure_code(&stop_error);
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::Return(
                         state.clone(),
                         Terminal::ModelError {
@@ -790,7 +860,7 @@ async fn consume_model_stream(
 
     TurnOutcome {
         state: state.clone(),
-        events: engine_events,
+        events: engine_events.into_events(),
         decision: TurnDecision::AwaitMailbox,
     }
 }
@@ -798,7 +868,7 @@ async fn consume_model_stream(
 async fn execute_tool_phase(
     context: &QueryContext,
     state: &mut LoopState,
-    mut engine_events: Vec<EngineEvent>,
+    mut engine_events: EventCollector,
     tool_name: String,
     tool_input: String,
 ) -> TurnOutcome {
@@ -852,7 +922,7 @@ async fn execute_tool_phase(
         }
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
         };
     }
@@ -883,7 +953,7 @@ async fn execute_tool_phase(
         }
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
         };
     }
@@ -925,7 +995,7 @@ async fn execute_tool_phase(
         }
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
         };
     }
@@ -963,7 +1033,7 @@ async fn execute_tool_phase(
         });
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
         };
     }
@@ -1027,7 +1097,7 @@ async fn execute_tool_phase(
                                 state.transition = Some(Continue::StopHookBlocking);
                                 return TurnOutcome {
                                     state: state.clone(),
-                                    events: engine_events,
+                                    events: engine_events.into_events(),
                                     decision: TurnDecision::Return(
                                         state.clone(),
                                         Terminal::StopHookPrevented,
@@ -1044,7 +1114,7 @@ async fn execute_tool_phase(
                             );
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
                                     Message::user(follow_up),
                                     Continue::ToolUseFollowUp,
@@ -1089,7 +1159,7 @@ async fn execute_tool_phase(
                             state.messages.push(missing_tool_result);
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
                                     Message::user(format!(
                                         "tool result for {tool_name}: denied: {reason}"
@@ -1165,7 +1235,7 @@ async fn execute_tool_phase(
                             state.messages.push(approval_message);
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::Return(
                                     state.clone(),
                                     Terminal::AbortedTools,
@@ -1183,7 +1253,7 @@ async fn execute_tool_phase(
                             state.messages.push(interrupted);
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
                                     Message::user(format!(
                                         "tool result for {tool_name}: interrupted: {}",
@@ -1198,7 +1268,7 @@ async fn execute_tool_phase(
                             apply_tool_report_context(state, &report);
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
                                     Message::user(format!(
                                         "tool progress for {tool_name}: {}",
@@ -1219,7 +1289,7 @@ async fn execute_tool_phase(
                             state.messages.push(oversized);
                             TurnOutcome {
                                 state: state.clone(),
-                                events: engine_events,
+                                events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
                                     Message::user(format!(
                                         "tool result for {tool_name}: result too large: {}",
@@ -1233,7 +1303,7 @@ async fn execute_tool_phase(
                 }
                 None => TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::Return(
                         state.clone(),
                         Terminal::ModelError {
@@ -1273,7 +1343,7 @@ async fn execute_tool_phase(
             state.messages.push(missing_tool_result);
             TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::ContinueWith(
                     Message::user(format!("tool result for {tool_name}: failure: {error}")),
                     Continue::ToolUseFollowUp,
@@ -1600,7 +1670,7 @@ fn is_prompt_only_discovery_gate_record(record: &ToolExecutionRecord) -> bool {
 async fn execute_tool_batch_phase(
     context: &QueryContext,
     state: &mut LoopState,
-    mut engine_events: Vec<EngineEvent>,
+    mut engine_events: EventCollector,
     tool_uses: Vec<(String, String)>,
 ) -> TurnOutcome {
     let batch_size = tool_uses.len();
@@ -1639,7 +1709,7 @@ async fn execute_tool_batch_phase(
             state.messages.push(failure);
             return TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::ContinueWith(
                     Message::user(format!("tool batch result: failure: {error}")),
                     Continue::ToolUseFollowUp,
@@ -1755,7 +1825,7 @@ async fn execute_tool_batch_phase(
                 state.messages.push(approval_message);
                 return TurnOutcome {
                     state: state.clone(),
-                    events: engine_events,
+                    events: engine_events.into_events(),
                     decision: TurnDecision::Return(state.clone(), Terminal::AbortedTools),
                 };
             }
@@ -1819,7 +1889,7 @@ async fn execute_tool_batch_phase(
     apply_tool_report_context(state, &report);
     TurnOutcome {
         state: state.clone(),
-        events: engine_events,
+        events: engine_events.into_events(),
         decision: TurnDecision::ContinueWith(
             Message::user(batch_follow_up_message(state, &report)),
             Continue::ToolUseFollowUp,
@@ -1939,7 +2009,7 @@ async fn next_worker_mailbox_message(context: &QueryContext) -> Option<Message> 
 fn finalize_normal_turn(
     context: &QueryContext,
     mut state: LoopState,
-    mut events: Vec<EngineEvent>,
+    mut events: EventCollector,
 ) -> NormalTurnFinalization {
     state
         .messages
@@ -1966,7 +2036,7 @@ fn finalize_normal_turn(
             terminal: Terminal::Completed,
             messages: state.messages,
             transition: Some(Continue::NextTurn),
-            events,
+            events: events.into_events(),
         });
     }
 
@@ -1995,7 +2065,7 @@ fn finalize_normal_turn(
             terminal,
             messages: state.messages,
             transition: state.transition,
-            events,
+            events: events.into_events(),
         });
     }
 
@@ -2011,7 +2081,7 @@ fn finalize_normal_turn(
         return NormalTurnFinalization::Continue {
             loop_state: state,
             next_input: Message::user("Address the stop-hook blocking feedback and continue."),
-            events,
+            events: events.into_events(),
         };
     }
 
@@ -2030,7 +2100,7 @@ fn finalize_normal_turn(
         terminal,
         messages: state.messages,
         transition: state.transition,
-        events,
+        events: events.into_events(),
     })
 }
 
@@ -2056,7 +2126,7 @@ fn finalize_turn(
     mut state: LoopState,
     default_state: QueryLoopState,
     terminal: Terminal,
-    mut events: Vec<EngineEvent>,
+    mut events: EventCollector,
 ) -> QueryLoopResult {
     state
         .messages
@@ -2064,11 +2134,14 @@ fn finalize_turn(
     events.push(EngineEvent::Terminal(terminal.clone()));
 
     QueryLoopResult {
-        state: terminal_state(&terminal).or(default_state),
+        state: match terminal {
+            Terminal::Completed => default_state,
+            _ => terminal_state(&terminal),
+        },
         terminal,
         messages: state.messages,
         transition: state.transition,
-        events,
+        events: events.into_events(),
     }
 }
 
@@ -2085,14 +2158,14 @@ fn terminal_state(terminal: &Terminal) -> QueryLoopState {
 fn continue_after_stream_error(
     context: &QueryContext,
     state: &mut LoopState,
-    mut engine_events: Vec<EngineEvent>,
+    mut engine_events: EventCollector,
     error: StreamError,
 ) -> TurnOutcome {
     if should_return_terminal_after_recovery_exhausted(&error, state.transition.as_ref()) {
         let code = classify_service_failure_code(&error);
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::Return(
                 state.clone(),
                 Terminal::ModelError {
@@ -2118,7 +2191,7 @@ fn continue_after_stream_error(
         });
         return TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::ContinueWith(
                 Message::user("Retry after model fallback recovery."),
                 Continue::ModelFallbackRetry,
@@ -2161,7 +2234,7 @@ fn continue_after_stream_error(
             state.has_attempted_reactive_compact = true;
             TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::ContinueWith(
                     Message::user(recovery.plan.retry_prompt.expect("reactive compact prompt")),
                     Continue::ReactiveCompactRetry,
@@ -2170,7 +2243,7 @@ fn continue_after_stream_error(
         }
         CompactServiceNextStep::RetryCollapseDrain => TurnOutcome {
             state: state.clone(),
-            events: engine_events,
+            events: engine_events.into_events(),
             decision: TurnDecision::ContinueWith(
                 Message::user(recovery.plan.retry_prompt.expect("collapse drain prompt")),
                 Continue::CollapseDrainRetry,
@@ -2180,7 +2253,7 @@ fn continue_after_stream_error(
             let code = classify_service_failure_code(&error);
             TurnOutcome {
                 state: state.clone(),
-                events: engine_events,
+                events: engine_events.into_events(),
                 decision: TurnDecision::Return(
                     state.clone(),
                     Terminal::ModelError {

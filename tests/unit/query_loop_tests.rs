@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::registry::CommandRegistry;
 use rust_agent::core::boss_state::BossStage;
 use rust_agent::core::context::{QueryContext, SubagentConfig, WorkerLisMPolicy};
 use rust_agent::core::engine::QueryEngine;
@@ -18,9 +19,14 @@ use rust_agent::history::transcript::Transcript;
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
+use rust_agent::interaction::cli::repl::{
+    CliDisplayEvent, CliRuntimeEvent, handle_cli_input_streaming,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::router::CommandRouter;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::plugins::runtime_state::{RuntimePluginSnapshot, build_turn_engine};
+use rust_agent::security::authorizer::DefaultSurfaceAuthorizer;
 use rust_agent::service::api::client::{
     ModelProviderClient, ModelProviderConfig, ProviderAuthStrategy,
     ProviderCompatibilityProfileKind, ProviderProtocol, parse_anthropic_sse_response,
@@ -55,11 +61,13 @@ use rust_agent::tool::builtin::agent::AgentTool;
 use rust_agent::tool::definition::PermissionDecision;
 use rust_agent::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
+use std::time::Instant;
 
 struct ProgressFixtureTool;
 struct PendingApprovalFixtureTool;
 struct DeniedFixtureTool;
 struct EchoFixtureTool;
+struct SlowFixtureTool;
 
 #[async_trait]
 impl Tool for ProgressFixtureTool {
@@ -204,6 +212,36 @@ impl Tool for EchoFixtureTool {
             })
             .unwrap_or_else(|| "missing".into());
         Ok(ToolResult::Text(format!("echoed {value}")))
+    }
+}
+
+#[async_trait]
+impl Tool for SlowFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "SlowFixture".into(),
+            description: "Sleeps before returning a tool result".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        Ok(ToolResult::Text("slow result".into()))
     }
 }
 
@@ -891,6 +929,158 @@ async fn engine_stream_turn_yields_committed_messages() {
     }
 
     assert_eq!(committed, vec![Message::assistant("hello stream")]);
+}
+
+#[tokio::test]
+async fn engine_stream_turn_returns_before_slow_tool_finishes() {
+    let registry = ToolRegistry::new().register(Arc::new(SlowFixtureTool));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("planning".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "SlowFixture".into(),
+                    input: "{}".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+
+    let started = Instant::now();
+    let mut receiver = timeout(
+        Duration::from_millis(25),
+        engine.stream_turn(Message::user("run slow tool")),
+    )
+    .await
+    .expect("stream_turn should return before the tool finishes");
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "stream_turn blocked for {:?}",
+        started.elapsed()
+    );
+
+    let first = timeout(Duration::from_millis(25), receiver.recv())
+        .await
+        .expect("expected an early event")
+        .expect("receiver should stay open");
+    assert!(matches!(first, EngineEvent::AssistantDelta(text) if text == "planning"));
+
+    let second = timeout(Duration::from_millis(25), receiver.recv())
+        .await
+        .expect("expected tool start before tool completion")
+        .expect("receiver should stay open");
+    assert!(matches!(
+        second,
+        EngineEvent::ToolCallStarted { ref tool_name, .. } if tool_name == "SlowFixture"
+    ));
+
+    let tool_result = timeout(Duration::from_millis(250), async {
+        while let Some(event) = receiver.recv().await {
+            if matches!(
+                &event,
+                EngineEvent::ToolResultCommitted { tool_name, .. } if tool_name == "SlowFixture"
+            ) {
+                return event;
+            }
+        }
+        panic!("stream closed before tool result event");
+    })
+    .await
+    .expect("tool result should arrive after the slow tool finishes");
+    assert!(matches!(
+        tool_result,
+        EngineEvent::ToolResultCommitted { ref tool_name, .. } if tool_name == "SlowFixture"
+    ));
+}
+
+#[tokio::test]
+async fn submit_turn_aggregates_the_same_streamed_event_sequence() {
+    let turns = vec![vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("same ".into()),
+        StreamEvent::TextDelta("path".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]];
+    let mut stream_engine = QueryEngine::new(test_context_with_turns(
+        turns.clone(),
+        ToolRegistry::new(),
+    ));
+    let mut submit_engine = QueryEngine::new(test_context_with_turns(turns, ToolRegistry::new()));
+
+    let submit_result = submit_engine.submit_turn(Message::user("compare paths")).await;
+    let mut receiver = stream_engine.stream_turn(Message::user("compare paths")).await;
+    let mut streamed_events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        streamed_events.push(event);
+    }
+
+    assert_eq!(streamed_events, submit_result.events);
+    assert_eq!(submit_result.terminal, Terminal::Completed);
+    assert_eq!(submit_result.transition, None);
+    assert!(
+        submit_result
+            .messages
+            .iter()
+            .any(|message| message == &Message::assistant("same path"))
+    );
+}
+
+#[tokio::test]
+async fn cli_streaming_callback_receives_multiple_delta_updates_before_completion() {
+    let mut engine = QueryEngine::new(test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("a".into()),
+        StreamEvent::TextDelta("b".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let app_state = engine.context.app_state.clone();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let update_sink = Arc::clone(&updates);
+
+    let output = handle_cli_input_streaming(&router, &mut engine, &app_state, "hi", move |turn| {
+        update_sink
+            .lock()
+            .expect("updates mutex should not be poisoned")
+            .push(turn.clone());
+    })
+    .await
+    .expect("cli streaming should succeed");
+
+    let updates = updates
+        .lock()
+        .expect("updates mutex should not be poisoned")
+        .clone();
+    assert!(updates.len() >= 3, "expected delta and completion updates");
+    assert!(matches!(
+        updates.first().and_then(|turn| turn.events.first()),
+        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "a"
+    ));
+    assert!(matches!(
+        updates.get(1).and_then(|turn| turn.events.get(1)),
+        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "b"
+    ));
+    assert!(updates.iter().any(|turn| turn.primary_text == "ab"));
+    assert_eq!(output.primary_text, "ab");
 }
 
 #[test]
