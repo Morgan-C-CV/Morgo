@@ -40,7 +40,7 @@ use rust_agent::skills::types::{
     SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
-use rust_agent::state::permission_context::{PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
@@ -123,6 +123,84 @@ fn test_app_state(
         boss_coordinator: None,
         remote_actor_store: None,
     }
+}
+
+#[tokio::test]
+async fn cli_status_surfaces_cwd_mode_and_pending_approval_before_debug_detail() {
+    let root = unique_temp_path("rust-agent-status-coding-surface");
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("status-coding-surface".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "pytest".into(),
+            message: "approval needed before running pytest".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+
+    let result = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("status command should produce plain text");
+
+    assert!(
+        text.contains("Working status:")
+            || text.contains("Current status:")
+            || text.contains("Coding status:"),
+        "/status should foreground current working state before raw runtime/debug sections; text={text}"
+    );
+    assert!(
+        text.contains("cwd") || text.contains("working_directory"),
+        "/status should surface the current working directory near the top; text={text}"
+    );
+    assert!(
+        text.contains("mode") || text.contains("permission_mode"),
+        "/status should surface the current mode or permission state near the top; text={text}"
+    );
+    assert!(
+        text.to_ascii_lowercase().contains("pending approval"),
+        "/status should surface pending approval in the main working-state block when approval is active; text={text}"
+    );
+
+    let working_anchor = text
+        .find("Working status:")
+        .or_else(|| text.find("Current status:"))
+        .or_else(|| text.find("Coding status:"))
+        .expect("working-status section should be present");
+    let runtime_anchor = text.find("Runtime:").expect("runtime section present");
+    let plugins_anchor = text.find("Plugins:").expect("plugins section present");
+
+    assert!(
+        working_anchor < runtime_anchor,
+        "working status should appear before runtime/debug detail; text={text}"
+    );
+    assert!(
+        working_anchor < plugins_anchor,
+        "working status should appear before plugin and legacy detail; text={text}"
+    );
 }
 
 fn sample_plugin_command(name: &str) -> PluginCommandDefinition {

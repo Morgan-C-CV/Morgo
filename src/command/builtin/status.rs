@@ -6,6 +6,7 @@ use crate::command::types::{
 use crate::core::output::OutputBlock;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
+use crate::state::permission_context::PermissionMode;
 
 pub struct StatusCommand;
 
@@ -32,6 +33,14 @@ impl Command for StatusCommand {
         _input: &NormalizedInput,
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
+        let cwd = app_state.current_working_directory();
+        let permission_mode = match app_state.permission_context.mode() {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::BypassPermissions => "bypass_permissions",
+            PermissionMode::Plan => "plan",
+        };
+        let pending_approval = app_state.permission_context.pending_approval();
         let tasks = app_state
             .permission_context
             .task_manager
@@ -507,6 +516,22 @@ impl Command for StatusCommand {
 
         let blocks = vec![
             OutputBlock::text("Status"),
+            OutputBlock::section(
+                "Working status",
+                {
+                    let mut items = vec![
+                        OutputBlock::kv("cwd", cwd.display().to_string()),
+                        OutputBlock::kv("mode", permission_mode),
+                    ];
+                    if let Some(pending) = pending_approval {
+                        items.push(OutputBlock::kv(
+                            "pending approval",
+                            format!("{} ({})", pending.tool_name, pending.message),
+                        ));
+                    }
+                    items
+                },
+            ),
             OutputBlock::section("Runtime", runtime_items),
             OutputBlock::section("Observability", obs_items),
             OutputBlock::section("Commands", cmd_items),
