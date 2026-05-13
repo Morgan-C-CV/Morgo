@@ -3116,14 +3116,28 @@ async fn telegram_surface_streaming_callback_receives_incremental_updates() {
         .expect("updates mutex should not be poisoned")
         .clone();
     assert!(updates.len() >= 3, "expected incremental telegram updates");
-    assert!(matches!(
-        updates.first().and_then(|turn| turn.events.first()),
-        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "tele"
-    ));
-    assert!(matches!(
-        updates.get(1).and_then(|turn| turn.events.get(1)),
-        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "gram"
-    ));
+    let first_delta_update = updates.iter().position(|turn| {
+        turn.events.iter().any(|event| {
+            matches!(
+                event,
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text }) if text == "tele"
+            )
+        })
+    });
+    let second_delta_update = updates.iter().position(|turn| {
+        turn.events.iter().any(|event| {
+            matches!(
+                event,
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text }) if text == "gram"
+            )
+        })
+    });
+    let first_text_update = updates
+        .iter()
+        .position(|turn| !turn.primary_text.is_empty())
+        .expect("expected a committed message update");
+    assert!(matches!(first_delta_update, Some(index) if index < first_text_update));
+    assert!(matches!(second_delta_update, Some(index) if index <= first_text_update));
     assert!(updates.iter().any(|turn| turn.primary_text == "telegram"));
     assert_eq!(output.primary_text, "telegram");
 }
