@@ -981,6 +981,76 @@ mod tui_output_tests {
         assert!(suggestions.iter().any(|item| item.label == "xhigh"));
         assert!(rendered.contains("medium"));
     }
+
+    #[test]
+    fn tui_permissions_mode_shows_mode_choices_with_details() {
+        let app_state = test_app_state();
+        let suggestions = heuristic_tui_suggestions(&app_state, "/permissions mode ")
+            .expect("permissions mode suggestions");
+        assert!(suggestions.iter().any(|item| item.label == "default"));
+        assert!(suggestions.iter().any(|item| item.label == "plan"));
+        assert!(suggestions.iter().any(|item| item.label == "accept-edits"));
+        assert!(suggestions.iter().any(|item| item.label == "bypass"));
+        assert!(suggestions.iter().all(|item| !item.detail.is_empty()));
+    }
+
+    #[test]
+    fn tui_plan_shows_structured_action_hints() {
+        let app_state = test_app_state();
+        let suggestions =
+            heuristic_tui_suggestions(&app_state, "/plan ").expect("plan suggestions");
+        assert!(suggestions.iter().any(|item| item.label == "status"));
+        assert!(suggestions.iter().any(|item| item.label == "add"));
+        assert!(suggestions.iter().any(|item| item.label == "update"));
+        assert!(suggestions.iter().any(|item| item.label == "enter"));
+    }
+
+    #[test]
+    fn tui_plugins_show_offers_named_target_placeholder_with_detail() {
+        let app_state = test_app_state();
+        let suggestions = heuristic_tui_suggestions(&app_state, "/plugins show ")
+            .expect("plugins show suggestions");
+        assert!(suggestions.iter().any(|item| item.label == "<name>"));
+        assert!(suggestions.iter().all(|item| !item.detail.is_empty()));
+    }
+
+    #[test]
+    fn tui_mcp_and_computer_show_parameter_hints() {
+        let app_state = test_app_state();
+
+        let mcp = heuristic_tui_suggestions(&app_state, "/mcp ")
+            .expect("mcp suggestions");
+        assert!(mcp.iter().any(|item| item.label == "connect"));
+        assert!(mcp.iter().any(|item| item.label == "approve"));
+
+        let computer = heuristic_tui_suggestions(&app_state, "/computer click ")
+            .expect("computer click suggestions");
+        assert!(computer.iter().any(|item| item.label == "<x> <y>"));
+        assert!(computer.iter().all(|item| !item.detail.is_empty()));
+    }
+
+    #[test]
+    fn tui_lism_um_and_swarm_show_subcommand_or_task_hints() {
+        let app_state = test_app_state();
+
+        let lism = heuristic_tui_suggestions(&app_state, "/LisM ")
+            .expect("LisM suggestions");
+        assert!(lism.iter().any(|item| item.label == "on"));
+        assert!(lism.iter().any(|item| item.label == "status"));
+
+        let um = heuristic_tui_suggestions(&app_state, "/UM ")
+            .expect("UM suggestions");
+        assert!(um.iter().any(|item| item.label == "off"));
+        assert!(um.iter().any(|item| item.label == "status"));
+
+        let swarm = heuristic_tui_suggestions(&app_state, "/swarm spawn ")
+            .expect("swarm suggestions");
+        assert!(swarm.iter().any(|item| {
+            item.label == "<teammate_id> <task description>"
+                || item.label == "<name>"
+                || item.label == "<task description>"
+        }));
+    }
 }
 
 fn preview_chars(value: &str, max_chars: usize) -> &str {
