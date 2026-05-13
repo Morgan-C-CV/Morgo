@@ -41,11 +41,13 @@ use crate::history::resume::{
     ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
 };
 use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
+use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    build_tui_loading_screen, build_tui_screen, render_document_output, render_document_tui_output,
-    render_output, render_tui_screen_output, render_turn_document,
+    RenderBlock, RenderDocument, build_tui_loading_screen, build_tui_screen,
+    render_document_output, render_document_tui_output, render_output, render_tui_screen_output,
+    render_turn_document,
 };
 use crate::interaction::cli::repl::{
     CliTurnOutput, handle_cli_input, handle_cli_input_streaming, handle_normalized_input,
@@ -1550,6 +1552,53 @@ fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) ->
 
 fn colorize_ansi(text: &str, code: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+fn tui_transcript_text(app_state: &AppState) -> String {
+    let transcript = Transcript::from(app_state.canonical_session_history());
+    let mut lines = Vec::new();
+    for entry in transcript.entries {
+        let text = entry.message.text();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let role = match entry.message.role {
+            crate::core::message::Role::System => "System",
+            crate::core::message::Role::User => "User",
+            crate::core::message::Role::Assistant => "Assistant",
+            crate::core::message::Role::Tool => "Tool",
+        };
+        lines.push(format!("{role}:"));
+        lines.extend(text.lines().map(|line| line.to_string()));
+        lines.push(String::new());
+    }
+    while lines.last().map(|line| line.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn tui_context_document(
+    app_state: &AppState,
+    current_turn_document: &RenderDocument,
+) -> RenderDocument {
+    let transcript_text = tui_transcript_text(app_state);
+    let mut blocks = Vec::new();
+    if !transcript_text.trim().is_empty() {
+        blocks.push(RenderBlock::PrimaryText(transcript_text));
+    }
+    blocks.extend(
+        current_turn_document
+            .blocks
+            .iter()
+            .filter(|block| !matches!(block, RenderBlock::PrimaryText(_)))
+            .cloned(),
+    );
+    if blocks.is_empty() {
+        current_turn_document.clone()
+    } else {
+        RenderDocument { blocks }
+    }
 }
 
 fn render_fixed_tui_layout(
@@ -3295,7 +3344,8 @@ impl RuntimeBootstrap {
         turn_status: TuiTurnStatus,
         cursor_index: usize,
     ) {
-        let mut screen = build_tui_screen(document);
+        let context_document = tui_context_document(app_state, document);
+        let mut screen = build_tui_screen(&context_document);
         screen.prompt = vec![
             format!(
                 "{} {}",
