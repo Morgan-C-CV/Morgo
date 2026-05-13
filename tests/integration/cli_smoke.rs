@@ -8,7 +8,9 @@ use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
 use rust_agent::core::message::Message;
-use rust_agent::core::query_loop::{QueryLoopState, Terminal};
+use rust_agent::core::query_loop::{
+    QueryLoopState, QueryParams, Terminal, run_query_loop_with_params,
+};
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::hook::registry::HookRegistry;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -170,6 +172,17 @@ fn assert_tool_result_contains(events: &[EngineEvent], tool_name: &str, expected
     );
 }
 
+fn final_assistant_message_text(
+    messages: &[rust_agent::core::message::Message],
+) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == rust_agent::core::message::Role::Assistant)
+        .map(|message| message.text())
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
     let workspace = tempfile::tempdir().expect("tempdir");
@@ -197,7 +210,7 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
         target.display()
     );
 
-    let engine = QueryEngine::new(coding_smoke_context(
+    let context = coding_smoke_context(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -241,8 +254,9 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
             ],
         ],
         workspace.path(),
-    ));
+    );
 
+    let engine = QueryEngine::new(context);
     let result = engine
         .submit_turn(Message::user(
             "Open the local file, change status from todo to done, run a local verification command, and tell me if it passed.",
@@ -269,13 +283,7 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
     assert_tool_started(&result.events, "Bash");
     assert_tool_result_contains(&result.events, "Bash", "status = \"done\"");
 
-    let final_message = result
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == rust_agent::core::message::Role::Assistant)
-        .map(|message| message.text())
-        .unwrap_or_default();
+    let final_message = final_assistant_message_text(&result.messages);
     assert!(
         final_message.contains("status from todo to done"),
         "coding smoke stalled at final summary: missing concrete change description; final={final_message:?}"
@@ -290,5 +298,190 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
         updated,
         "status = \"done\"\n",
         "coding smoke stalled at edit verification: file contents were not updated"
+    );
+}
+
+#[tokio::test]
+async fn cli_smoke_coding_loop_repairs_after_failed_verification() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let target = workspace.path().join("smoke_repair_target.txt");
+    std::fs::write(&target, "status = \"todo\"\n").expect("seed repair smoke target");
+
+    let target_display = target.to_string_lossy().to_string();
+    let read_input = serde_json::json!({
+        "file_path": target_display,
+    })
+    .to_string();
+    let first_edit_input = serde_json::json!({
+        "file_path": target_display,
+        "old_string": "status = \"todo\"",
+        "new_string": "status = \"don\""
+    })
+    .to_string();
+    let verify_input = serde_json::json!({
+        "command": format!("grep -n 'status = \"done\"' {}", target.display()),
+        "timeout": 5_000
+    })
+    .to_string();
+    let repair_edit_input = serde_json::json!({
+        "file_path": target_display,
+        "old_string": "status = \"don\"",
+        "new_string": "status = \"done\""
+    })
+    .to_string();
+    let final_summary = format!(
+        "Initial verification failed because {} still did not contain status = \"done\". I repaired the file by changing status from don to done, reran verification, and the second check passed.",
+        target.display()
+    );
+
+    let context = coding_smoke_context(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Reading the file before attempting the change.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Applying the first draft edit.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Edit".into(),
+                    input: first_edit_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Running the first verification command.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: verify_input.clone(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("The first verification failed, repairing the file.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Edit".into(),
+                    input: repair_edit_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Rerunning verification after the repair.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: verify_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(final_summary.clone()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        workspace.path(),
+    );
+
+    let result = run_query_loop_with_params(
+        &context,
+        Message::user(
+            "Change the local file to status done, verify it locally, repair any failure, and report the final outcome clearly.",
+        ),
+        QueryParams {
+            max_turns: Some(8),
+            ..QueryParams::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result.state,
+        QueryLoopState::Completed,
+        "repair smoke did not complete"
+    );
+    assert_eq!(
+        result.terminal,
+        Terminal::Completed,
+        "repair smoke did not reach a completed terminal state"
+    );
+
+    assert_tool_started(&result.events, "Read");
+    assert_tool_result_contains(&result.events, "Read", "status = \"todo\"");
+
+    let edit_successes = result
+        .events
+        .iter()
+        .filter(|event| matches!(
+            event,
+            EngineEvent::ToolResultCommitted { tool_name, .. } if tool_name == "Edit"
+        ))
+        .count();
+    assert!(
+        edit_successes >= 2,
+        "repair smoke stalled at file repair: expected two successful Edit results, got {edit_successes}"
+    );
+    assert_tool_result_contains(&result.events, "Edit", "edited");
+
+    let bash_results = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ToolResultCommitted {
+                tool_name, content, ..
+            } if tool_name == "Bash" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        bash_results.len() >= 2,
+        "repair smoke stalled at verification loop: expected two Bash results, got {}",
+        bash_results.len()
+    );
+    assert!(
+        bash_results.iter().any(|content| content.contains("exit_code: 1")),
+        "repair smoke stalled at first verification failure: missing Bash result with exit_code 1"
+    );
+    assert!(
+        bash_results.iter().any(|content| {
+            content.contains("exit_code: 0") && content.contains("status = \"done\"")
+        }),
+        "repair smoke stalled at second verification pass: missing successful Bash result"
+    );
+
+    let final_message = final_assistant_message_text(&result.messages);
+    assert!(
+        final_message.contains("Initial verification failed"),
+        "repair smoke stalled at final summary: missing failed-first explanation; final={final_message:?}"
+    );
+    assert!(
+        final_message.contains("second check passed"),
+        "repair smoke stalled at final summary: missing repaired verification verdict; final={final_message:?}"
+    );
+
+    let updated = std::fs::read_to_string(&target).expect("read repaired target");
+    assert_eq!(
+        updated,
+        "status = \"done\"\n",
+        "repair smoke stalled at final file verification: file contents were not repaired"
     );
 }
