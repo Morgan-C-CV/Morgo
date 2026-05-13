@@ -376,7 +376,7 @@ impl AppState {
             self.permission_context.set_pending_approval(None);
             emit_audit(decision);
             return Ok(CommandResult::Message(format!(
-                "Denied approval for {}",
+                "Denied approval for {}. The command was not executed. Update the command to a safer alternative, or approve it if you want it to run.",
                 pending.tool_name
             )));
         }
