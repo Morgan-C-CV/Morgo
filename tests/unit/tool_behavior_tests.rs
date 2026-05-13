@@ -14,8 +14,12 @@ use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::builtin::grep::GrepTool;
 use rust_agent::tool::builtin::notebook_edit::NotebookEditTool;
 use rust_agent::tool::builtin::task_create::TaskCreateTool;
+use rust_agent::tool::builtin::task_get::TaskGetTool;
+use rust_agent::tool::builtin::task_list::TaskListTool;
+use rust_agent::tool::builtin::task_output::TaskOutputTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
+use rust_agent::tool::builtin::todo_write::TodoWriteTool;
 use rust_agent::tool::builtin::tool_search::ToolSearchTool;
 use rust_agent::tool::builtin::web_fetch::{WebFetchTool, fetch_text_with};
 use rust_agent::tool::builtin::web_search::WebSearchTool;
@@ -1378,6 +1382,77 @@ fn v1_default_coding_model_surface_stays_local_and_core() {
         assert!(
             !visible_model_tool_names.iter().any(|name| name == excluded),
             "V1 default coding surface leaked non-core tool {excluded}; visible={visible_model_tool_names:?}"
+        );
+    }
+}
+
+#[test]
+fn v1_default_coding_model_surface_has_stable_complete_model_tool_contract() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(AskUserQuestionTool))
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileEditTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(FileWriteTool))
+        .register(Arc::new(GlobTool))
+        .register(Arc::new(GrepTool))
+        .register(Arc::new(NotebookEditTool))
+        .register(Arc::new(TaskCreateTool))
+        .register(Arc::new(TaskGetTool))
+        .register(Arc::new(TaskListTool))
+        .register(Arc::new(TaskOutputTool))
+        .register(Arc::new(TaskStopTool))
+        .register(Arc::new(TaskUpdateTool))
+        .register(Arc::new(TodoWriteTool))
+        .register(Arc::new(ToolSearchTool))
+        .register(Arc::new(WebFetchTool))
+        .register(Arc::new(WebSearchTool));
+
+    let context = ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Headless);
+    let assembled = registry.assemble(context);
+    let mut visible_model_tool_names = assembled
+        .visible_model_tools(&context.permission_context(PermissionMode::Default))
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    visible_model_tool_names.sort();
+
+    let expected_visible_model_tool_names = vec![
+        "Bash".to_string(),
+        "Edit".to_string(),
+        "Glob".to_string(),
+        "Grep".to_string(),
+        "Read".to_string(),
+        "Write".to_string(),
+    ];
+
+    assert_eq!(
+        visible_model_tool_names, expected_visible_model_tool_names,
+        "V1 default coding model-tool surface drifted; this test locks both the required local core tools and the current absence of deferred/non-schema tools"
+    );
+
+    for deferred in ["WebSearch", "WebFetch", "AskUserQuestion", "NotebookEdit"] {
+        assert!(
+            !visible_model_tool_names.iter().any(|name| name == deferred),
+            "deferred tool {deferred} unexpectedly became model-visible; visible={visible_model_tool_names:?}"
+        );
+    }
+
+    for non_model_builtin in [
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "TodoWrite",
+        "ToolSearch",
+    ] {
+        assert!(
+            !visible_model_tool_names
+                .iter()
+                .any(|name| name == non_model_builtin),
+            "builtin tool {non_model_builtin} unexpectedly entered the V1 model-tool surface; visible={visible_model_tool_names:?}"
         );
     }
 }
