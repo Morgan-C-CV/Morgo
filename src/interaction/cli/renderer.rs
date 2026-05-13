@@ -85,7 +85,7 @@ pub fn build_tui_loading_screen(request: &str, frame_index: usize) -> TuiScreen 
             "The agent is still processing your request.".into(),
         ],
         panels: vec![TuiPanelSection {
-            title: "Status".into(),
+            title: "Loading".into(),
             lines: vec![
                 "[state] running".into(),
                 format!("[input] {request}"),
