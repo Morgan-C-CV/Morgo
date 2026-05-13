@@ -6,7 +6,10 @@ use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use clap::Parser;
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind, poll, read,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
@@ -266,7 +269,7 @@ struct TuiRawModeGuard;
 impl TuiRawModeGuard {
     fn activate() -> anyhow::Result<Self> {
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         enable_raw_mode()?;
         Ok(Self)
     }
@@ -276,7 +279,7 @@ impl Drop for TuiRawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -306,6 +309,13 @@ struct TuiWrappedInputLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiWrappedInputLayout {
     lines: Vec<TuiWrappedInputLine>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TuiWheelAccelState {
+    last_event: Option<Instant>,
+    multiplier: f64,
+    direction: i8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1416,7 +1426,17 @@ fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> Tu
     let clamped_cursor = cursor_index.min(char_len);
     let layout = wrap_tui_input_lines(input, visible_width);
     let (cursor_line, cursor_column_offset) = tui_cursor_position(&layout, clamped_cursor);
-    let viewport_start = cursor_line.saturating_sub(INPUT_VIEWPORT_ROWS.saturating_sub(1));
+    let viewport_start = if layout.lines.len() <= INPUT_VIEWPORT_ROWS {
+        0
+    } else {
+        let half = INPUT_VIEWPORT_ROWS / 2;
+        let mut start = cursor_line.saturating_sub(half);
+        let end = (start + INPUT_VIEWPORT_ROWS).min(layout.lines.len());
+        if end.saturating_sub(start) < INPUT_VIEWPORT_ROWS {
+            start = end.saturating_sub(INPUT_VIEWPORT_ROWS);
+        }
+        start
+    };
     let visible_lines = layout
         .lines
         .iter()
@@ -1588,7 +1608,7 @@ fn render_fixed_tui_layout(
     let viewport = tui_input_viewport(input, cursor_index, width);
     let status_line = status_line_for_tui(turn_status, width);
     let model_cwd_line = format_tui_model_and_cwd(app_state);
-    let content_width = width.saturating_sub(1).max(1);
+    let content_width = width;
     let status_row = content_height.saturating_add(1).min(height);
     let model_row = content_height.saturating_add(2).min(height);
     let input_row = content_height.saturating_add(3).min(height);
@@ -1602,23 +1622,9 @@ fn render_fixed_tui_layout(
 
     for (row_index, line) in visible_lines.iter().enumerate() {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row_index + 1, line));
-        let scrollbar = render_tui_scrollbar_cell(
-            content_lines.len(),
-            content_height,
-            clamped_scroll_top,
-            row_index,
-        );
-        frame.push_str(&format!("\x1b[{};{}H{}", row_index + 1, width, scrollbar));
     }
     for row_index in visible_lines.len() + 1..=content_height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
-        let scrollbar = render_tui_scrollbar_cell(
-            content_lines.len(),
-            content_height,
-            clamped_scroll_top,
-            row_index.saturating_sub(1),
-        );
-        frame.push_str(&format!("\x1b[{};{}H{}", row_index, width, scrollbar));
     }
 
     frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", status_row, status_line));
@@ -1701,38 +1707,89 @@ fn tui_content_height_for_layout(
     terminal_rows.max(3).saturating_sub(bottom_reserved_height)
 }
 
-fn render_tui_scrollbar_cell(
-    total_lines: usize,
-    viewport_height: usize,
-    scroll_top: usize,
-    row_index: usize,
-) -> String {
-    if viewport_height == 0 {
-        return String::new();
-    }
-    if total_lines <= viewport_height {
-        return colorize_ansi("│", "2;37");
-    }
-    let thumb_height =
-        ((viewport_height * viewport_height) + total_lines - 1) / total_lines.max(1);
-    let thumb_height = thumb_height.clamp(1, viewport_height);
-    let max_scroll_top = total_lines.saturating_sub(viewport_height);
-    let track_span = viewport_height.saturating_sub(thumb_height);
-    let thumb_start = if max_scroll_top == 0 {
-        0
-    } else {
-        scroll_top * track_span / max_scroll_top
-    };
-    if row_index >= thumb_start && row_index < thumb_start + thumb_height {
-        colorize_ansi("█", "38;5;245")
-    } else {
-        colorize_ansi("│", "2;37")
-    }
-}
-
 fn tui_visible_content_height(input: &str, suggestions: &[TuiSuggestion]) -> usize {
     let (_, rows) = size().unwrap_or((100, 32));
     tui_content_height_for_layout(usize::from(rows.max(3)), input, suggestions)
+}
+
+fn tui_jump_by(
+    current_scroll_top: usize,
+    delta: isize,
+    max_scroll_top: usize,
+) -> (usize, bool) {
+    if delta >= 0 {
+        let next = current_scroll_top
+            .saturating_add(delta as usize)
+            .min(max_scroll_top);
+        (next, next >= max_scroll_top)
+    } else {
+        (current_scroll_top.saturating_sub(delta.unsigned_abs()), false)
+    }
+}
+
+fn tui_detect_xterm_js() -> bool {
+    std::env::var("TERM_PROGRAM")
+        .ok()
+        .map(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("vscode") || lower.contains("cursor") || lower.contains("windsurf")
+        })
+        .unwrap_or(false)
+}
+
+fn tui_compute_wheel_step(
+    state: &mut TuiWheelAccelState,
+    direction: i8,
+    now: Instant,
+    xterm_js: bool,
+) -> usize {
+    const WHEEL_BURST_MS: u128 = 5;
+    const WHEEL_DECAY_HALFLIFE_MS: f64 = 150.0;
+    const WHEEL_DECAY_STEP: f64 = 5.0;
+    const WHEEL_DECAY_GAP_MS: u128 = 80;
+    const WHEEL_DECAY_CAP_SLOW: f64 = 3.0;
+    const WHEEL_DECAY_CAP_FAST: f64 = 6.0;
+    const WHEEL_DECAY_IDLE_MS: u128 = 500;
+    const WHEEL_ACCEL_WINDOW_MS: u128 = 40;
+    const WHEEL_ACCEL_STEP: f64 = 0.3;
+    const WHEEL_ACCEL_MAX: f64 = 6.0;
+
+    let gap_ms = state
+        .last_event
+        .map(|previous| now.duration_since(previous).as_millis())
+        .unwrap_or(u128::MAX);
+    let step = if xterm_js {
+        let same_dir = direction == state.direction;
+        if same_dir && gap_ms < WHEEL_BURST_MS {
+            1.0
+        } else {
+            if !same_dir || gap_ms > WHEEL_DECAY_IDLE_MS {
+                state.multiplier = 2.0;
+            } else {
+                let momentum = 0.5f64.powf(gap_ms as f64 / WHEEL_DECAY_HALFLIFE_MS);
+                let cap = if gap_ms >= WHEEL_DECAY_GAP_MS {
+                    WHEEL_DECAY_CAP_SLOW
+                } else {
+                    WHEEL_DECAY_CAP_FAST
+                };
+                state.multiplier = (1.0
+                    + (state.multiplier - 1.0) * momentum
+                    + WHEEL_DECAY_STEP * momentum)
+                    .min(cap);
+            }
+            state.multiplier.max(1.0)
+        }
+    } else {
+        if gap_ms > WHEEL_ACCEL_WINDOW_MS {
+            state.multiplier = 1.0;
+        } else {
+            state.multiplier = (state.multiplier + WHEEL_ACCEL_STEP).min(WHEEL_ACCEL_MAX);
+        }
+        state.multiplier.max(1.0)
+    };
+    state.last_event = Some(now);
+    state.direction = direction;
+    step.floor().max(1.0) as usize
 }
 
 fn normalize_tui_newlines(text: &str) -> String {
@@ -2875,6 +2932,12 @@ impl RuntimeBootstrap {
         let mut selected_suggestion = 0usize;
         let mut content_scroll_top = usize::MAX;
         let mut follow_content_tail = true;
+        let mut wheel_accel = TuiWheelAccelState {
+            last_event: None,
+            multiplier: 1.0,
+            direction: 0,
+        };
+        let wheel_uses_xterm_decay = tui_detect_xterm_js();
         let mut active_turn_started_at: Option<Instant> = None;
         let mut last_turn_duration: Option<Duration> = None;
 
@@ -2905,14 +2968,21 @@ impl RuntimeBootstrap {
                 cursor_index,
             );
 
-            let Event::Key(key) = read()? else {
-                continue;
+            let refresh_interval = if active_turn_started_at.is_some() {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(60)
             };
-            if key.kind != KeyEventKind::Press {
+            if !poll(refresh_interval)? {
                 continue;
             }
+            match read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
 
-            match key.code {
+                    match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.print_tui_message("Exiting TUI session.");
                     execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
@@ -3118,30 +3188,36 @@ impl RuntimeBootstrap {
                     }
                 }
                 KeyCode::PageUp => {
-                    let page = tui_visible_content_height(&input, &suggestions).max(1);
+                    let page = (tui_visible_content_height(&input, &suggestions) / 2).max(1);
                     let max_scroll_top =
                         max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                    content_scroll_top = if follow_content_tail {
+                    let current_scroll_top = if follow_content_tail {
                         max_scroll_top
                     } else {
                         content_scroll_top
-                    }
-                    .saturating_sub(page);
-                    follow_content_tail = false;
+                    };
+                    let (next_scroll_top, sticky) =
+                        tui_jump_by(current_scroll_top, -(page as isize), max_scroll_top);
+                    follow_content_tail = sticky;
+                    content_scroll_top = if sticky {
+                        usize::MAX
+                    } else {
+                        next_scroll_top
+                    };
                 }
                 KeyCode::PageDown => {
-                    let page = tui_visible_content_height(&input, &suggestions).max(1);
+                    let page = (tui_visible_content_height(&input, &suggestions) / 2).max(1);
                     let max_scroll_top =
                         max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                    let next_scroll_top = if follow_content_tail {
+                    let current_scroll_top = if follow_content_tail {
                         max_scroll_top
                     } else {
                         content_scroll_top
-                    }
-                    .saturating_add(page)
-                    .min(max_scroll_top);
-                    follow_content_tail = next_scroll_top >= max_scroll_top;
-                    content_scroll_top = if follow_content_tail {
+                    };
+                    let (next_scroll_top, sticky) =
+                        tui_jump_by(current_scroll_top, page as isize, max_scroll_top);
+                    follow_content_tail = sticky;
+                    content_scroll_top = if sticky {
                         usize::MAX
                     } else {
                         next_scroll_top
@@ -3153,6 +3229,54 @@ impl RuntimeBootstrap {
                         selected_suggestion = 0;
                     }
                 }
+                _ => {}
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    let max_scroll_top =
+                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                    let current_scroll_top = if follow_content_tail {
+                        max_scroll_top
+                    } else {
+                        content_scroll_top
+                    };
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            let step = tui_compute_wheel_step(
+                                &mut wheel_accel,
+                                -1,
+                                Instant::now(),
+                                wheel_uses_xterm_decay,
+                            );
+                            let (next_scroll_top, sticky) =
+                                tui_jump_by(current_scroll_top, -(step as isize), max_scroll_top);
+                            follow_content_tail = sticky;
+                            content_scroll_top = if sticky {
+                                usize::MAX
+                            } else {
+                                next_scroll_top
+                            };
+                        }
+                        MouseEventKind::ScrollDown => {
+                            let step = tui_compute_wheel_step(
+                                &mut wheel_accel,
+                                1,
+                                Instant::now(),
+                                wheel_uses_xterm_decay,
+                            );
+                            let (next_scroll_top, sticky) =
+                                tui_jump_by(current_scroll_top, step as isize, max_scroll_top);
+                            follow_content_tail = sticky;
+                            content_scroll_top = if sticky {
+                                usize::MAX
+                            } else {
+                                next_scroll_top
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
