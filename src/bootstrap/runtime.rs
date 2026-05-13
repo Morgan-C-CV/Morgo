@@ -1325,10 +1325,13 @@ impl RuntimeBootstrap {
         selected_suggestion: usize,
     ) {
         let mut screen = build_tui_screen(document);
-        screen.prompt = vec![
-            colorize_ansi("Prompt", "1;36"),
-            format!("  > {}", if input.is_empty() { "" } else { input }),
-        ];
+        screen.prompt = vec![format!(
+            "{} {}",
+            colorize_ansi(">", "1;36"),
+            if input.is_empty() { "" } else { input }
+        )
+        .trim_end()
+        .to_string()];
 
         if input.starts_with('/') {
             let lines = if suggestions.is_empty() {

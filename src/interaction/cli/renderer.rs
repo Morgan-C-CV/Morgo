@@ -92,7 +92,7 @@ pub fn build_tui_loading_screen(request: &str, _frame_index: usize) -> TuiScreen
                 format!("Request: {request}"),
             ],
         }],
-        prompt: vec![],
+        prompt: vec![format!("> waiting for response: {request}")],
         footer: vec![],
     }
 }
@@ -148,7 +148,7 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     TuiScreen {
         main,
         panels,
-        prompt: vec![],
+        prompt: vec!["> ".into()],
         footer: vec![],
     }
 }
@@ -547,6 +547,10 @@ fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
         sections.push(lines.join("\n"));
     }
 
+    if !screen.prompt.is_empty() {
+        sections.push(screen.prompt.join("\n"));
+    }
+
     sections.join("\n\n")
 }
 
@@ -599,12 +603,6 @@ fn render_tui_boxed_sections(screen: &TuiScreen) -> Vec<String> {
         sections.push(render_tui_section(
             &panel.title,
             panel.lines.iter().map(|line| line.as_str()).collect(),
-        ));
-    }
-    if !screen.prompt.is_empty() {
-        sections.push(render_tui_section(
-            "Prompt",
-            screen.prompt.iter().map(|line| line.as_str()).collect(),
         ));
     }
     if !screen.footer.is_empty() {
@@ -746,5 +744,14 @@ mod tests {
         assert!(rendered.contains("answer"));
         assert!(!rendered.contains("recorded usage"));
         assert!(!rendered.contains("Notice:"));
+    }
+
+    #[test]
+    fn tui_prompt_renders_outside_box() {
+        let screen = build_tui_screen(&RenderDocument { blocks: vec![] });
+        let rendered = render_tui_screen_output(&screen);
+        assert!(rendered.contains("\n\n> "));
+        assert!(!rendered.contains("[Prompt]"));
+        assert!(!rendered.contains("║ [Prompt]"));
     }
 }
