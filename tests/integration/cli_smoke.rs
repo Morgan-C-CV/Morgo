@@ -485,3 +485,92 @@ async fn cli_smoke_coding_loop_repairs_after_failed_verification() {
         "repair smoke stalled at final file verification: file contents were not repaired"
     );
 }
+
+#[tokio::test]
+async fn cli_smoke_coding_loop_requests_more_context_when_target_is_underspecified() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let sentinel = workspace.path().join("do_not_touch.txt");
+    std::fs::write(&sentinel, "leave me alone\n").expect("seed sentinel file");
+
+    let engine = QueryEngine::new(coding_smoke_context(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta(
+                "I need more context before changing anything: please provide the target file path or a specific failing test, because the request is too underspecified to edit safely."
+                    .into(),
+            ),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]],
+        workspace.path(),
+    ));
+
+    let result = engine
+        .submit_turn(Message::user(
+            "Please fix the bug somewhere in this project and make it work.",
+        ))
+        .await;
+
+    assert_eq!(
+        result.state,
+        QueryLoopState::Completed,
+        "underspecified-context smoke did not complete cleanly"
+    );
+    assert_eq!(
+        result.terminal,
+        Terminal::Completed,
+        "underspecified-context smoke did not stop cleanly"
+    );
+
+    assert!(
+        !result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::ToolCallStarted { tool_name, .. }
+                if tool_name == "Edit" || tool_name == "Bash"
+        )),
+        "underspecified-context smoke incorrectly escalated into Edit or Bash without enough context"
+    );
+    assert!(
+        !result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::ToolResultCommitted { tool_name, .. }
+                if tool_name == "Edit" || tool_name == "Bash"
+        )),
+        "underspecified-context smoke incorrectly committed Edit or Bash results"
+    );
+    assert!(
+        !result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::ToolResultCommitted {
+                tool_name,
+                summary,
+                ..
+            } if (tool_name == "Edit" || tool_name == "Bash")
+                && summary.ends_with("succeeded")
+        )),
+        "underspecified-context smoke incorrectly entered a success path for Edit or Bash"
+    );
+
+    let final_message = final_assistant_message_text(&result.messages).to_lowercase();
+    assert!(
+        final_message.contains("need more context")
+            || final_message.contains("target file")
+            || final_message.contains("specific failing test")
+            || final_message.contains("underspecified"),
+        "underspecified-context smoke stalled at final summary: missing clear request for context; final={final_message:?}"
+    );
+    assert!(
+        !final_message.contains("verification passed")
+            && !final_message.contains("updated ")
+            && !final_message.contains("fixed "),
+        "underspecified-context smoke incorrectly reported success; final={final_message:?}"
+    );
+
+    let sentinel_contents = std::fs::read_to_string(&sentinel).expect("read sentinel");
+    assert_eq!(
+        sentinel_contents,
+        "leave me alone\n",
+        "underspecified-context smoke should not modify files when the target is unclear"
+    );
+}
