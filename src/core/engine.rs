@@ -590,7 +590,8 @@ fn runtime_event_for_transition(
         ),
         crate::core::query_loop::Continue::MaxOutputTokensEscalate
         | crate::core::query_loop::Continue::MaxOutputTokensRecovery
-        | crate::core::query_loop::Continue::TokenBudgetContinuation => {
+        | crate::core::query_loop::Continue::TokenBudgetContinuation
+        | crate::core::query_loop::Continue::FinalUserReport => {
             (RuntimeEventKind::RetryScheduled, None)
         }
         crate::core::query_loop::Continue::StopHookBlocking => {

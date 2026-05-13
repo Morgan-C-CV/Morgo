@@ -437,6 +437,14 @@ fn test_context_with_production_client(
     }
 }
 
+fn last_assistant_text(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, rust_agent::core::message::Role::Assistant))
+        .map(Message::text)
+}
+
 async fn run_openai_tool_loop_mock_server(
     listener: TcpListener,
     request_bodies: Arc<Mutex<Vec<String>>>,
@@ -839,6 +847,156 @@ async fn query_loop_synthesizes_terminal_user_update_when_tool_follow_up_turn_is
         "{:?}",
         result.events
     );
+}
+
+#[tokio::test]
+async fn query_loop_preserves_natural_language_final_report_without_extra_continuation() {
+    let result = run_query_loop(
+        &test_context(vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("Completed the patch and verified the output.".into()),
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]),
+        Message::user("finish the patch"),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, None);
+    assert_eq!(
+        last_assistant_text(&result.messages).as_deref(),
+        Some("Completed the patch and verified the output.")
+    );
+}
+
+#[tokio::test]
+async fn query_loop_requests_final_report_when_turn_ends_with_tool_status_text() {
+    let result = run_query_loop(
+        &test_context_with_turns(
+            vec![
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::TextDelta("tool Bash result: command succeeded (12 chars)".into()),
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::TextDelta(
+                        "Implemented the requested change, validation passed, and no remaining risk was found."
+                            .into(),
+                    ),
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            ],
+            ToolRegistry::new(),
+        ),
+        Message::user("wrap up the task"),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::FinalUserReport));
+    assert_eq!(
+        last_assistant_text(&result.messages).as_deref(),
+        Some(
+            "Implemented the requested change, validation passed, and no remaining risk was found."
+        )
+    );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Transition(Continue::FinalUserReport)
+    )));
+}
+
+#[tokio::test]
+async fn query_loop_synthesizes_final_report_after_invalid_final_report_retry() {
+    let result = run_query_loop(
+        &test_context_with_turns(
+            vec![
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::TextDelta("tool batch result:\nRead succeeded".into()),
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::TextDelta("tool Read result: alpha".into()),
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            ],
+            ToolRegistry::new(),
+        ),
+        Message::user("finish the response"),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::FinalUserReport));
+    let final_assistant = last_assistant_text(&result.messages)
+        .expect("synthetic final report should be appended");
+    assert_eq!(final_assistant, "Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one.");
+    assert!(result.messages.iter().any(|message| {
+        message.text() == "tool batch result:\nRead succeeded"
+    }));
+    assert!(result.messages.iter().any(|message| message.text() == "tool Read result: alpha"));
+}
+
+#[tokio::test]
+async fn query_loop_skips_tool_execution_during_final_report_retry() {
+    let result = run_query_loop(
+        &test_context_with_turns(
+            vec![
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::TextDelta("tool Bash result: command succeeded (12 chars)".into()),
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+                vec![
+                    StreamEvent::MessageStart,
+                    StreamEvent::ToolUse {
+                        tool_name: "EchoFixture".into(),
+                        input: r#"{"value":"123"}"#.into(),
+                    },
+                    StreamEvent::MessageStop {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ],
+            ],
+            ToolRegistry::new().register(Arc::new(EchoFixtureTool)),
+        ),
+        Message::user("close out the task"),
+    )
+    .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+    assert_eq!(result.transition, Some(Continue::FinalUserReport));
+    assert_eq!(
+        last_assistant_text(&result.messages).as_deref(),
+        Some("Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one.")
+    );
+    assert!(!result.messages.iter().any(|message| {
+        message.text().contains("tool EchoFixture result:")
+    }));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        EngineEvent::ToolCallStarted { tool_name, .. } if tool_name == "EchoFixture"
+    )));
 }
 
 #[tokio::test]
@@ -1530,6 +1688,46 @@ async fn cli_streaming_callback_receives_multiple_delta_updates_before_completio
     ));
     assert!(updates.iter().any(|turn| turn.primary_text == "ab"));
     assert_eq!(output.primary_text, "ab");
+}
+
+#[tokio::test]
+async fn cli_streaming_primary_text_ends_with_final_user_report_after_status_retry() {
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("tool batch result:\nRead succeeded".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "Implemented the requested change, validation passed, and no remaining risk was found."
+                        .into(),
+                ),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        ToolRegistry::new(),
+    ));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let app_state = engine.context.app_state.clone();
+
+    let output = handle_cli_input_streaming(&router, &mut engine, &app_state, "wrap up", |_| {})
+        .await
+        .expect("cli streaming should succeed");
+
+    assert!(output.primary_text.ends_with(
+        "Implemented the requested change, validation passed, and no remaining risk was found."
+    ));
+    assert!(!output.primary_text.ends_with("tool batch result:\nRead succeeded"));
 }
 
 #[tokio::test]

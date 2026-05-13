@@ -56,6 +56,7 @@ pub struct LoopState {
     pub has_attempted_reactive_compact: bool,
     pub max_output_tokens_override: Option<u64>,
     pub pending_tool_use_summary: Option<String>,
+    pub final_report_attempted: bool,
     pub prompt_only_output_contract_active: bool,
     pub prompt_only_discovery_locked: bool,
     pub stop_hook_active: bool,
@@ -72,6 +73,7 @@ impl LoopState {
             has_attempted_reactive_compact: false,
             max_output_tokens_override: params.initial_max_output_tokens,
             pending_tool_use_summary: None,
+            final_report_attempted: false,
             prompt_only_output_contract_active: false,
             prompt_only_discovery_locked: false,
             stop_hook_active: false,
@@ -119,6 +121,7 @@ impl Terminal {
 pub enum Continue {
     NextTurn,
     ToolUseFollowUp,
+    FinalUserReport,
     MaxOutputTokensEscalate,
     MaxOutputTokensRecovery,
     CollapseDrainRetry,
@@ -133,6 +136,7 @@ impl Continue {
         match self {
             Self::NextTurn => "next_turn",
             Self::ToolUseFollowUp => "tool_use_follow_up",
+            Self::FinalUserReport => "final_user_report",
             Self::MaxOutputTokensEscalate => "max_output_tokens_escalate",
             Self::MaxOutputTokensRecovery => "max_output_tokens_recovery",
             Self::CollapseDrainRetry => "collapse_drain_retry",
@@ -301,13 +305,20 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
         if streamed.is_empty() {
             turn_token.cancel();
             let _ = hb_handle.await;
-            return finalize_turn(
-                context,
-                state,
-                QueryLoopState::Completed,
-                Terminal::Completed,
-                EventCollector::from_events(events.take(), sink.clone()),
-            );
+            let events = EventCollector::from_events(events.take(), sink.clone());
+            return if state.final_report_attempted
+                && !is_user_facing_final_report(&state.messages)
+            {
+                query_result_with_synthetic_final_report(state, events)
+            } else {
+                finalize_turn(
+                    context,
+                    state,
+                    QueryLoopState::Completed,
+                    Terminal::Completed,
+                    events,
+                )
+            };
         }
 
         let turn_events = events.take();
@@ -366,6 +377,7 @@ enum NormalTurnFinalization {
     Continue {
         loop_state: LoopState,
         next_input: Message,
+        continue_reason: Continue,
         events: Vec<EngineEvent>,
     },
 }
@@ -378,13 +390,20 @@ fn check_turn_limits(
 ) -> Option<QueryLoopResult> {
     if let Some(max_turns) = params.max_turns {
         if state.turn_count >= max_turns {
+            let events = EventCollector::from_events(events.clone_events(), events.sink_clone());
+            if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
+                return Some(query_result_with_synthetic_final_report(
+                    state.clone(),
+                    events,
+                ));
+            }
             let count = state.turn_count;
             return Some(finalize_turn(
                 context,
                 state.clone(),
                 QueryLoopState::Failed,
                 Terminal::MaxTurns { count },
-                EventCollector::from_events(events.clone_events(), events.sink_clone()),
+                events,
             ));
         }
     }
@@ -422,6 +441,12 @@ fn prepare_turn(
                 code: None,
                 service_failure: None,
             });
+            if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
+                return Err(query_result_with_synthetic_final_report(
+                    state.clone(),
+                    EventCollector::from_events(events.clone_events(), events.sink_clone()),
+                ));
+            }
             if !params.messages.is_empty()
                 || state.transition == Some(Continue::TokenBudgetContinuation)
             {
@@ -455,6 +480,12 @@ fn prepare_turn(
         .compactor
         .plan_auto_compact(prepared.token_estimate, AUTO_COMPACT_INPUT_CHAR_LIMIT)
     {
+        if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
+            return Err(query_result_with_synthetic_final_report(
+                state.clone(),
+                EventCollector::from_events(events.clone_events(), events.sink_clone()),
+            ));
+        }
         if let Some(compact_message) = compact.plan.assistant_message.clone() {
             let compact_message = Message::assistant(compact_message);
             events.push(EngineEvent::CompactPlanIssued {
@@ -536,9 +567,13 @@ async fn stream_model_turn(
     max_output_tokens_override: Option<u64>,
     transition: Option<&Continue>,
 ) -> Vec<StreamEvent> {
-    let model_tools = context
-        .tool_registry
-        .visible_model_tools(&context.app_state.permission_context);
+    let model_tools = if is_final_report_continuation(transition) {
+        Vec::new()
+    } else {
+        context
+            .tool_registry
+            .visible_model_tools(&context.app_state.permission_context)
+    };
     let mut streamed = context
         .api_client
         .stream_message_with_tools_and_max_tokens(
@@ -581,13 +616,25 @@ async fn decide_next_turn(
     cancellation_token: Option<&CancellationToken>,
 ) -> NextTurnDecision {
     match turn_outcome.decision {
-        TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_turn(
-            context,
-            loop_state,
-            terminal_state(&terminal),
-            terminal,
-            EventCollector::from_events(turn_outcome.events, events.sink_clone()),
-        )),
+        TurnDecision::Return(loop_state, terminal) => {
+            let events = EventCollector::from_events(turn_outcome.events, events.sink_clone());
+            if loop_state.final_report_attempted
+                && !is_user_facing_final_report(&loop_state.messages)
+                && !matches!(terminal, Terminal::StopHookPrevented | Terminal::AbortedTools)
+            {
+                NextTurnDecision::Return(query_result_with_synthetic_final_report(
+                    loop_state, events,
+                ))
+            } else {
+                NextTurnDecision::Return(finalize_turn(
+                    context,
+                    loop_state,
+                    terminal_state(&terminal),
+                    terminal,
+                    events,
+                ))
+            }
+        }
         TurnDecision::FinalizeNormalTurn(loop_state) => {
             match finalize_normal_turn(
                 context,
@@ -598,14 +645,15 @@ async fn decide_next_turn(
                 NormalTurnFinalization::Continue {
                     loop_state,
                     next_input,
+                    continue_reason,
                     events: next_events,
                 } => {
                     *state = loop_state;
                     state.messages.push(next_input.clone());
                     state.turn_count += 1;
-                    state.transition = Some(Continue::StopHookBlocking);
+                    state.transition = Some(continue_reason.clone());
                     events.replace(next_events);
-                    events.push(EngineEvent::Transition(Continue::StopHookBlocking));
+                    events.push(EngineEvent::Transition(continue_reason));
                     *current_input = next_input;
                     state
                         .messages
@@ -660,14 +708,15 @@ async fn decide_next_turn(
                 NormalTurnFinalization::Continue {
                     loop_state,
                     next_input,
+                    continue_reason,
                     events: next_events,
                 } => {
                     *state = loop_state;
                     state.messages.push(next_input.clone());
                     state.turn_count += 1;
-                    state.transition = Some(Continue::StopHookBlocking);
+                    state.transition = Some(continue_reason.clone());
                     events.replace(next_events);
-                    events.push(EngineEvent::Transition(Continue::StopHookBlocking));
+                    events.push(EngineEvent::Transition(continue_reason));
                     *current_input = next_input;
                     state
                         .messages
@@ -753,6 +802,24 @@ async fn consume_model_stream(
                         aggregated_text.chars().count(),
                     );
                 }
+                if !aggregated_text.is_empty() {
+                    let message = Message::assistant(aggregated_text.clone());
+                    engine_events.push(EngineEvent::MessageCommitted(message.clone()));
+                    state.messages.push(message);
+                    aggregated_text.clear();
+                }
+                if state.final_report_attempted {
+                    engine_events.push(EngineEvent::Notice {
+                        kind: "runtime",
+                        message: format!(
+                            "final report continuation ended with stream error [{}]; synthesizing terminal report",
+                            error.kind
+                        ),
+                        code: None,
+                        service_failure: None,
+                    });
+                    return turn_outcome_with_final_report(state, engine_events);
+                }
                 let error_message = Message::assistant(format!("stream error: {}", error.message));
                 engine_events.push(EngineEvent::MessageCommitted(error_message.clone()));
                 state.messages.push(error_message);
@@ -807,6 +874,15 @@ async fn consume_model_stream(
             };
         }
         Some(StopReason::ToolUse) => {
+            if state.final_report_attempted {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "runtime",
+                    message: "final report continuation attempted tool use; skipping tool execution and synthesizing terminal report".into(),
+                    code: None,
+                    service_failure: None,
+                });
+                return turn_outcome_with_final_report(state, engine_events);
+            }
             if pending_tool_uses.is_empty() {
                 let message = "tool stop without tool payload";
                 let error_message = Message::assistant(format!("stream error: {message}"));
@@ -857,6 +933,15 @@ async fn consume_model_stream(
             };
         }
         Some(StopReason::MaxTokens) => {
+            if state.final_report_attempted {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "runtime",
+                    message: "final report continuation hit max output tokens; synthesizing terminal report".into(),
+                    code: None,
+                    service_failure: None,
+                });
+                return turn_outcome_with_final_report(state, engine_events);
+            }
             if state.max_output_tokens_override.is_none() {
                 state.max_output_tokens_override = Some(8_192);
                 engine_events.push(EngineEvent::Notice {
@@ -902,6 +987,15 @@ async fn consume_model_stream(
             };
         }
         Some(StopReason::Error) => {
+            if state.final_report_attempted {
+                engine_events.push(EngineEvent::Notice {
+                    kind: "runtime",
+                    message: "final report continuation ended with stop-reason error; synthesizing terminal report".into(),
+                    code: None,
+                    service_failure: None,
+                });
+                return turn_outcome_with_final_report(state, engine_events);
+            }
             let stop_error = synthetic_stop_reason_error(state.transition.as_ref());
             if !should_attempt_stream_recovery(&stop_error) {
                 let code = classify_service_failure_code(&stop_error);
@@ -2188,18 +2282,29 @@ fn finalize_normal_turn(
         return NormalTurnFinalization::Continue {
             loop_state: state,
             next_input: Message::user("Address the stop-hook blocking feedback and continue."),
+            continue_reason: Continue::StopHookBlocking,
             events: events.into_events(),
         };
     }
 
-    if !latest_visible_message_is_assistant(&state.messages) {
-        if let Some(summary) = state.pending_tool_use_summary.as_ref() {
-            let fallback = Message::assistant(synthesize_terminal_user_update(summary));
-            events.push(EngineEvent::MessageCommitted(fallback.clone()));
-            state.messages.push(fallback);
-        }
+    if context.is_subagent() || is_user_facing_final_report(&state.messages) {
+        return completed_turn_result(state, events);
     }
 
+    if state.final_report_attempted {
+        return completed_turn_with_synthetic_final_report(state, events);
+    }
+
+    state.final_report_attempted = true;
+    NormalTurnFinalization::Continue {
+        loop_state: state,
+        next_input: final_report_continuation_message(),
+        continue_reason: Continue::FinalUserReport,
+        events: events.into_events(),
+    }
+}
+
+fn completed_turn_result(state: LoopState, mut events: EventCollector) -> NormalTurnFinalization {
     let terminal = Terminal::Completed;
     events.push(EngineEvent::Terminal(terminal.clone()));
     NormalTurnFinalization::Return(QueryLoopResult {
@@ -2211,16 +2316,246 @@ fn finalize_normal_turn(
     })
 }
 
-fn latest_visible_message_is_assistant(messages: &[Message]) -> bool {
+fn latest_visible_message(messages: &[Message]) -> Option<&Message> {
     messages
         .iter()
         .rev()
         .find(|message| !message.text().trim().is_empty())
-        .is_some_and(|message| matches!(message.role, crate::core::message::Role::Assistant))
+}
+
+fn latest_visible_assistant_message(messages: &[Message]) -> Option<&Message> {
+    messages.iter().rev().find(|message| {
+        matches!(message.role, crate::core::message::Role::Assistant)
+            && !message.text().trim().is_empty()
+    })
+}
+
+fn is_user_facing_final_report(messages: &[Message]) -> bool {
+    latest_visible_message(messages).is_some_and(|message| {
+        matches!(message.role, crate::core::message::Role::Assistant)
+            && !is_runtime_or_tool_status_message(&message.text())
+    })
+}
+
+fn is_runtime_or_tool_status_message(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower.starts_with("tool batch result:")
+        || lower.starts_with("tool batch failed:")
+        || lower.starts_with("approval required for ")
+        || lower.starts_with("orchestration still pending:")
+        || lower.starts_with("stream error:")
+        || (lower.starts_with("tool ")
+            && (lower.contains(" result:")
+                || lower.contains(" denied:")
+                || lower.contains(" denied by hook:")
+                || lower.contains(" denied before execution:")
+                || lower.contains(" interrupted:")
+                || lower.contains(" progress:")
+                || lower.contains(" failed:")
+                || lower.contains(" result too large:")
+                || lower.contains(" oversized result preserved:")
+                || lower.contains(" structured failure preserved:")
+                || lower.contains(" result missing;")))
+}
+
+fn is_final_report_continuation(transition: Option<&Continue>) -> bool {
+    matches!(transition, Some(Continue::FinalUserReport))
+}
+
+fn final_report_continuation_message() -> Message {
+    Message::user(
+        "Provide the final user-facing report now. Do not call tools. Summarize what was done, validation status, and any remaining risk.",
+    )
+}
+
+fn completed_turn_with_synthetic_final_report(
+    mut state: LoopState,
+    mut events: EventCollector,
+) -> NormalTurnFinalization {
+    commit_synthetic_final_report(&mut state, &mut events);
+    completed_turn_result(state, events)
+}
+
+fn query_result_with_synthetic_final_report(
+    mut state: LoopState,
+    mut events: EventCollector,
+) -> QueryLoopResult {
+    commit_synthetic_final_report(&mut state, &mut events);
+    let terminal = Terminal::Completed;
+    events.push(EngineEvent::Terminal(terminal.clone()));
+    QueryLoopResult {
+        state: QueryLoopState::Completed,
+        terminal,
+        messages: state.messages,
+        transition: state.transition,
+        events: events.into_events(),
+    }
+}
+
+fn turn_outcome_with_final_report(
+    state: &mut LoopState,
+    mut events: EventCollector,
+) -> TurnOutcome {
+    commit_synthetic_final_report(state, &mut events);
+    TurnOutcome {
+        state: state.clone(),
+        events: events.into_events(),
+        decision: TurnDecision::Return(state.clone(), Terminal::Completed),
+    }
+}
+
+fn commit_synthetic_final_report(state: &mut LoopState, events: &mut EventCollector) {
+    if is_user_facing_final_report(&state.messages) {
+        return;
+    }
+    let report = Message::assistant(synthesize_terminal_final_report(state));
+    events.push(EngineEvent::MessageCommitted(report.clone()));
+    state.messages.push(report);
+}
+
+fn synthesize_terminal_final_report(state: &LoopState) -> String {
+    if let Some(summary) = latest_terminal_summary_candidate(state) {
+        if let Some(verification_report) = synthesize_verification_final_report(&summary) {
+            return verification_report;
+        }
+        return synthesize_terminal_user_update(&summary);
+    }
+    "Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one.".into()
+}
+
+fn latest_terminal_summary_candidate(state: &LoopState) -> Option<String> {
+    for message in state.messages.iter().rev() {
+        let text = message.text();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = match message.role {
+            crate::core::message::Role::User => summary_candidate_from_user_message(trimmed),
+            crate::core::message::Role::Assistant => {
+                summary_candidate_from_assistant_message(trimmed)
+            }
+            _ => None,
+        };
+        if let Some(candidate) = candidate {
+            return Some(candidate);
+        }
+    }
+    if let Some(message) = latest_visible_assistant_message(&state.messages) {
+        if let Some(candidate) = summary_candidate_from_assistant_message(&message.text()) {
+            return Some(candidate);
+        }
+    }
+    state
+        .pending_tool_use_summary
+        .as_deref()
+        .map(clean_terminal_summary)
+        .filter(|summary| !summary.is_empty())
+}
+
+fn summary_candidate_from_user_message(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed == final_report_continuation_message().text()
+        || trimmed == "Address the stop-hook blocking feedback and continue."
+        || trimmed.starts_with("Retry after model fallback recovery.")
+        || trimmed.starts_with("Please continue")
+    {
+        return None;
+    }
+    if trimmed.starts_with("tool result for ")
+        || trimmed.starts_with("tool batch result:")
+        || trimmed.contains("verification_result:")
+    {
+        let summary = clean_terminal_summary(trimmed);
+        return (!summary.is_empty()).then_some(summary);
+    }
+    None
+}
+
+fn summary_candidate_from_assistant_message(text: &str) -> Option<String> {
+    if is_runtime_or_tool_status_message(text) {
+        return None;
+    }
+    let summary = clean_terminal_summary(text);
+    (!summary.is_empty()).then_some(summary)
+}
+
+fn clean_terminal_summary(text: &str) -> String {
+    let trimmed = text.trim();
+    let without_prefix = if let Some(rest) = trimmed.strip_prefix("tool batch result:\n") {
+        rest.trim()
+    } else if let Some(rest) = trimmed.strip_prefix("tool batch result:") {
+        rest.trim()
+    } else if let Some(rest) = trimmed.strip_prefix("tool result for ") {
+        rest.split_once(':')
+            .map(|(_, detail)| detail.trim())
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    let mut lines = Vec::new();
+    for line in without_prefix.lines() {
+        if line.starts_with("Runtime guidance:")
+            || line.starts_with("Runtime gate:")
+            || line.starts_with("Contract reminder:")
+            || line.starts_with("Next action:")
+        {
+            break;
+        }
+        lines.push(line.trim_end());
+    }
+    let cleaned = lines.join("\n").trim().to_string();
+    if cleaned.is_empty() {
+        without_prefix.to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn synthesize_verification_final_report(summary: &str) -> Option<String> {
+    let target = extract_summary_field(summary, "verified_target")?;
+    let verification_result =
+        extract_summary_field(summary, "verification_result").unwrap_or_else(|| "completed".into());
+    let minimal_evidence = extract_summary_field(summary, "minimal_evidence");
+    let remaining_blocker = extract_summary_field(summary, "remaining_blocker");
+    let headline = if verification_result.eq_ignore_ascii_case("verified") {
+        format!("verified {target}")
+    } else {
+        format!("validation {verification_result} for {target}")
+    };
+    let mut report = format!("Final update: {headline}.");
+    if let Some(evidence) = minimal_evidence.filter(|value| !value.eq_ignore_ascii_case("none")) {
+        report.push_str(" Evidence: ");
+        report.push_str(&evidence);
+        report.push('.');
+    }
+    if let Some(blocker) = remaining_blocker {
+        report.push_str(" Remaining risk: ");
+        if blocker.eq_ignore_ascii_case("none") {
+            report.push_str("none.");
+        } else {
+            report.push_str(&blocker);
+            report.push('.');
+        }
+    }
+    Some(report)
+}
+
+fn extract_summary_field(summary: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    summary
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn synthesize_terminal_user_update(summary: &str) -> String {
-    let trimmed = summary.trim();
+    let trimmed = clean_terminal_summary(summary);
     if trimmed.is_empty() {
         "Final update: completed the requested runtime work.".into()
     } else {
