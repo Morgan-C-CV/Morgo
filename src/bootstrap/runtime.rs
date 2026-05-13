@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -293,6 +293,13 @@ struct TuiInputViewport {
     visible_input: String,
     start_char: usize,
     cursor_column: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TuiTurnStatus {
+    Idle,
+    Working(Duration),
+    Worked(Duration),
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -1319,6 +1326,57 @@ fn display_width_for_chars(chars: &[char]) -> usize {
         .sum()
 }
 
+fn format_tui_elapsed(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    format!("{minutes}m {seconds:02}s")
+}
+
+fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
+    let base = match status {
+        TuiTurnStatus::Idle => String::new(),
+        TuiTurnStatus::Working(duration) => {
+            format!("• Working ({} • esc to interrupt)", format_tui_elapsed(duration))
+        }
+        TuiTurnStatus::Worked(duration) => {
+            let label = format!(" Worked for {} ", format_tui_elapsed(duration));
+            let available = width.saturating_sub(label.chars().count());
+            let left = available / 2;
+            let right = available.saturating_sub(left);
+            format!("{}{}{}", "─".repeat(left), label, "─".repeat(right))
+        }
+    };
+    colorize_ansi(&base, "2;37")
+}
+
+fn format_tui_model_and_cwd(app_state: &AppState) -> String {
+    let model_label = if let Some(runtime) = app_state.active_model_runtime.as_ref() {
+        let snapshot = runtime.snapshot_blocking();
+        match snapshot.active_level {
+            Some(level) => format!("{} {}", snapshot.config.model_id, level.as_str()),
+            None => snapshot.config.model_id,
+        }
+    } else {
+        app_state.active_model_provider_summary.model.clone()
+    };
+    let cwd_label = shorten_home_path(&app_state.current_working_directory());
+    colorize_ansi(&format!("{model_label} · {cwd_label}"), "2;37")
+}
+
+fn shorten_home_path(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_path = std::path::PathBuf::from(home);
+        if let Ok(relative) = path.strip_prefix(&home_path) {
+            if relative.as_os_str().is_empty() {
+                return "~".into();
+            }
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
     let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
     let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
@@ -1335,11 +1393,13 @@ fn colorize_ansi(text: &str, code: &str) -> String {
 }
 
 fn render_fixed_tui_layout(
+    app_state: &AppState,
     screen: &crate::interaction::cli::renderer::TuiScreen,
     input: &str,
     suggestions: &[TuiSuggestion],
     selected_suggestion: usize,
     content_scroll_offset: usize,
+    turn_status: TuiTurnStatus,
     cursor_index: usize,
 ) -> String {
     let mut content_screen = screen.clone();
@@ -1373,7 +1433,7 @@ fn render_fixed_tui_layout(
     } else {
         Vec::new()
     };
-    let bottom_reserved_height = 2usize + suggestion_lines.len();
+    let bottom_reserved_height = 3usize + suggestion_lines.len();
     let content_height = height.saturating_sub(bottom_reserved_height);
     let max_scroll_offset = max_tui_content_scroll_offset(content_lines.len(), content_height);
     let clamped_scroll_offset = content_scroll_offset.min(max_scroll_offset);
@@ -1386,12 +1446,13 @@ fn render_fixed_tui_layout(
     };
 
     let viewport = tui_input_viewport(input, cursor_index, width);
-    let title_text = " INPUT ";
-    let title_padding = " ".repeat(width.saturating_sub(title_text.chars().count()));
+    let status_line = status_line_for_tui(turn_status, width);
+    let model_cwd_line = format_tui_model_and_cwd(app_state);
     let input_padding = " "
         .repeat(width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())));
-    let input_title_row = content_height.saturating_add(1).min(height);
-    let input_row = content_height.saturating_add(2).min(height);
+    let status_row = content_height.saturating_add(1).min(height);
+    let model_row = content_height.saturating_add(2).min(height);
+    let input_row = content_height.saturating_add(3).min(height);
     let cursor_col = viewport.cursor_column.min(width).max(1);
 
     let mut frame = String::from("\x1b[?25l");
@@ -1404,10 +1465,8 @@ fn render_fixed_tui_layout(
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
     }
 
-    frame.push_str(&format!(
-        "\x1b[{};1H\x1b[2K\x1b[48;5;238;2;37m{}{}\x1b[0m",
-        input_title_row, title_text, title_padding
-    ));
+    frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", status_row, status_line));
+    frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", model_row, model_cwd_line));
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
         input_row, viewport.visible_input, input_padding
@@ -1438,7 +1497,7 @@ fn tui_content_height_for_layout(
     } else {
         0
     };
-    let bottom_reserved_height = 2usize + suggestion_count;
+    let bottom_reserved_height = 3usize + suggestion_count;
     terminal_rows.max(3).saturating_sub(bottom_reserved_height)
 }
 
@@ -1456,7 +1515,7 @@ mod tui_output_tests {
     use super::{
         backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
         normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
-        tui_input_viewport,
+        tui_input_viewport, TuiTurnStatus,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -1471,6 +1530,7 @@ mod tui_output_tests {
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -1512,6 +1572,7 @@ mod tui_output_tests {
 
     #[test]
     fn tui_slash_suggestions_render_below_input_box() {
+        let app_state = test_app_state();
         let screen = crate::interaction::cli::renderer::TuiScreen {
             main: vec!["body".into()],
             panels: vec![],
@@ -1526,11 +1587,13 @@ mod tui_output_tests {
         )];
 
         let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &app_state,
             &screen,
             "/h",
             &suggestions,
             0,
             0,
+            TuiTurnStatus::Idle,
             2,
         ));
         let input_pos = rendered
@@ -1545,6 +1608,7 @@ mod tui_output_tests {
 
     #[test]
     fn tui_layout_respects_content_scroll_offset() {
+        let app_state = test_app_state();
         let screen = crate::interaction::cli::renderer::TuiScreen {
             main: (1..=40).map(|n| format!("line-{n}")).collect(),
             panels: vec![],
@@ -1552,10 +1616,50 @@ mod tui_output_tests {
             footer: vec![],
         };
 
-        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(&screen, "", &[], 0, 5, 0));
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            0,
+            5,
+            TuiTurnStatus::Idle,
+            0,
+        ));
 
         assert!(rendered.contains("line-6"));
         assert!(!rendered.contains("line-40"));
+    }
+
+    #[test]
+    fn tui_status_lines_render_above_input_box() {
+        let app_state = test_app_state();
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["body".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            0,
+            0,
+            TuiTurnStatus::Worked(Duration::from_secs(157)),
+            0,
+        ));
+
+        let status_pos = rendered.find("Worked for 2m 37s").expect("worked status");
+        let model_pos = rendered
+            .find("default-model")
+            .expect("model and cwd line should render");
+        let input_pos = rendered.find(">").expect("input prompt should render");
+
+        assert!(status_pos < model_pos);
+        assert!(model_pos < input_pos);
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -2515,7 +2619,6 @@ impl RuntimeBootstrap {
         line: String,
         on_update: impl FnMut(&CliTurnOutput),
     ) -> anyhow::Result<CliTurnOutput> {
-        self.print_tui_loading_frame(&line, 0);
         handle_cli_input_streaming(router, engine, app_state, line, on_update).await
     }
 
@@ -2534,18 +2637,29 @@ impl RuntimeBootstrap {
         let mut cursor_index = 0usize;
         let mut selected_suggestion = 0usize;
         let mut content_scroll_offset = 0usize;
+        let mut active_turn_started_at: Option<Instant> = None;
+        let mut last_turn_duration: Option<Duration> = None;
 
         loop {
             let suggestions = tui_command_suggestions(app_state, &input);
             if selected_suggestion >= suggestions.len() {
                 selected_suggestion = 0;
             }
+            let turn_status = if let Some(started_at) = active_turn_started_at {
+                TuiTurnStatus::Working(started_at.elapsed())
+            } else if let Some(duration) = last_turn_duration {
+                TuiTurnStatus::Worked(duration)
+            } else {
+                TuiTurnStatus::Idle
+            };
             self.print_tui_interactive_frame(
+                app_state,
                 &current_document,
                 &input,
                 &suggestions,
                 selected_suggestion,
                 content_scroll_offset,
+                turn_status,
                 cursor_index,
             );
 
@@ -2585,6 +2699,8 @@ impl RuntimeBootstrap {
                     cursor_index = 0;
                     selected_suggestion = 0;
                     content_scroll_offset = 0;
+                    active_turn_started_at = Some(Instant::now());
+                    last_turn_duration = None;
 
                     if self.should_exit_tui_input(&line) {
                         self.print_tui_message("Exiting TUI session.");
@@ -2603,11 +2719,17 @@ impl RuntimeBootstrap {
                                 if next_document != current_document {
                                     current_document = next_document;
                                     self.print_tui_interactive_frame(
+                                        app_state,
                                         &current_document,
                                         "",
                                         &[],
                                         0,
                                         0,
+                                        TuiTurnStatus::Working(
+                                            active_turn_started_at
+                                                .map(|instant| instant.elapsed())
+                                                .unwrap_or_default(),
+                                        ),
                                         0,
                                     );
                                 }
@@ -2616,6 +2738,9 @@ impl RuntimeBootstrap {
                         .await?;
                     current_document = render_turn_document(&output);
                     content_scroll_offset = 0;
+                    last_turn_duration =
+                        active_turn_started_at.map(|started_at| started_at.elapsed());
+                    active_turn_started_at = None;
                 }
                 KeyCode::Backspace => {
                     if backspace_input_char(&mut input, &mut cursor_index) {
@@ -2689,11 +2814,13 @@ impl RuntimeBootstrap {
 
     fn print_tui_interactive_frame(
         &self,
+        app_state: &AppState,
         document: &crate::interaction::cli::renderer::RenderDocument,
         input: &str,
         suggestions: &[TuiSuggestion],
         selected_suggestion: usize,
         content_scroll_offset: usize,
+        turn_status: TuiTurnStatus,
         cursor_index: usize,
     ) {
         let mut screen = build_tui_screen(document);
@@ -2707,11 +2834,13 @@ impl RuntimeBootstrap {
             .to_string(),
         ];
         self.write_tui_frame(render_fixed_tui_layout(
+            app_state,
             &screen,
             input,
             suggestions,
             selected_suggestion,
             content_scroll_offset,
+            turn_status,
             cursor_index,
         ));
     }
