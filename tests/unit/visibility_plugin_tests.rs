@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::builtin::doctor::DoctorCommand;
 use rust_agent::command::builtin::help::HelpCommand;
 use rust_agent::command::builtin::lism::LisMCommand;
 use rust_agent::command::builtin::permissions::PermissionsCommand;
@@ -271,6 +272,96 @@ async fn cli_status_keeps_working_state_compact_and_debug_sections_secondary() {
             || text.contains("Diagnostics:")
             || text.contains("Runtime diagnostics:"),
         "/status should explicitly mark Runtime/Observability/Commands/Integrations/Plugins as secondary diagnostics instead of presenting them as the same tier as working state; text={text}"
+    );
+}
+
+#[tokio::test]
+async fn cli_doctor_prioritizes_coding_blockers_before_secondary_diagnostics() {
+    let root = unique_temp_path("rust-agent-doctor-coding-blockers");
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("doctor-coding-blockers".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "pytest".into(),
+            message: "approval needed before running pytest".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+    app_state.active_model_provider_summary.auth_status = "env:OPENAI_API_KEY(unset)".into();
+
+    let result = DoctorCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/doctor"),
+            &app_state,
+        )
+        .await
+        .expect("doctor command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("doctor command should produce plain text");
+
+    assert!(
+        text.contains("Coding blockers:")
+            || text.contains("Primary blockers:")
+            || text.contains("Continue coding:"),
+        "/doctor should foreground coding-path blockers before generic diagnostics; text={text}"
+    );
+    assert!(
+        text.contains("OPENAI_API_KEY")
+            || text.to_ascii_lowercase().contains("api key")
+            || text.to_ascii_lowercase().contains("auth_status"),
+        "/doctor should surface model/API auth blockers near the top when coding cannot proceed cleanly; text={text}"
+    );
+    assert!(
+        text.contains("cwd") || text.to_ascii_lowercase().contains("working directory"),
+        "/doctor should surface cwd/filesystem context near the top so users can tell whether the workspace is usable; text={text}"
+    );
+    assert!(
+        text.to_ascii_lowercase().contains("pending approval")
+            || text.to_ascii_lowercase().contains("permission mode")
+            || text.to_ascii_lowercase().contains("mode:"),
+        "/doctor should surface permission-mode or pending-approval blockers near the top; text={text}"
+    );
+    assert!(
+        text.contains("Plugins:")
+            || text.contains("Integrations:")
+            || text.contains("Secondary diagnostics:"),
+        "/doctor should continue to include secondary diagnostics, but only after primary coding blockers; text={text}"
+    );
+
+    let blocker_anchor = text
+        .find("Coding blockers:")
+        .or_else(|| text.find("Primary blockers:"))
+        .or_else(|| text.find("Continue coding:"))
+        .expect("coding blocker section should be present");
+    let plugin_anchor = text.find("Plugins:");
+    let integration_anchor = text.find("Integrations:");
+    let secondary_anchor = text.find("Secondary diagnostics:");
+    let later_anchor = plugin_anchor
+        .or(integration_anchor)
+        .or(secondary_anchor)
+        .expect("secondary diagnostics anchor should be present");
+
+    assert!(
+        blocker_anchor < later_anchor,
+        "/doctor should show coding blockers before plugin/secondary diagnostics; text={text}"
     );
 }
 
