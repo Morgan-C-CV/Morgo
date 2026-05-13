@@ -13,6 +13,7 @@ use crate::state::app_state::SessionPersistFailure;
 use crate::task::types::TaskEvent;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const STREAM_TURN_BUFFER: usize = 64;
 
@@ -292,16 +293,38 @@ impl QueryEngine {
 
     fn start_turn(&mut self, input: Message) -> StreamingTurnHandle {
         let params = self.query_params_for_input(&input);
-        let context = self.context.clone();
+        let mut context = self.context.clone();
+        let turn_cancellation = self.context.app_state.cancellation_token.child_token();
+        context.app_state.cancellation_token = turn_cancellation.clone();
+        context.app_state.permission_context = context
+            .app_state
+            .permission_context
+            .clone()
+            .with_cancellation_token(turn_cancellation.clone());
         let background_input = input.clone();
         let (surface_tx, surface_rx) = mpsc::channel(STREAM_TURN_BUFFER);
         let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel();
         let (completion_tx, completion_rx) = oneshot::channel();
 
+        let bridge_cancellation = turn_cancellation.clone();
         tokio::spawn(async move {
-            while let Some(event) = bridge_rx.recv().await {
-                if surface_tx.send(event).await.is_err() {
-                    break;
+            loop {
+                tokio::select! {
+                    _ = surface_tx.closed() => {
+                        bridge_cancellation.cancel();
+                        break;
+                    }
+                    maybe_event = bridge_rx.recv() => {
+                        match maybe_event {
+                            Some(event) => {
+                                if surface_tx.send(event).await.is_err() {
+                                    bridge_cancellation.cancel();
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
         });
@@ -327,8 +350,14 @@ impl QueryEngine {
                 })
             };
             let mut result =
-                run_query_loop_with_params_and_sink(&context, background_input, params, Some(sink))
-                    .await;
+                run_query_loop_with_params_and_sink(
+                    &context,
+                    background_input,
+                    params,
+                    Some(sink),
+                    Some(turn_cancellation),
+                )
+                .await;
             let mut state = stream_state
                 .lock()
                 .expect("streaming turn state should not be poisoned");

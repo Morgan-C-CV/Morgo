@@ -14,8 +14,10 @@ use crate::tool::orchestrator::{ToolExecutionOutcome, aggregate_execution_record
 use crate::tool::result::{
     ToolExecutionRecord, ToolExecutionReport, ToolReportContextModifier, ToolReportModifier,
 };
+use std::future::Future;
 use std::sync::Arc;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
 
@@ -216,7 +218,7 @@ pub async fn run_query_loop_with_params(
     input: Message,
     params: QueryParams,
 ) -> QueryLoopResult {
-    run_query_loop_with_params_and_sink(context, input, params, None).await
+    run_query_loop_with_params_and_sink(context, input, params, None, None).await
 }
 
 pub(crate) async fn run_query_loop_with_params_and_sink(
@@ -224,6 +226,7 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
     input: Message,
     params: QueryParams,
     sink: Option<QueryLoopEventSink>,
+    cancellation_token: Option<CancellationToken>,
 ) -> QueryLoopResult {
     let mut state = LoopState::new(&params);
     state.messages.extend(inbox_messages(context, None));
@@ -232,6 +235,13 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
     state.messages.push(current_input.clone());
 
     loop {
+        if is_cancellation_requested(cancellation_token.as_ref()) {
+            return finalize_cancelled_turn(
+                context,
+                state,
+                EventCollector::from_events(events.take(), sink.clone()),
+            );
+        }
         context.app_state.record_activity();
 
         // Start a keep-alive heartbeat for the duration of this turn
@@ -264,13 +274,28 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
                 return result;
             }
         };
-        let streamed = stream_model_turn(
-            context,
-            &prepared,
-            state.max_output_tokens_override,
-            state.transition.as_ref(),
+        let streamed = match await_with_cancellation(
+            cancellation_token.as_ref(),
+            stream_model_turn(
+                context,
+                &prepared,
+                state.max_output_tokens_override,
+                state.transition.as_ref(),
+            ),
         )
-        .await;
+        .await
+        {
+            Some(streamed) => streamed,
+            None => {
+                turn_token.cancel();
+                let _ = hb_handle.await;
+                return finalize_cancelled_turn(
+                    context,
+                    state,
+                    EventCollector::from_events(events.take(), sink.clone()),
+                );
+            }
+        };
         if streamed.is_empty() {
             turn_token.cancel();
             let _ = hb_handle.await;
@@ -291,6 +316,7 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
             streamed,
             prepared.prompt.chars().count(),
             params.max_output_tokens_recovery_limit,
+            cancellation_token.as_ref(),
         )
         .await;
 
@@ -300,6 +326,7 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
             turn_outcome,
             &mut current_input,
             &mut events,
+            cancellation_token.as_ref(),
         )
         .await;
 
@@ -549,6 +576,7 @@ async fn decide_next_turn(
     turn_outcome: TurnOutcome,
     current_input: &mut Message,
     events: &mut EventCollector,
+    cancellation_token: Option<&CancellationToken>,
 ) -> NextTurnDecision {
     match turn_outcome.decision {
         TurnDecision::Return(loop_state, terminal) => NextTurnDecision::Return(finalize_turn(
@@ -598,7 +626,17 @@ async fn decide_next_turn(
             NextTurnDecision::Continue
         }
         TurnDecision::AwaitMailbox => {
-            if let Some(next_input) = next_worker_mailbox_message(context).await {
+            let next_input =
+                await_with_cancellation(cancellation_token, next_worker_mailbox_message(context))
+                    .await;
+            let Some(next_input) = next_input else {
+                return NextTurnDecision::Return(finalize_cancelled_turn(
+                    context,
+                    turn_outcome.state,
+                    EventCollector::from_events(turn_outcome.events, events.sink_clone()),
+                ));
+            };
+            if let Some(next_input) = next_input {
                 *state = turn_outcome.state;
                 state.messages.push(next_input.clone());
                 state.turn_count += 1;
@@ -673,6 +711,7 @@ async fn consume_model_stream(
     stream_events: Vec<StreamEvent>,
     prompt_chars: usize,
     max_output_tokens_recovery_limit: usize,
+    cancellation_token: Option<&CancellationToken>,
 ) -> TurnOutcome {
     let mut aggregated_text = String::new();
     let mut pending_tool_uses: Vec<(String, String)> = Vec::new();
@@ -680,6 +719,9 @@ async fn consume_model_stream(
     let mut terminal_stop_reason: Option<StopReason> = None;
 
     for event in stream_events {
+        if is_cancellation_requested(cancellation_token) {
+            return cancelled_turn_outcome(state, engine_events);
+        }
         match event {
             StreamEvent::MessageStart => {}
             StreamEvent::TextDelta(delta) => {
@@ -782,11 +824,41 @@ async fn consume_model_stream(
             }
             if pending_tool_uses.len() == 1 {
                 let (tool_name, tool_input) = pending_tool_uses.remove(0);
-                return execute_tool_phase(context, state, engine_events, tool_name, tool_input)
-                    .await;
+                let fallback_events = engine_events.clone_events();
+                return match await_with_cancellation(
+                    cancellation_token,
+                    execute_tool_phase(context, state, engine_events, tool_name, tool_input),
+                )
+                .await
+                {
+                    Some(outcome) => outcome,
+                    None => TurnOutcome {
+                        state: state.clone(),
+                        events: fallback_events,
+                        decision: TurnDecision::Return(
+                            state.clone(),
+                            Terminal::AbortedStreaming,
+                        ),
+                    },
+                };
             }
-            return execute_tool_batch_phase(context, state, engine_events, pending_tool_uses)
-                .await;
+            let fallback_events = engine_events.clone_events();
+            return match await_with_cancellation(
+                cancellation_token,
+                execute_tool_batch_phase(context, state, engine_events, pending_tool_uses),
+            )
+            .await
+            {
+                Some(outcome) => outcome,
+                None => TurnOutcome {
+                    state: state.clone(),
+                    events: fallback_events,
+                    decision: TurnDecision::Return(
+                        state.clone(),
+                        Terminal::AbortedStreaming,
+                    ),
+                },
+            };
         }
         Some(StopReason::MaxTokens) => {
             if state.max_output_tokens_override.is_none() {
@@ -1987,6 +2059,49 @@ fn inbox_messages(context: &QueryContext, target_task_id: Option<&str>) -> Vec<M
                 .collect()
         })
         .unwrap_or_default()
+}
+
+async fn await_with_cancellation<F, T>(
+    cancellation_token: Option<&CancellationToken>,
+    future: F,
+) -> Option<T>
+where
+    F: Future<Output = T>,
+{
+    if let Some(token) = cancellation_token {
+        tokio::select! {
+            _ = token.cancelled() => None,
+            value = future => Some(value),
+        }
+    } else {
+        Some(future.await)
+    }
+}
+
+fn is_cancellation_requested(cancellation_token: Option<&CancellationToken>) -> bool {
+    cancellation_token.is_some_and(CancellationToken::is_cancelled)
+}
+
+fn cancelled_turn_outcome(state: &LoopState, events: EventCollector) -> TurnOutcome {
+    TurnOutcome {
+        state: state.clone(),
+        events: events.into_events(),
+        decision: TurnDecision::Return(state.clone(), Terminal::AbortedStreaming),
+    }
+}
+
+fn finalize_cancelled_turn(
+    context: &QueryContext,
+    state: LoopState,
+    events: EventCollector,
+) -> QueryLoopResult {
+    finalize_turn(
+        context,
+        state,
+        QueryLoopState::Interrupted,
+        Terminal::AbortedStreaming,
+        events,
+    )
 }
 
 async fn next_worker_mailbox_message(context: &QueryContext) -> Option<Message> {

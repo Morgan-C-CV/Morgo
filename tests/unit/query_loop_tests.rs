@@ -46,10 +46,11 @@ use rust_agent::task::types::{TaskOwner, ValidationState, WorkerPhase};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::{Duration, timeout};
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
@@ -68,6 +69,21 @@ struct PendingApprovalFixtureTool;
 struct DeniedFixtureTool;
 struct EchoFixtureTool;
 struct SlowFixtureTool;
+struct CancellableFixtureTool {
+    started: Arc<Notify>,
+    dropped: Arc<Notify>,
+    completed: Arc<AtomicBool>,
+}
+
+struct DropSignalGuard(Option<Arc<Notify>>);
+
+impl Drop for DropSignalGuard {
+    fn drop(&mut self) {
+        if let Some(notify) = self.0.take() {
+            notify.notify_waiters();
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for ProgressFixtureTool {
@@ -242,6 +258,39 @@ impl Tool for SlowFixtureTool {
     ) -> anyhow::Result<ToolResult> {
         tokio::time::sleep(Duration::from_millis(75)).await;
         Ok(ToolResult::Text("slow result".into()))
+    }
+}
+
+#[async_trait]
+impl Tool for CancellableFixtureTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            name: "CancellableFixture".into(),
+            description: "Sleeps until the turn is cancelled".into(),
+            aliases: &[],
+            search_hint: None,
+            read_only: true,
+            destructive: false,
+            concurrency_safe: true,
+            always_load: true,
+            should_defer: false,
+            requires_auth: false,
+            requires_user_interaction: false,
+            is_open_world: false,
+            is_search_or_read_command: false,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _call: &ToolCall,
+        _permissions: &ToolPermissionContext,
+    ) -> anyhow::Result<ToolResult> {
+        self.started.notify_waiters();
+        let _guard = DropSignalGuard(Some(self.dropped.clone()));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(ToolResult::Text("completed".into()))
     }
 }
 
@@ -1037,6 +1086,135 @@ async fn submit_turn_aggregates_the_same_streamed_event_sequence() {
             .iter()
             .any(|message| message == &Message::assistant("same path"))
     );
+}
+
+#[tokio::test]
+async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
+        started: started.clone(),
+        dropped: dropped.clone(),
+        completed: completed.clone(),
+    }));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("planning".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "CancellableFixture".into(),
+                    input: "{}".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("should not finish".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+
+    let mut receiver = engine.stream_turn(Message::user("cancel via receiver drop")).await;
+
+    let first = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+    assert!(matches!(first, EngineEvent::AssistantDelta(text) if text == "planning"));
+
+    let second = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected the tool start event")
+        .expect("receiver should stay open");
+    assert!(matches!(
+        second,
+        EngineEvent::ToolCallStarted { ref tool_name, .. } if tool_name == "CancellableFixture"
+    ));
+
+    timeout(Duration::from_millis(50), started.notified())
+        .await
+        .expect("tool should have started");
+
+    drop(receiver);
+
+    timeout(Duration::from_millis(150), dropped.notified())
+        .await
+        .expect("dropping the receiver should cancel the in-flight tool");
+    assert!(!completed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
+        started: started.clone(),
+        dropped: dropped.clone(),
+        completed: completed.clone(),
+    }));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("planning".into()),
+            StreamEvent::ToolUse {
+                tool_name: "CancellableFixture".into(),
+                input: "{}".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    ));
+
+    let mut receiver = engine.stream_turn(Message::user("cancel via app token")).await;
+
+    let first = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+    assert!(matches!(first, EngineEvent::AssistantDelta(text) if text == "planning"));
+
+    let second = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected the tool start event")
+        .expect("receiver should stay open");
+    assert!(matches!(
+        second,
+        EngineEvent::ToolCallStarted { ref tool_name, .. } if tool_name == "CancellableFixture"
+    ));
+
+    timeout(Duration::from_millis(50), started.notified())
+        .await
+        .expect("tool should have started");
+
+    engine.context.app_state.cancellation_token.cancel();
+
+    let terminal = timeout(Duration::from_millis(200), async {
+        while let Some(event) = receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("parent cancellation should end the turn promptly");
+
+    assert_eq!(terminal, Terminal::AbortedStreaming);
+    timeout(Duration::from_millis(150), dropped.notified())
+        .await
+        .expect("tool future should be dropped on cancellation");
+    assert!(!completed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

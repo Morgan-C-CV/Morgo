@@ -1991,6 +1991,7 @@ fn build_parent_query_context(permissions: ToolPermissionContext) -> QueryContex
         cancellation_token: permissions
             .cancellation_token
             .clone()
+            .map(|token| token.child_token())
             .unwrap_or_else(tokio_util::sync::CancellationToken::new),
         subagent_limiter: permissions.subagent_limiter.clone(),
         boss_coordinator: permissions.boss_coordinator.clone(),

@@ -124,6 +124,7 @@ impl QueryContext {
         app_state.active_session_id = child_agent_id.clone();
         app_state.runtime_role = RuntimeRole::Worker;
         app_state.worker_role = Some(config.worker_role);
+        app_state.cancellation_token = self.app_state.cancellation_token.child_token();
         if !config.inherit_context {
             app_state.history = None;
             app_state.restored_session = None;
@@ -164,6 +165,7 @@ impl QueryContext {
         }
         let lineage = build_nested_memory_lineage(self, &child_agent_id, config.inherit_context);
         permission_context.set_nested_memory_lineage(lineage);
+        permission_context = permission_context.with_cancellation_token(app_state.cancellation_token.clone());
         let tool_registry = if permission_context
             .boss_actor_policy
             .is_some_and(|policy| policy.may_spawn())

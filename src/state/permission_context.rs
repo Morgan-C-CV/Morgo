@@ -386,7 +386,10 @@ impl ToolPermissionContext {
             delegated_write_paths: Arc::new(RwLock::new(delegated_write_paths)),
             lism_mode: Arc::new(RwLock::new(lism_enabled)),
             last_activity_ts: self.last_activity_ts.clone(),
-            cancellation_token: self.cancellation_token.clone(),
+            cancellation_token: self
+                .cancellation_token
+                .as_ref()
+                .map(CancellationToken::child_token),
             subagent_limiter: self.subagent_limiter.clone(),
             boss_coordinator: self.boss_coordinator.clone(),
             boss_actor_policy: self.boss_actor_policy,
