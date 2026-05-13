@@ -29,6 +29,7 @@ use rust_agent::tool::builtin::bash::BashTool;
 use rust_agent::tool::builtin::file_edit::FileEditTool;
 use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::registry::ToolRegistry;
+use rust_agent::tool::result::ToolExecutionOutcomeKind;
 use tokio::sync::RwLock;
 
 #[path = "plan_resume_flow.rs"]
@@ -86,6 +87,14 @@ fn coding_smoke_context(
         .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
         .with_filesystem_policy(allow_write_policy_for(workspace_root));
     permission_context.add_always_allow_rule("Edit");
+
+    coding_smoke_context_with_permissions(turns, permission_context)
+}
+
+fn coding_smoke_context_with_permissions(
+    turns: Vec<Vec<StreamEvent>>,
+    permission_context: ToolPermissionContext,
+) -> QueryContext {
 
     let tool_registry = ToolRegistry::new()
         .register(Arc::new(FileReadTool))
@@ -572,5 +581,122 @@ async fn cli_smoke_coding_loop_requests_more_context_when_target_is_underspecifi
         sentinel_contents,
         "leave me alone\n",
         "underspecified-context smoke should not modify files when the target is unclear"
+    );
+}
+
+#[tokio::test]
+async fn cli_smoke_coding_loop_surfaces_bash_pending_approval_without_false_success() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let target = workspace.path().join("smoke_approval_target.txt");
+    std::fs::write(&target, "status = \"todo\"\n").expect("seed approval smoke target");
+
+    let target_display = target.to_string_lossy().to_string();
+    let read_input = serde_json::json!({
+        "file_path": target_display,
+    })
+    .to_string();
+    let bash_input = serde_json::json!({
+        "command": format!("grep -n 'status = \"todo\"' {}", target.display()),
+        "timeout": 5_000
+    })
+    .to_string();
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(workspace.path()));
+    permission_context.add_always_allow_rule("Edit");
+    permission_context.add_always_ask_rule("Bash");
+
+    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Inspecting the target file before verification.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "I need to run a local verification command, which may require approval."
+                        .into(),
+                ),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: bash_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+        ],
+        permission_context,
+    ));
+
+    let result = engine
+        .submit_turn(Message::user(
+            "Read the local file and run a verification command, but stop for approval if the command needs it.",
+        ))
+        .await;
+
+    assert_eq!(
+        result.state,
+        QueryLoopState::Interrupted,
+        "pending-approval smoke should stop in an interrupted approval state"
+    );
+    assert_eq!(
+        result.terminal,
+        Terminal::AbortedTools,
+        "pending-approval smoke should stop at the tool approval barrier"
+    );
+
+    assert_tool_started(&result.events, "Read");
+    assert_tool_result_contains(&result.events, "Read", "status = \"todo\"");
+
+    assert_tool_started(&result.events, "Bash");
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::PendingApproval { tool_name, message, .. }
+                if tool_name == "Bash"
+                    && (message.contains("approval") || message.contains("requires"))
+        )),
+        "pending-approval smoke stalled before approval handoff: missing EngineEvent::PendingApproval"
+    );
+    assert!(
+        !result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::ToolResultCommitted {
+                tool_name,
+                kind,
+                summary,
+                ..
+            } if tool_name == "Bash"
+                && *kind == ToolExecutionOutcomeKind::Success
+                && summary.ends_with("succeeded")
+        )),
+        "pending-approval smoke incorrectly committed a successful Bash result"
+    );
+
+    let final_message = final_assistant_message_text(&result.messages);
+    assert!(
+        final_message.contains("approval required for Bash")
+            || final_message.contains("approve")
+            || final_message.contains("reject"),
+        "pending-approval smoke stalled at final summary: missing explicit approve/reject guidance; final={final_message:?}"
+    );
+    assert!(
+        !final_message.contains("Verification passed")
+            && !final_message.contains("task completed")
+            && !final_message.contains("I finished"),
+        "pending-approval smoke should not falsely claim success; final={final_message:?}"
     );
 }
