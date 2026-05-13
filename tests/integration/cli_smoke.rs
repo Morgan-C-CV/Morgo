@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rust_agent::command::builtin::resume::ResumeCommand;
+use rust_agent::command::builtin::tasks::TasksCommand;
+use rust_agent::command::types::Command;
 use rust_agent::bootstrap::{
     BootstrapPhase, BootstrapState, ClientType, InteractionSurface, SessionMode, SessionSource,
 };
@@ -13,8 +16,11 @@ use rust_agent::core::query_loop::{
     QueryLoopState, QueryParams, Terminal, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
+use rust_agent::history::resume::resolved_from_snapshot;
+use rust_agent::history::session::{SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot};
 use rust_agent::hook::registry::HookRegistry;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
+use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
 use rust_agent::security::filesystem_policy::{
     FilesystemPermissionLevel, FilesystemPolicy, FilesystemPolicyConfig, FilesystemPolicyRule,
@@ -1058,6 +1064,159 @@ async fn cli_smoke_pending_approval_user_facing_copy_is_actionable() {
             && !final_message.contains("exit_code:")
             && !final_message.contains("failed to"),
         "user-facing approval copy should not look like a success summary or a generic runtime error; final={final_message:?}"
+    );
+}
+
+#[tokio::test]
+async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_without_false_completion() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let marker = workspace.path().join("resume_continuation_marker.txt");
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(workspace.path()));
+    permission_context.add_always_allow_rule("Edit");
+    permission_context.add_always_ask_rule("Bash");
+
+    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta(
+                "I need approval before I can continue the interrupted verification.".into(),
+            ),
+            StreamEvent::ToolUse {
+                tool_name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": format!("printf 'should-not-run\\n' > {}", marker.display()),
+                    "timeout": 5_000
+                })
+                .to_string(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        permission_context,
+    ));
+
+    let pending_result = engine
+        .submit_turn(Message::user(
+            "Continue the interrupted local verification, but stop if Bash needs approval.",
+        ))
+        .await;
+
+    assert_eq!(
+        pending_result.state,
+        QueryLoopState::Interrupted,
+        "resume-continuation smoke should first stop at a real interruption boundary"
+    );
+    assert_eq!(
+        pending_result.terminal,
+        Terminal::AbortedTools,
+        "resume-continuation smoke should stop at the approval barrier instead of pretending to finish"
+    );
+    let pending_final = final_assistant_message_text(&pending_result.messages);
+    assert!(
+        !pending_final.to_ascii_lowercase().contains("completed")
+            && !pending_final.to_ascii_lowercase().contains("verification passed")
+            && !pending_final.to_ascii_lowercase().contains("finished"),
+        "resume-continuation smoke should not falsely claim completion before restore; final={pending_final:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "resume-continuation smoke should not execute the interrupted Bash command before restore"
+    );
+
+    let task_manager = engine
+        .context
+        .app_state
+        .permission_context
+        .task_manager
+        .as_ref()
+        .expect("coding smoke context should attach a task manager")
+        .clone();
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let interrupted_task = task_manager.create(
+        "continue interrupted local verification",
+        "cli-smoke-coding-session",
+        InteractionSurface::Cli,
+    );
+    task_manager.launch(&interrupted_task.id, "work", std::future::pending::<()>());
+    assert!(
+        task_manager.kill(
+            &interrupted_task.id,
+            "cli-smoke-coding-session",
+            &dispatcher
+        ),
+        "resume-continuation smoke fixture should produce a stopped task"
+    );
+
+    let mut restored_app_state = engine.context.app_state.clone();
+    let resolved = resolved_from_snapshot(
+        SessionSnapshot {
+            session_id: SessionId("cli-smoke-coding-session".into()),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: workspace.path().display().to_string(),
+            last_turn_at: Some("2026-05-13T11:30:00Z".into()),
+            prompt_seed: None,
+        },
+        SessionHistory {
+            entries: vec![SessionHistoryEntry {
+                message: Message::user(
+                    "Continue the interrupted local verification, but stop if Bash needs approval.",
+                ),
+                timestamp: Some("2026-05-13T11:29:00Z".into()),
+                tool_refs: vec!["Bash".into()],
+                milestone: None,
+            }],
+        },
+        true,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+    restored_app_state.apply_resolved_session_state(&resolved);
+
+    let resume_result = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &restored_app_state,
+        )
+        .await
+        .expect("resume command should render restored interrupted continuation");
+    let resume_text = resume_result
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+
+    let tasks_result = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &restored_app_state,
+        )
+        .await
+        .expect("tasks command should render restored interrupted continuation");
+    let tasks_text = tasks_result
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+
+    assert!(
+        resume_text.contains("last task: continue interrupted local verification"),
+        "resume-continuation smoke should restore a concrete continuation target instead of a generic session-only summary; text={resume_text}"
+    );
+    assert!(
+        tasks_text.contains("Stopped tasks:")
+            && tasks_text.contains("continue interrupted local verification")
+            && tasks_text.contains("status: stopped"),
+        "resume-continuation smoke should keep the interrupted coding target visible in stopped tasks after restore; text={tasks_text}"
+    );
+    assert!(
+        !tasks_text.contains("Failed tasks:\n- [")
+            || !tasks_text.contains("continue interrupted local verification"),
+        "resume-continuation smoke should not misclassify interrupted work as failed after restore; text={tasks_text}"
     );
 }
 

@@ -1969,6 +1969,104 @@ async fn cli_resume_restores_cwd_mode_and_pending_approval_consistently() {
 }
 
 #[tokio::test]
+async fn cli_resume_and_tasks_surface_interrupted_continuation_as_same_restore_target() {
+    let root = unique_temp_path("rust-agent-resume-interrupted-continuation");
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let mut app_state = test_app_state(None, Some(manager.clone()), None, None);
+
+    let interrupted_task = manager.create(
+        "resume interrupted verification",
+        "resume-interrupted-session",
+        InteractionSurface::Cli,
+    );
+    manager.launch(&interrupted_task.id, "work", std::future::pending::<()>());
+    assert!(
+        manager.kill(
+            &interrupted_task.id,
+            "resume-interrupted-session",
+            &dispatcher
+        ),
+        "fixture should produce a stopped task for interrupted continuation"
+    );
+
+    let restored_snapshot = SessionSnapshot {
+        session_id: SessionId("resume-interrupted-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: Some("2026-05-13T11:15:00Z".into()),
+        prompt_seed: None,
+    };
+    let restored_history = rust_agent::history::session::SessionHistory {
+        entries: vec![rust_agent::history::session::SessionHistoryEntry {
+            message: Message::user("show me what to resume"),
+            timestamp: Some("2026-05-13T11:14:00Z".into()),
+            tool_refs: vec![],
+            milestone: None,
+        }],
+    };
+    let resolved = resolved_from_snapshot(
+        restored_snapshot.clone(),
+        restored_history,
+        true,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+    app_state.apply_resolved_session_state(&resolved);
+
+    let resume_result = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render interrupted continuation");
+    let resume_text = resume_result
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+
+    let tasks_result = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
+        .await
+        .expect("tasks command should render interrupted continuation");
+    let tasks_text = tasks_result
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+
+    assert!(
+        resume_text.contains("Resume summary:"),
+        "/resume should still begin with a resume summary for interrupted continuation; text={resume_text}"
+    );
+    assert!(
+        resume_text.contains("last task: resume interrupted verification"),
+        "/resume should prioritize the stopped coding target as the restore target instead of falling back to generic history; text={resume_text}"
+    );
+    assert!(
+        !resume_text.contains("last task: show me what to resume"),
+        "/resume should not let a generic history echo hide the actual interrupted continuation target; text={resume_text}"
+    );
+    assert!(
+        tasks_text.contains("Stopped tasks:"),
+        "/tasks should keep interrupted work in the stopped section after restore; text={tasks_text}"
+    );
+    assert!(
+        tasks_text.contains("resume interrupted verification")
+            && tasks_text.contains("status: stopped"),
+        "/tasks should expose the same interrupted continuation target that /resume points to; text={tasks_text}"
+    );
+    assert!(
+        !tasks_text.contains("Failed tasks:\n- [")
+            || !tasks_text.contains("resume interrupted verification"),
+        "/tasks should not misclassify the interrupted continuation target as failed work; text={tasks_text}"
+    );
+}
+
+#[tokio::test]
 async fn v1_release_gate_minimal_coding_cli_surface_stays_green() {
     let registry = Arc::new(
         CommandRegistry::new()
@@ -2258,7 +2356,7 @@ async fn v1_release_gate_coding_cli_and_resume_surface_stays_green() {
     );
     assert!(
         resume_text.contains("Resume summary:")
-            && resume_text.contains("last task: repair the failing verification and rerun tests")
+            && resume_text.contains("last task: rerun verification")
             && resume_text.to_ascii_lowercase().contains("pending approval: bash"),
         "release gate expects /resume to keep restore target and approval state visible; text={resume_text}"
     );

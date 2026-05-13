@@ -7,8 +7,29 @@ use crate::core::message::Role;
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PermissionMode;
+use crate::task::types::TaskStatus;
 
 pub struct ResumeCommand;
+
+fn interrupted_continuation_target(app_state: &AppState) -> Option<String> {
+    let session_id = app_state.current_session_id().0;
+    app_state
+        .permission_context
+        .task_manager
+        .as_ref()?
+        .list()
+        .into_iter()
+        .rev()
+        .find(|task| {
+            task.owner.session_id == session_id
+                && matches!(
+                    task.status,
+                    TaskStatus::Pending | TaskStatus::Running | TaskStatus::Killed
+                )
+                && !task.description.trim().is_empty()
+        })
+        .map(|task| task.description)
+}
 
 #[async_trait]
 impl Command for ResumeCommand {
@@ -45,20 +66,23 @@ impl Command for ResumeCommand {
             PermissionMode::Plan => "plan",
         };
         let pending_approval = app_state.permission_context.pending_approval();
-        let last_task = app_state
-            .restored_session
-            .as_ref()
-            .map(|restored| &restored.history)
-            .or(app_state.history.as_ref())
-            .and_then(|history| {
-                history
-                    .entries
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.message.role == Role::User)
-                    .map(|entry| entry.message.content.trim().to_string())
+        let last_task = interrupted_continuation_target(app_state)
+            .or_else(|| {
+                app_state
+                    .restored_session
+                    .as_ref()
+                    .map(|restored| &restored.history)
+                    .or(app_state.history.as_ref())
+                    .and_then(|history| {
+                        history
+                            .entries
+                            .iter()
+                            .rev()
+                            .find(|entry| entry.message.role == Role::User)
+                            .map(|entry| entry.message.content.trim().to_string())
+                    })
+                    .filter(|text| !text.is_empty())
             })
-            .filter(|text| !text.is_empty())
             .unwrap_or_else(|| "none recorded".into());
         let mode_line = if let Some(pending) = pending_approval {
             format!(
