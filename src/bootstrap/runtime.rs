@@ -1338,6 +1338,7 @@ fn render_fixed_tui_layout(
     input: &str,
     suggestions: &[TuiSuggestion],
     selected_suggestion: usize,
+    content_scroll_offset: usize,
     cursor_index: usize,
 ) -> String {
     let mut content_screen = screen.clone();
@@ -1373,8 +1374,12 @@ fn render_fixed_tui_layout(
     };
     let bottom_reserved_height = 2usize + suggestion_lines.len();
     let content_height = height.saturating_sub(bottom_reserved_height);
+    let max_scroll_offset = max_tui_content_scroll_offset(content_lines.len(), content_height);
+    let clamped_scroll_offset = content_scroll_offset.min(max_scroll_offset);
     let visible_lines = if content_lines.len() > content_height {
-        content_lines[content_lines.len() - content_height..].to_vec()
+        let end = content_lines.len().saturating_sub(clamped_scroll_offset);
+        let start = end.saturating_sub(content_height);
+        content_lines[start..end].to_vec()
     } else {
         content_lines
     };
@@ -1419,6 +1424,29 @@ fn render_fixed_tui_layout(
     }
     frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", input_row, cursor_col));
     frame
+}
+
+fn max_tui_content_scroll_offset(content_line_count: usize, content_height: usize) -> usize {
+    content_line_count.saturating_sub(content_height)
+}
+
+fn tui_content_height_for_layout(
+    terminal_rows: usize,
+    input: &str,
+    suggestions: &[TuiSuggestion],
+) -> usize {
+    let suggestion_count = if input.starts_with('/') {
+        suggestions.len().max(1)
+    } else {
+        0
+    };
+    let bottom_reserved_height = 2usize + suggestion_count;
+    terminal_rows.max(3).saturating_sub(bottom_reserved_height)
+}
+
+fn tui_visible_content_height(input: &str, suggestions: &[TuiSuggestion]) -> usize {
+    let (_, rows) = size().unwrap_or((100, 32));
+    tui_content_height_for_layout(usize::from(rows.max(3)), input, suggestions)
 }
 
 fn normalize_tui_newlines(text: &str) -> String {
@@ -1504,6 +1532,7 @@ mod tui_output_tests {
             "/h",
             &suggestions,
             0,
+            0,
             2,
         ));
         let input_pos = rendered
@@ -1514,6 +1543,28 @@ mod tui_output_tests {
             .expect("suggestions should render below input");
 
         assert!(input_pos < suggestion_pos);
+    }
+
+    #[test]
+    fn tui_layout_respects_content_scroll_offset() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: (1..=40).map(|n| format!("line-{n}")).collect(),
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &screen,
+            "",
+            &[],
+            0,
+            5,
+            0,
+        ));
+
+        assert!(rendered.contains("line-6"));
+        assert!(!rendered.contains("line-40"));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -2490,6 +2541,7 @@ impl RuntimeBootstrap {
         let mut input = String::new();
         let mut cursor_index = 0usize;
         let mut selected_suggestion = 0usize;
+        let mut content_scroll_offset = 0usize;
 
         loop {
             let suggestions = tui_command_suggestions(app_state, &input);
@@ -2501,6 +2553,7 @@ impl RuntimeBootstrap {
                 &input,
                 &suggestions,
                 selected_suggestion,
+                content_scroll_offset,
                 cursor_index,
             );
 
@@ -2521,6 +2574,7 @@ impl RuntimeBootstrap {
                     input.clear();
                     cursor_index = 0;
                     selected_suggestion = 0;
+                    content_scroll_offset = 0;
                 }
                 KeyCode::Enter => {
                     if input.trim().is_empty() {
@@ -2538,6 +2592,7 @@ impl RuntimeBootstrap {
                     input.clear();
                     cursor_index = 0;
                     selected_suggestion = 0;
+                    content_scroll_offset = 0;
 
                     if self.should_exit_tui_input(&line) {
                         self.print_tui_message("Exiting TUI session.");
@@ -2561,12 +2616,14 @@ impl RuntimeBootstrap {
                                         &[],
                                         0,
                                         0,
+                                        0,
                                     );
                                 }
                             },
                         )
                         .await?;
                     current_document = render_turn_document(&output);
+                    content_scroll_offset = 0;
                 }
                 KeyCode::Backspace => {
                     if backspace_input_char(&mut input, &mut cursor_index) {
@@ -2599,15 +2656,31 @@ impl RuntimeBootstrap {
                     cursor_index = input.chars().count();
                 }
                 KeyCode::Up => {
-                    if !suggestions.is_empty() {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        content_scroll_offset = content_scroll_offset.saturating_add(1);
+                    } else if !suggestions.is_empty() {
                         selected_suggestion =
                             (selected_suggestion + suggestions.len() - 1) % suggestions.len();
+                    } else {
+                        content_scroll_offset = content_scroll_offset.saturating_add(1);
                     }
                 }
                 KeyCode::Down => {
-                    if !suggestions.is_empty() {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        content_scroll_offset = content_scroll_offset.saturating_sub(1);
+                    } else if !suggestions.is_empty() {
                         selected_suggestion = (selected_suggestion + 1) % suggestions.len();
+                    } else {
+                        content_scroll_offset = content_scroll_offset.saturating_sub(1);
                     }
+                }
+                KeyCode::PageUp => {
+                    let page = tui_visible_content_height(&input, &suggestions).max(1);
+                    content_scroll_offset = content_scroll_offset.saturating_add(page);
+                }
+                KeyCode::PageDown => {
+                    let page = tui_visible_content_height(&input, &suggestions).max(1);
+                    content_scroll_offset = content_scroll_offset.saturating_sub(page);
                 }
                 KeyCode::Char(ch) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2628,6 +2701,7 @@ impl RuntimeBootstrap {
         input: &str,
         suggestions: &[TuiSuggestion],
         selected_suggestion: usize,
+        content_scroll_offset: usize,
         cursor_index: usize,
     ) {
         let mut screen = build_tui_screen(document);
@@ -2645,6 +2719,7 @@ impl RuntimeBootstrap {
             input,
             suggestions,
             selected_suggestion,
+            content_scroll_offset,
             cursor_index,
         ));
     }
