@@ -1336,6 +1336,8 @@ fn colorize_ansi(text: &str, code: &str) -> String {
 fn render_fixed_tui_layout(
     screen: &crate::interaction::cli::renderer::TuiScreen,
     input: &str,
+    suggestions: &[TuiSuggestion],
+    selected_suggestion: usize,
     cursor_index: usize,
 ) -> String {
     let mut content_screen = screen.clone();
@@ -1354,8 +1356,23 @@ fn render_fixed_tui_layout(
     let (cols, rows) = size().unwrap_or((100, 32));
     let width = usize::from(cols.max(1));
     let height = usize::from(rows.max(3));
-    let input_box_height = 2usize;
-    let content_height = height.saturating_sub(input_box_height);
+    let suggestion_lines = if input.starts_with('/') {
+        if suggestions.is_empty() {
+            vec!["No matching commands".to_string()]
+        } else {
+            suggestions
+                .iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    render_command_suggestion_line(command, index == selected_suggestion)
+                })
+                .collect::<Vec<_>>()
+        }
+    } else {
+        Vec::new()
+    };
+    let bottom_reserved_height = 2usize + suggestion_lines.len();
+    let content_height = height.saturating_sub(bottom_reserved_height);
     let visible_lines = if content_lines.len() > content_height {
         content_lines[content_lines.len() - content_height..].to_vec()
     } else {
@@ -1368,7 +1385,8 @@ fn render_fixed_tui_layout(
     let input_padding = " ".repeat(
         width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())),
     );
-    let input_row = height;
+    let input_title_row = content_height.saturating_add(1).min(height);
+    let input_row = content_height.saturating_add(2).min(height);
     let cursor_col = viewport.cursor_column.min(width).max(1);
 
     let mut frame = String::from("\x1b[?25l");
@@ -1383,7 +1401,7 @@ fn render_fixed_tui_layout(
 
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;2;37m{}{}\x1b[0m",
-        height.saturating_sub(1).max(1),
+        input_title_row,
         title_text,
         title_padding
     ));
@@ -1391,6 +1409,14 @@ fn render_fixed_tui_layout(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
         input_row, viewport.visible_input, input_padding
     ));
+    for (index, line) in suggestion_lines.iter().enumerate() {
+        let row = input_row.saturating_add(1 + index).min(height);
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row, line));
+    }
+    let suggestion_end_row = input_row.saturating_add(suggestion_lines.len());
+    for row in suggestion_end_row.saturating_add(1)..=height {
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K", row));
+    }
     frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", input_row, cursor_col));
     frame
 }
@@ -1403,7 +1429,8 @@ fn normalize_tui_newlines(text: &str) -> String {
 mod tui_output_tests {
     use super::{
         backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
-        normalize_tui_newlines, render_command_suggestion_line, tui_input_viewport,
+        normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
+        tui_input_viewport,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -1455,6 +1482,55 @@ mod tui_output_tests {
         assert_eq!(viewport.visible_input, "b中文cd");
         assert_eq!(viewport.start_char, 1);
         assert_eq!(viewport.cursor_column, 10);
+    }
+
+    #[test]
+    fn tui_slash_suggestions_render_below_input_box() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["body".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let suggestions = vec![super::heuristic_suggestion(
+            "/help ",
+            "help",
+            "Show commands",
+            "36",
+        )];
+
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &screen,
+            "/h",
+            &suggestions,
+            0,
+            2,
+        ));
+        let input_pos = rendered
+            .find("> /h")
+            .expect("input row should be rendered before suggestions");
+        let suggestion_pos = rendered
+            .find("help")
+            .expect("suggestions should render below input");
+
+        assert!(input_pos < suggestion_pos);
+    }
+
+    fn strip_ansi_for_test(text: &str) -> String {
+        let mut stripped = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            stripped.push(ch);
+        }
+        stripped
     }
 
     fn test_app_state() -> AppState {
@@ -2564,32 +2640,13 @@ impl RuntimeBootstrap {
             .trim_end()
             .to_string(),
         ];
-
-        if input.starts_with('/') {
-            let lines = if suggestions.is_empty() {
-                vec!["No matching commands".into()]
-            } else {
-                suggestions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, command)| {
-                        render_command_suggestion_line(command, index == selected_suggestion)
-                    })
-                    .collect()
-            };
-            screen
-                .panels
-                .push(crate::interaction::cli::renderer::TuiPanelSection {
-                    title: "Commands".into(),
-                    lines,
-                });
-            screen.footer = vec![
-                "Enter sends | Tab completes | Up/Down selects | Esc clears".into(),
-                "Slash commands and arguments are suggested heuristically from local runtime context.".into(),
-            ];
-        }
-
-        self.write_tui_frame(render_fixed_tui_layout(&screen, input, cursor_index));
+        self.write_tui_frame(render_fixed_tui_layout(
+            &screen,
+            input,
+            suggestions,
+            selected_suggestion,
+            cursor_index,
+        ));
     }
 
     fn write_tui_frame(&self, rendered: String) {
