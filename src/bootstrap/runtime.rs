@@ -6,7 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use crossterm::execute;
 
 use crate::bootstrap::config_root::{
     is_managed_config_root, preferred_home_config_root, resolve_config_root,
@@ -239,6 +242,8 @@ struct TuiRawModeGuard;
 
 impl TuiRawModeGuard {
     fn activate() -> anyhow::Result<Self> {
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
         enable_raw_mode()?;
         Ok(Self)
     }
@@ -247,6 +252,8 @@ impl TuiRawModeGuard {
 impl Drop for TuiRawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen);
     }
 }
 
@@ -2045,7 +2052,6 @@ impl RuntimeBootstrap {
         let normalized = normalize_tui_newlines(&rendered);
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(normalized.as_bytes());
-        let _ = stdout.write_all(b"\r\n");
         let _ = stdout.flush();
     }
 
