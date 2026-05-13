@@ -526,6 +526,72 @@ fn cli_renderer_approval_panel_keeps_reason_and_actions_structurally_separate_fr
 }
 
 #[test]
+fn cli_renderer_bash_result_panel_surfaces_command_exit_code_and_output_sections() {
+    let turn = CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+            tool_name: "Bash".into(),
+            content: "command: grep -n foo src/main.rs\nexit_code: 7\nstdout:\nmatched line\nstderr:\npermission warning".into(),
+            summary: Some("Bash succeeded".into()),
+            detail: Some(
+                "command: grep -n foo src/main.rs\nexit_code: 7\nstdout:\nmatched line\nstderr:\npermission warning".into(),
+            ),
+        })],
+    };
+
+    let document = render_turn_document(&turn);
+    let bash_panel = document
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
+                if panel.kind
+                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+            {
+                Some(panel)
+            }
+            _ => None,
+        })
+        .expect("bash tool-result panel present");
+
+    assert_eq!(bash_panel.title, "Tool result");
+    assert!(
+        bash_panel.lines.iter().any(|line| line == "Tool: Bash"),
+        "bash result panel should stay in a dedicated tool-result panel; lines={:?}",
+        bash_panel.lines
+    );
+    assert!(
+        bash_panel.lines.iter().any(|line| line.starts_with("Command: ")),
+        "bash result panel should surface the command on its own labeled line; lines={:?}",
+        bash_panel.lines
+    );
+    assert!(
+        bash_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Exit code: ")),
+        "bash result panel should surface the exit code on its own labeled line; lines={:?}",
+        bash_panel.lines
+    );
+    assert!(
+        bash_panel
+            .lines
+            .iter()
+            .any(|line| line == "stdout:" || line == "stderr:" || line.starts_with("stdout: ") || line.starts_with("stderr: ")),
+        "bash result panel should surface stdout/stderr as structured output sections; lines={:?}",
+        bash_panel.lines
+    );
+    assert!(
+        !bash_panel
+            .lines
+            .iter()
+            .any(|line| line == "command: grep -n foo src/main.rs\nexit_code: 7\nstdout:\nmatched line\nstderr:\npermission warning"),
+        "bash result panel should not dump the raw tool-result blob unchanged into the panel body; lines={:?}",
+        bash_panel.lines
+    );
+}
+
+#[test]
 fn surface_and_remote_views_preserve_structured_tool_fields() {
     let turn = CliTurnOutput {
         primary_text: "Status".into(),
