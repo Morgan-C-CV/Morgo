@@ -592,6 +592,69 @@ fn cli_renderer_bash_result_panel_surfaces_command_exit_code_and_output_sections
 }
 
 #[test]
+fn cli_renderer_read_result_panel_surfaces_path_offset_returned_chars_and_truncation() {
+    let turn = CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+            tool_name: "Read".into(),
+            content: "path=/tmp/sample.txt\noffset=120\nreturned_chars=300\n\nalpha\nbeta\n\n[Read truncated: path=/tmp/sample.txt, offset=120, returned_chars=300, total_chars=900. Use Read with offset=420 and limit<=5000 to continue.]".into(),
+            summary: Some("Read succeeded".into()),
+            detail: Some(
+                "path=/tmp/sample.txt\noffset=120\nreturned_chars=300\n\nalpha\nbeta\n\n[Read truncated: path=/tmp/sample.txt, offset=120, returned_chars=300, total_chars=900. Use Read with offset=420 and limit<=5000 to continue.]".into(),
+            ),
+        })],
+    };
+
+    let document = render_turn_document(&turn);
+    let read_panel = document
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
+                if panel.kind
+                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+            {
+                Some(panel)
+            }
+            _ => None,
+        })
+        .expect("read tool-result panel present");
+
+    assert_eq!(read_panel.title, "Tool result");
+    assert!(
+        read_panel.lines.iter().any(|line| line == "Tool: Read"),
+        "read result panel should stay in a dedicated tool-result panel; lines={:?}",
+        read_panel.lines
+    );
+    assert!(
+        read_panel.lines.iter().any(|line| line.starts_with("Path: ")),
+        "read result panel should surface the path on its own labeled line; lines={:?}",
+        read_panel.lines
+    );
+    assert!(
+        read_panel.lines.iter().any(|line| line.starts_with("Offset: ")),
+        "read result panel should surface the offset on its own labeled line; lines={:?}",
+        read_panel.lines
+    );
+    assert!(
+        read_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Returned chars: ")),
+        "read result panel should surface returned_chars on its own labeled line; lines={:?}",
+        read_panel.lines
+    );
+    assert!(
+        read_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Truncation: ") || line == "Truncation:"),
+        "read result panel should surface truncation as its own labeled line or section; lines={:?}",
+        read_panel.lines
+    );
+}
+
+#[test]
 fn surface_and_remote_views_preserve_structured_tool_fields() {
     let turn = CliTurnOutput {
         primary_text: "Status".into(),
