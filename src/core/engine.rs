@@ -9,7 +9,7 @@ use crate::core::query_loop::{
     run_query_loop_with_params_and_sink,
 };
 use crate::history::session::SessionHistoryEntry;
-use crate::state::app_state::SessionPersistFailure;
+use crate::state::app_state::{AppState, SessionPersistFailure};
 use crate::task::types::TaskEvent;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -226,13 +226,16 @@ enum StartTurnOutcome {
 pub struct QueryEngine {
     pub context: QueryContext,
     owner: Arc<Mutex<QueryEngineOwnerState>>,
+    latest_app_state: Arc<Mutex<AppState>>,
 }
 
 impl QueryEngine {
     pub fn new(context: QueryContext) -> Self {
+        let latest_app_state = Arc::new(Mutex::new(context.app_state.clone()));
         Self {
             context,
             owner: Arc::new(Mutex::new(QueryEngineOwnerState::default())),
+            latest_app_state,
         }
     }
 
@@ -265,6 +268,7 @@ impl QueryEngine {
         }
         match completion.await {
             Ok(mut result) => {
+                self.refresh_context_app_state();
                 result.events = events;
                 result
             }
@@ -314,6 +318,7 @@ impl QueryEngine {
         messages: &[Message],
         milestone: SessionMilestone,
     ) {
+        self.refresh_context_app_state();
         let mut entries = vec![SessionHistoryEntry {
             message: input,
             timestamp: None,
@@ -332,6 +337,8 @@ impl QueryEngine {
             .append_current_session_history_entries(entries)
         {
             let _ = record_persistence_failure(&self.context, "engine.persist_messages", &error);
+        } else {
+            self.sync_latest_app_state();
         }
     }
 
@@ -352,6 +359,7 @@ impl QueryEngine {
     }
 
     fn start_turn(&mut self, input: Message) -> StartTurnOutcome {
+        self.refresh_context_app_state();
         let params = self.query_params_for_input(&input);
         let mut context = self.context.clone();
         let turn_cancellation = self.context.app_state.cancellation_token.child_token();
@@ -427,6 +435,7 @@ impl QueryEngine {
             result
         });
         let owner = Arc::clone(&self.owner);
+        let latest_app_state = Arc::clone(&self.latest_app_state);
         tokio::spawn(async move {
             let result = match worker_handle.await {
                 Ok(result) => result,
@@ -449,6 +458,15 @@ impl QueryEngine {
                     }
                 }
             };
+            let latest_snapshot = {
+                let state = stream_state
+                    .lock()
+                    .expect("streaming turn state should not be poisoned");
+                state.context.app_state.clone()
+            };
+            *latest_app_state
+                .lock()
+                .expect("query engine app state should not be poisoned") = latest_snapshot;
             release_active_turn(&owner, active_turn.turn_id, &active_turn.finished);
             let _ = completion_tx.send(result);
         });
@@ -497,6 +515,21 @@ impl QueryEngine {
                 EngineEvent::Terminal(terminal),
             ],
         }
+    }
+
+    fn refresh_context_app_state(&mut self) {
+        self.context.app_state = self
+            .latest_app_state
+            .lock()
+            .expect("query engine app state should not be poisoned")
+            .clone();
+    }
+
+    fn sync_latest_app_state(&self) {
+        *self
+            .latest_app_state
+            .lock()
+            .expect("query engine app state should not be poisoned") = self.context.app_state.clone();
     }
 }
 
