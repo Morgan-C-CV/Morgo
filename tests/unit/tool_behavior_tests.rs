@@ -671,6 +671,99 @@ async fn edit_tool_rejects_non_unique_match_without_replace_all() {
 }
 
 #[tokio::test]
+async fn edit_tool_result_shape_stays_locatable_noop_distinguishable_and_failure_explicit() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-edit-contract"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+
+    let file = dir.join("sample.txt");
+    fs::write(&file, "before\nneedle\nafter\n")
+        .await
+        .expect("write sample file");
+
+    let success = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "old_string": "needle",
+                    "new_string": "replacement"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("edit should succeed");
+    let ToolResult::Text(success_text) = success else {
+        panic!("expected text result for successful edit");
+    };
+    assert!(
+        success_text.contains(&format!("path={}", file.display()))
+            || success_text.contains(&file.display().to_string()),
+        "successful edit should include stable file location context; text={success_text:?}"
+    );
+    assert!(
+        success_text.contains("old_text=")
+            || success_text.contains("new_text=")
+            || success_text.contains("replacements=")
+            || success_text.contains("occurrences=")
+            || success_text.contains("lines="),
+        "successful edit should include a locatable change summary, not just a generic success string; text={success_text:?}"
+    );
+
+    let noop_error = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "old_string": "replacement",
+                    "new_string": "replacement"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("equivalent edit should not be reported as a successful change");
+    let noop_text = noop_error.to_string();
+    assert!(
+        noop_text.contains("no change")
+            || noop_text.contains("already")
+            || noop_text.contains("must differ")
+            || noop_text.contains("unchanged"),
+        "noop edit should be explicitly distinguishable from a real edit; text={noop_text:?}"
+    );
+
+    let missing_target_error = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "old_string": "does-not-exist",
+                    "new_string": "replacement"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("missing target should fail explicitly");
+    let missing_target_text = missing_target_error.to_string();
+    assert!(
+        missing_target_text.contains("not found")
+            || missing_target_text.contains("failed")
+            || missing_target_text.contains("invalid")
+            || missing_target_text.contains("ambiguous"),
+        "edit failure should be explicit, not look like a silent noop or vague success; text={missing_target_text:?}"
+    );
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn web_fetch_tool_returns_response_body() {
     let body = fetch_text_with("https://example.com", |_url| async {
         Ok((200, "hello client".into()))
