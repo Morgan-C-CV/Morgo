@@ -40,7 +40,9 @@ use crate::interaction::cli::renderer::{
     build_tui_loading_screen, build_tui_screen, render_document_output,
     render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
-use crate::interaction::cli::repl::{CliTurnOutput, handle_cli_input, handle_normalized_input};
+use crate::interaction::cli::repl::{
+    CliTurnOutput, handle_cli_input, handle_cli_input_streaming, handle_normalized_input,
+};
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::remote::{
@@ -1214,9 +1216,10 @@ impl RuntimeBootstrap {
         engine: &QueryEngine,
         app_state: &AppState,
         line: String,
+        on_update: impl FnMut(&CliTurnOutput),
     ) -> anyhow::Result<CliTurnOutput> {
         self.print_tui_loading_frame(&line, 0);
-        handle_cli_input(router, engine, app_state, line).await
+        handle_cli_input_streaming(router, engine, app_state, line, on_update).await
     }
 
     async fn run_interactive_tui(
@@ -1286,7 +1289,13 @@ impl RuntimeBootstrap {
                     }
 
                     let output = self
-                        .handle_tui_input_with_loading(router, engine, app_state, line)
+                        .handle_tui_input_with_loading(router, engine, app_state, line, |snapshot| {
+                            let next_document = render_turn_document(snapshot);
+                            if next_document != current_document {
+                                current_document = next_document;
+                                self.print_tui_interactive_frame(&current_document, "", &[], 0);
+                            }
+                        })
                         .await?;
                     current_document = render_turn_document(&output);
                 }

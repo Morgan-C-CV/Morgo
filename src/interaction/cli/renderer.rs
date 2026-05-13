@@ -104,8 +104,9 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     for (index, block) in document.blocks.iter().enumerate() {
         match block {
             RenderBlock::PrimaryText(text) => {
-                if !text.is_empty() {
-                    main.extend(text.lines().map(|line| line.to_string()));
+                let visible_lines = visible_tui_primary_lines(text);
+                if !visible_lines.is_empty() {
+                    main.extend(visible_lines);
                 }
             }
             RenderBlock::RawRuntime(text) => {
@@ -151,6 +152,38 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
         prompt: vec!["> ".into()],
         footer: vec![],
     }
+}
+
+fn visible_tui_primary_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut previous_blank = true;
+
+    for raw_line in text.lines() {
+        if is_hidden_tui_primary_line(raw_line) {
+            continue;
+        }
+
+        let line = raw_line.to_string();
+        let is_blank = line.trim().is_empty();
+        if is_blank && previous_blank {
+            continue;
+        }
+
+        previous_blank = is_blank;
+        lines.push(line);
+    }
+
+    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines
+}
+
+fn is_hidden_tui_primary_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("tool ")
+        && (trimmed.contains(" result:") || trimmed.starts_with("tool batch result:"))
 }
 
 fn panel_priority(kind: Option<PanelKind>) -> u8 {
@@ -318,7 +351,7 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
 
     if !exploration.is_empty() {
         let exploration_len = exploration.len();
-        let mut prefixed = vec!["Explored".into()];
+        let mut prefixed = vec![style_activity_action("EXPLORED")];
         for (index, line) in exploration.into_iter().enumerate() {
             let branch = if index + 1 == exploration_len { "└" } else { "├" };
             prefixed.push(format!("  {branch} {line}"));
@@ -343,37 +376,58 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
     match tool_name {
         "Read" => {
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!("Read {}", short_path(&path)))
+            Some(format!("{} {}", style_activity_action("READ"), short_path(&path)))
         }
         "Grep" => {
             let pattern = json_string_field(parsed.as_ref(), &["pattern", "query"])?;
             let path = json_string_field(parsed.as_ref(), &["path"])
                 .map(|value| format!(" in {}", short_path(&value)))
                 .unwrap_or_default();
-            Some(format!("Search {}{}", truncate_for_tui(&pattern, 72), path))
+            Some(format!(
+                "{} {}{}",
+                style_activity_action("SEARCH"),
+                truncate_for_tui(&pattern, 72),
+                path
+            ))
         }
         "Glob" => {
             let pattern = json_string_field(parsed.as_ref(), &["pattern", "glob"])
                 .or_else(|| json_string_field(parsed.as_ref(), &["path"]))?;
-            Some(format!("List {}", truncate_for_tui(&pattern, 72)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("LIST"),
+                truncate_for_tui(&pattern, 72)
+            ))
         }
         "ToolSearch" | "WebSearch" => {
             let query = json_string_field(parsed.as_ref(), &["query", "q"])?;
-            Some(format!("Search {}", truncate_for_tui(&query, 72)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("SEARCH"),
+                truncate_for_tui(&query, 72)
+            ))
         }
         "WebFetch" => {
             let url = json_string_field(parsed.as_ref(), &["url"])?;
-            Some(format!("Fetched {}", truncate_for_tui(&url, 72)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("FETCHED"),
+                truncate_for_tui(&url, 72)
+            ))
         }
         "Bash" => {
             let command = json_string_field(parsed.as_ref(), &["command", "cmd"])?;
-            Some(format!("Ran {}", truncate_for_tui(&command, 72)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("RAN"),
+                truncate_for_tui(&command, 72)
+            ))
         }
         "Edit" | "Write" | "FileEdit" | "FileWrite" => {
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!("Updated {}", short_path(&path)))
+            Some(format!("{} {}", style_activity_action("UPDATED"), short_path(&path)))
         }
-        _ => Some(format!("Used {tool_name}")),
+        _ => Some(format!("{} {tool_name}", style_activity_action("USED"))),
     }
 }
 
@@ -391,7 +445,7 @@ fn tool_result_activity_block(
     let headline = match tool_name {
         "Bash" => summary
             .strip_suffix(" succeeded")
-            .map(|value| format!("Ran {}", truncate_for_tui(value, 72)))
+            .map(|value| format!("{} {}", style_activity_action("RAN"), truncate_for_tui(value, 72)))
             .unwrap_or_else(|| truncate_for_tui(summary, 72)),
         "Edit" | "Write" | "FileEdit" | "FileWrite" => truncate_for_tui(summary, 72),
         _ => truncate_for_tui(summary, 72),
@@ -534,6 +588,11 @@ fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
         sections.push(screen.main.join("\n"));
     }
 
+    let activity_sections = render_activity_sections(screen);
+    if !activity_sections.is_empty() {
+        sections.extend(activity_sections);
+    }
+
     let boxed_sections = render_tui_boxed_sections(screen);
     if !boxed_sections.is_empty() {
         let mut lines = vec!["╔════════════════ CLI TUI ════════════════".to_string()];
@@ -582,6 +641,14 @@ fn short_path(path: &str) -> String {
         .unwrap_or_else(|| truncate_for_tui(path, 72))
 }
 
+fn style_activity_action(label: &str) -> String {
+    format!("\x1b[1;30m{label}\x1b[0m")
+}
+
+fn style_activity_title(label: &str) -> String {
+    format!("\x1b[1;34m[{label}]\x1b[0m")
+}
+
 fn render_block_to_text(block: &RenderBlock) -> String {
     match block {
         RenderBlock::PrimaryText(text) => text.clone(),
@@ -600,6 +667,9 @@ fn render_panel_to_text(panel: &RenderPanel) -> String {
 fn render_tui_boxed_sections(screen: &TuiScreen) -> Vec<String> {
     let mut sections = Vec::new();
     for panel in &screen.panels {
+        if panel.title == "Activity" {
+            continue;
+        }
         sections.push(render_tui_section(
             &panel.title,
             panel.lines.iter().map(|line| line.as_str()).collect(),
@@ -612,6 +682,19 @@ fn render_tui_boxed_sections(screen: &TuiScreen) -> Vec<String> {
         ));
     }
     sections
+}
+
+fn render_activity_sections(screen: &TuiScreen) -> Vec<String> {
+    screen
+        .panels
+        .iter()
+        .filter(|panel| panel.title == "Activity")
+        .map(|panel| {
+            let mut lines = vec![style_activity_title("Activity")];
+            lines.extend(panel.lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        })
+        .collect()
 }
 
 fn render_tui_section(title: &str, lines: Vec<&str>) -> String {
@@ -633,6 +716,26 @@ mod tests {
     use super::*;
     use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 
+    fn strip_ansi(text: &str) -> String {
+        let mut cleaned = String::new();
+        let mut chars = text.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            cleaned.push(ch);
+        }
+
+        cleaned
+    }
+
     #[test]
     fn tui_output_omits_streaming_delta_noise() {
         let turn = CliTurnOutput {
@@ -647,7 +750,7 @@ mod tests {
             ],
         };
 
-        let rendered = render_turn_tui_output(&turn);
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("final answer"));
         assert!(rendered.starts_with("final answer"));
         assert!(!rendered.contains("[delta]"));
@@ -689,9 +792,9 @@ mod tests {
             ],
         };
 
-        let rendered = render_turn_tui_output(&turn);
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("[Activity]"));
-        assert!(rendered.contains("• Ran cargo test -- --nocapture"));
+        assert!(rendered.contains("• RAN cargo test -- --nocapture"));
         assert!(rendered.contains("Exit code: 0"));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
     }
@@ -716,11 +819,12 @@ mod tests {
             ],
         };
 
-        let rendered = render_turn_tui_output(&turn);
-        assert!(rendered.contains("Explored"));
-        assert!(rendered.contains("Read renderer.rs"));
-        assert!(rendered.contains("Search delta|tool use in reference"));
-        assert_eq!(rendered.matches("Read renderer.rs").count(), 1);
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("[Activity]"));
+        assert!(rendered.contains("EXPLORED"));
+        assert!(rendered.contains("READ renderer.rs"));
+        assert!(rendered.contains("SEARCH delta|tool use in reference"));
+        assert_eq!(rendered.matches("READ renderer.rs").count(), 1);
     }
 
     #[test]
@@ -740,16 +844,35 @@ mod tests {
             })],
         };
 
-        let rendered = render_turn_tui_output(&turn);
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("answer"));
         assert!(!rendered.contains("recorded usage"));
         assert!(!rendered.contains("Notice:"));
     }
 
     #[test]
+    fn tui_filters_tool_result_follow_up_text_from_primary_message_area() {
+        let turn = CliTurnOutput {
+            primary_text: [
+                "tool Read result: Read succeeded (5313 chars)",
+                "tool Grep result: Grep succeeded (0 chars)",
+                "",
+                "Final answer",
+            ]
+            .join("\n"),
+            events: vec![],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("Final answer"));
+        assert!(!rendered.contains("tool Read result:"));
+        assert!(!rendered.contains("tool Grep result:"));
+    }
+
+    #[test]
     fn tui_prompt_renders_outside_box() {
         let screen = build_tui_screen(&RenderDocument { blocks: vec![] });
-        let rendered = render_tui_screen_output(&screen);
+        let rendered = strip_ansi(&render_tui_screen_output(&screen));
         assert!(rendered.contains("\n\n> "));
         assert!(!rendered.contains("[Prompt]"));
         assert!(!rendered.contains("║ [Prompt]"));

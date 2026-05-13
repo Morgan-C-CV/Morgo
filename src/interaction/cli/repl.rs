@@ -131,12 +131,43 @@ pub async fn handle_cli_input(
     handle_normalized_input(router, engine, app_state, input).await
 }
 
+pub async fn handle_cli_input_streaming<F>(
+    router: &CommandRouter,
+    engine: &QueryEngine,
+    app_state: &AppState,
+    raw: impl Into<String>,
+    on_update: F,
+) -> anyhow::Result<CliTurnOutput>
+where
+    F: FnMut(&CliTurnOutput),
+{
+    let input = NormalizedInput::from_session_raw(
+        app_state.surface,
+        app_state.active_session_id.clone(),
+        raw,
+    );
+    handle_normalized_input_streaming(router, engine, app_state, input, on_update).await
+}
+
 pub async fn handle_normalized_input(
     router: &CommandRouter,
     engine: &QueryEngine,
     app_state: &AppState,
     input: NormalizedInput,
 ) -> anyhow::Result<CliTurnOutput> {
+    handle_normalized_input_streaming(router, engine, app_state, input, |_| {}).await
+}
+
+pub async fn handle_normalized_input_streaming<F>(
+    router: &CommandRouter,
+    engine: &QueryEngine,
+    app_state: &AppState,
+    input: NormalizedInput,
+    mut on_update: F,
+) -> anyhow::Result<CliTurnOutput>
+where
+    F: FnMut(&CliTurnOutput),
+{
     let turn_router;
     let turn_engine;
     let turn_app_state;
@@ -168,7 +199,8 @@ pub async fn handle_normalized_input(
             CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
             CommandResult::ContinueToQuery => {
                 let (messages, events) =
-                    collect_stream_messages(engine, build_user_message(&input)).await;
+                    collect_stream_messages(engine, build_user_message(&input), &mut on_update)
+                        .await;
                 (messages, events, true)
             }
             CommandResult::Denied(reason) => (
@@ -189,7 +221,8 @@ pub async fn handle_normalized_input(
         },
         RouteExecution::EnterQuery { prompt, source } => {
             let user_message = source.to_user_message(&input, &prompt);
-            let (messages, events) = collect_stream_messages(engine, user_message).await;
+            let (messages, events) =
+                collect_stream_messages(engine, user_message, &mut on_update).await;
             (messages, events, true)
         }
     };
@@ -239,6 +272,7 @@ where
 async fn collect_stream_messages(
     engine: &QueryEngine,
     input: Message,
+    on_update: &mut dyn FnMut(&CliTurnOutput),
 ) -> (Vec<Message>, Vec<CliRuntimeEvent>) {
     let mut receiver = engine.stream_turn(input).await;
     let mut messages = Vec::new();
@@ -377,6 +411,14 @@ async fn collect_stream_messages(
                 });
             }
         }
+        on_update(&CliTurnOutput {
+            primary_text: collect_message_content(messages.clone()),
+            events: runtime_events
+                .iter()
+                .cloned()
+                .map(CliDisplayEvent::RuntimeEvent)
+                .collect(),
+        });
     }
     (messages, runtime_events)
 }

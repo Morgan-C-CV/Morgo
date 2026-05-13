@@ -976,27 +976,23 @@ fn cli_renderer_tui_output_keeps_main_panels_and_footer_in_order() {
 
     let rendered = render_document_tui_output(&render_turn_document(&turn));
 
-    let main_idx = rendered.find("[Main]").expect("main section present");
+    let main_idx = rendered
+        .find("Available commands:")
+        .expect("main transcript present");
     let approval_idx = rendered
         .find("[Approval required]")
         .expect("approval section present");
-    let tool_idx = rendered
-        .find("[Tool result]")
-        .expect("tool section present");
-    let prompt_idx = rendered.find("[Prompt]").expect("prompt section present");
-    let footer_idx = rendered.find("[Footer]").expect("footer section present");
+    let prompt_idx = rendered.rfind("\n\n> ").expect("prompt present");
 
     assert!(main_idx < approval_idx);
-    assert!(approval_idx < tool_idx);
-    assert!(tool_idx < prompt_idx);
-    assert!(prompt_idx < footer_idx);
+    assert!(approval_idx < prompt_idx);
     assert!(rendered.contains("╔════════════════ CLI TUI ════════════════"));
     assert!(rendered.contains("Available commands:"));
     assert!(rendered.contains("approval needed for follow-up"));
-    assert!(rendered.contains("line one"));
-    assert!(rendered.contains("line two"));
-    assert!(rendered.contains("  > enter a request and press return"));
-    assert!(rendered.contains("Controls: /exit, exit, or quit leaves the TUI."));
+    assert!(!rendered.contains("line one"));
+    assert!(!rendered.contains("line two"));
+    assert!(!rendered.contains("[Prompt]"));
+    assert!(!rendered.contains("[Footer]"));
 }
 
 #[test]
@@ -1027,16 +1023,9 @@ fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
     let screen = build_tui_screen(&render_turn_document(&turn));
 
     assert_eq!(screen.main.first().map(String::as_str), Some("Status"));
-    assert_eq!(screen.panels.len(), 2);
-    assert_eq!(screen.panels[0].title, "Notice: validation");
-    assert_eq!(screen.panels[1].title, "Tool result");
-    assert_eq!(screen.prompt.first().map(String::as_str), Some("Prompt"));
-    assert!(
-        screen
-            .footer
-            .iter()
-            .any(|line| line.contains("Controls: /exit, exit, or quit leaves the TUI."))
-    );
+    assert!(screen.panels.is_empty());
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
+    assert!(screen.footer.is_empty());
 }
 
 #[test]
@@ -1067,11 +1056,10 @@ fn cli_renderer_tui_screen_filters_assistant_delta_runtime_noise() {
     let screen = build_tui_screen(&render_turn_document(&turn));
     let rendered = render_document_tui_output(&render_turn_document(&turn));
 
-    assert_eq!(screen.panels.len(), 1);
-    assert_eq!(screen.panels[0].title, "Notice: validation");
+    assert!(screen.panels.is_empty());
     assert!(!rendered.contains("[delta]"), "{rendered}");
     assert!(!rendered.contains("版"), "{rendered}");
-    assert!(rendered.contains("verify before shipping"), "{rendered}");
+    assert!(!rendered.contains("verify before shipping"), "{rendered}");
 }
 
 #[test]
@@ -1081,12 +1069,12 @@ fn cli_renderer_builds_tui_loading_screen_with_visible_running_state() {
         2,
     );
 
-    assert_eq!(screen.main.first().map(String::as_str), Some("| Working..."));
+    assert_eq!(screen.main.first().map(String::as_str), Some("Working..."));
     assert!(
         screen
             .main
             .iter()
-            .any(|line| line.contains("still processing")),
+            .any(|line| line.contains("processing your request")),
     );
     assert_eq!(screen.panels.len(), 1);
     assert_eq!(screen.panels[0].title, "Status");
@@ -1094,18 +1082,15 @@ fn cli_renderer_builds_tui_loading_screen_with_visible_running_state() {
         screen.panels[0]
             .lines
             .iter()
-            .any(|line| line.contains("[state] running"))
+            .any(|line| line.contains("waiting for model response"))
     );
     assert!(
         screen.panels[0]
             .lines
             .iter()
-            .any(|line| line.contains("[input] compare the current tui implementation"))
+            .any(|line| line.contains("Request: compare the current tui implementation"))
     );
-    assert_eq!(
-        screen.prompt.get(1).map(String::as_str),
-        Some("  > waiting for response")
-    );
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("> waiting for response: compare the current tui implementation with docs and fix loading state"));
 }
 
 #[test]
@@ -1117,10 +1102,10 @@ fn cli_renderer_tui_screen_uses_welcome_empty_state_when_document_is_empty() {
 
     assert_eq!(
         screen.main.first().map(String::as_str),
-        Some("Welcome to RustAgent TUI.")
+        Some("Morgo is ready for coding tasks.")
     );
-    assert!(screen.main.iter().any(|line| line.contains("Try /help")));
-    assert_eq!(screen.prompt.first().map(String::as_str), Some("Prompt"));
+    assert!(screen.main.iter().any(|line| line.contains("Use /help")));
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
 }
 
 #[test]
@@ -1444,27 +1429,17 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         screen.main
     );
 
-    assert_eq!(screen.panels.len(), 3, "screen should keep approval, tool result, and task update in dedicated panels: panels={:?}", screen.panels);
+    assert_eq!(screen.panels.len(), 2, "screen should keep approval and task update distinct, while suppressing low-signal read results: panels={:?}", screen.panels);
     assert_eq!(screen.panels[0].title, "Approval required");
-    assert_eq!(screen.panels[1].title, "Tool result");
-    assert_eq!(screen.panels[2].title, "Task update");
+    assert_eq!(screen.panels[1].title, "Task update");
+    assert!(screen.footer.is_empty(), "footer should stay empty in the streamlined TUI; footer={:?}", screen.footer);
+    assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
 
-    assert!(
-        screen.footer.iter().any(|line| line.starts_with("Controls: ")),
-        "footer should remain a dedicated status/control region; footer={:?}",
-        screen.footer
-    );
-    assert_eq!(
-        screen.prompt.get(1).map(String::as_str),
-        Some("  > enter a request and press return")
-    );
-
-    assert!(rendered.contains("[Main]"), "{rendered}");
     assert!(rendered.contains("[Approval required]"), "{rendered}");
-    assert!(rendered.contains("[Tool result]"), "{rendered}");
+    assert!(!rendered.contains("[Activity]"), "{rendered}");
     assert!(rendered.contains("[Task update]"), "{rendered}");
-    assert!(rendered.contains("[Prompt]"), "{rendered}");
-    assert!(rendered.contains("[Footer]"), "{rendered}");
+    assert!(!rendered.contains("[Prompt]"), "{rendered}");
+    assert!(!rendered.contains("[Footer]"), "{rendered}");
 
     assert!(
         empty_screen.panels.is_empty(),
@@ -1473,7 +1448,7 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
     );
     assert_eq!(
         empty_screen.main.first().map(String::as_str),
-        Some("Welcome to RustAgent TUI.")
+        Some("Morgo is ready for coding tasks.")
     );
     assert_eq!(loading_screen.panels.len(), 1);
     assert_eq!(loading_screen.panels[0].title, "Status");
@@ -1487,15 +1462,11 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         loading_screen
     );
     assert_ne!(
-        empty_screen.prompt.get(1).map(String::as_str),
-        loading_screen.prompt.get(1).map(String::as_str),
+        empty_screen.prompt.first().map(String::as_str),
+        loading_screen.prompt.first().map(String::as_str),
         "empty and loading screens should not reuse the same prompt region shape"
     );
-    assert_ne!(
-        empty_screen.footer,
-        loading_screen.footer,
-        "empty and loading screens should not reuse the same footer/status semantics"
-    );
+    assert_eq!(empty_screen.footer, loading_screen.footer);
 }
 
 #[test]
@@ -1526,32 +1497,7 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        screen
-            .footer
-            .iter()
-            .any(|line| line.contains("cwd:") || line.contains("Cwd:") || line.contains("Working directory:")),
-        "footer/status should surface the current working directory; footer={:?}",
-        screen.footer
-    );
-    assert!(
-        screen.footer.iter().any(|line| {
-            line.contains("mode:")
-                || line.contains("Mode:")
-                || line.contains("permission:")
-                || line.contains("Permission:")
-        }),
-        "footer/status should surface the current mode or permission state; footer={:?}",
-        screen.footer
-    );
-    assert!(
-        screen.footer.iter().any(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("pending approval") || lower.contains("approval pending")
-        }),
-        "footer/status should surface pending approval state when approval is active; footer={:?}",
-        screen.footer
-    );
+    assert!(screen.footer.is_empty(), "streamlined TUI should not render footer/status metadata; footer={:?}", screen.footer);
 
     assert!(
         !main_text.contains("cwd:")
@@ -1577,11 +1523,7 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         "footer/status metadata should not leak into panel titles; panel_titles={:?}",
         screen.panels
     );
-    assert!(
-        footer_text.contains("Controls:") || !footer_text.is_empty(),
-        "footer should remain a dedicated status/footer region rather than disappearing; footer={:?}",
-        screen.footer
-    );
+    assert!(footer_text.is_empty());
 }
 
 #[test]
@@ -1644,13 +1586,13 @@ fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
         loading_screen
             .panels
             .iter()
-            .any(|panel| panel.title.contains("Loading")),
-        "loading screen should use a dedicated loading/status panel title instead of a generic shared role; panels={:?}",
+            .any(|panel| panel.title == "Status"),
+        "loading screen should keep a single stable status panel; panels={:?}",
         loading_screen.panels
     );
     assert!(
-        loading_rendered.contains("[Loading]"),
-        "loading screen should render an explicit loading section label; rendered={loading_rendered}"
+        loading_rendered.contains("[Status]"),
+        "loading screen should render a stable status section label; rendered={loading_rendered}"
     );
 
     assert_eq!(approval_screen.panels.len(), 1);
@@ -1671,8 +1613,8 @@ fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
         "task update screen should foreground task progress; rendered={task_rendered}"
     );
     assert!(
-        !task_rendered.contains("[Tool result]"),
-        "task update screen should not read like a tool-result state; rendered={task_rendered}"
+        !task_rendered.contains("[Activity]"),
+        "task-only screen should not invent tool activity; rendered={task_rendered}"
     );
 }
 
@@ -1761,26 +1703,19 @@ fn cli_tui_panel_order_prioritizes_approval_over_tool_results_and_tasks() {
         titles_a,
         vec![
             "Approval required".to_string(),
-            "Tool result".to_string(),
             "Task update".to_string(),
-            "Notice: validation".to_string(),
         ],
-        "panel priority should keep approval above tool results, and tool results above task/notice regardless of event order; titles_a={titles_a:?}"
+        "panel priority should keep approval above task panels regardless of event order; titles_a={titles_a:?}"
     );
     assert_eq!(
         titles_b,
         vec![
             "Approval required".to_string(),
-            "Tool result".to_string(),
             "Task update".to_string(),
-            "Notice: validation".to_string(),
         ],
         "panel priority should stay stable even when the input event order changes; titles_b={titles_b:?}"
     );
-    assert_eq!(
-        screen_a.footer, screen_b.footer,
-        "footer should remain an independent region and not participate in panel ordering"
-    );
+    assert!(screen_a.footer.is_empty() && screen_b.footer.is_empty());
 }
 
 #[test]
