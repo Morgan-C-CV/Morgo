@@ -251,6 +251,8 @@ const RUNTIME_ONLY_TUI_COMMANDS: &[RuntimeOnlyTuiCommand] = &[RuntimeOnlyTuiComm
     accent_color: "31",
 }];
 
+const TUI_USER_MESSAGE_MARKER: &str = "\u{e000}";
+
 pub fn is_tui_exit_input(input: &str) -> bool {
     let trimmed = input.trim();
     RUNTIME_ONLY_TUI_COMMANDS.iter().any(|command| {
@@ -1554,6 +1556,19 @@ fn colorize_ansi(text: &str, code: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+fn tui_user_message_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("{TUI_USER_MESSAGE_MARKER}> {line}")
+            } else {
+                format!("{TUI_USER_MESSAGE_MARKER}  {line}")
+            }
+        })
+        .collect()
+}
+
 fn tui_transcript_text(app_state: &AppState) -> String {
     let transcript = Transcript::from(app_state.canonical_session_history());
     let mut lines = Vec::new();
@@ -1562,14 +1577,20 @@ fn tui_transcript_text(app_state: &AppState) -> String {
         if text.trim().is_empty() {
             continue;
         }
-        let role = match entry.message.role {
-            crate::core::message::Role::System => "System",
-            crate::core::message::Role::User => "User",
-            crate::core::message::Role::Assistant => "Assistant",
-            crate::core::message::Role::Tool => "Tool",
-        };
-        lines.push(format!("{role}:"));
-        lines.extend(text.lines().map(|line| line.to_string()));
+        match entry.message.role {
+            crate::core::message::Role::User => lines.extend(tui_user_message_lines(&text)),
+            crate::core::message::Role::Assistant => {
+                lines.extend(text.lines().map(|line| line.to_string()))
+            }
+            crate::core::message::Role::System => {
+                lines.push(colorize_ansi("[system]", "2;37"));
+                lines.extend(text.lines().map(|line| line.to_string()));
+            }
+            crate::core::message::Role::Tool => {
+                lines.push(colorize_ansi("[tool]", "2;37"));
+                lines.extend(text.lines().map(|line| line.to_string()));
+            }
+        }
         lines.push(String::new());
     }
     while lines.last().map(|line| line.is_empty()).unwrap_or(false) {
@@ -1670,7 +1691,11 @@ fn render_fixed_tui_layout(
     frame.push_str(tui_clear_screen_prefix());
 
     for (row_index, line) in visible_lines.iter().enumerate() {
-        frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row_index + 1, line));
+        frame.push_str(&format!(
+            "\x1b[{};1H\x1b[2K{}",
+            row_index + 1,
+            render_tui_content_line(line, width)
+        ));
     }
     for row_index in visible_lines.len() + 1..=content_height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
@@ -1713,6 +1738,19 @@ fn render_fixed_tui_layout(
     }
     frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", cursor_row, cursor_col));
     frame
+}
+
+fn render_tui_content_line(line: &str, width: usize) -> String {
+    let Some(message_line) = line.strip_prefix(TUI_USER_MESSAGE_MARKER) else {
+        return line.to_string();
+    };
+    let visible_width = UnicodeWidthStr::width(message_line);
+    let padding = " ".repeat(width.saturating_sub(visible_width));
+    if let Some(rest) = message_line.strip_prefix("> ") {
+        format!("\x1b[48;5;238m\x1b[1;36m>\x1b[97m {rest}{padding}\x1b[0m")
+    } else {
+        format!("\x1b[48;5;238;97m{message_line}{padding}\x1b[0m")
+    }
 }
 
 fn max_tui_content_scroll_offset(content_line_count: usize, content_height: usize) -> usize {
@@ -2038,6 +2076,47 @@ mod tui_output_tests {
         assert!(rendered.contains("older user message"));
         assert!(rendered.contains("older assistant reply"));
         assert!(!rendered.contains("latest only"));
+    }
+
+    #[test]
+    fn tui_transcript_user_messages_render_as_prompt_like_blocks() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("older user message"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("older assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+        let context_document = tui_context_document(
+            &app_state,
+            &crate::interaction::cli::renderer::RenderDocument { blocks: vec![] },
+        );
+        let screen = crate::interaction::cli::renderer::build_tui_screen(&context_document);
+
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            0,
+            0,
+            TuiTurnStatus::Idle,
+            0,
+        ));
+
+        assert!(rendered.contains("> older user message"));
+        assert!(!rendered.contains("User:"));
+        assert!(rendered.contains("older assistant reply"));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
