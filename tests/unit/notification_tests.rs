@@ -1123,6 +1123,138 @@ fn cli_renderer_tui_screen_uses_welcome_empty_state_when_document_is_empty() {
 }
 
 #[test]
+fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
+    let turn = CliTurnOutput {
+        primary_text: "Assistant summary: inspected the local workspace.".into(),
+        events: vec![
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "approval needed before running the verification command".into(),
+                code: Some("bash_warning".into()),
+                summary: None,
+                detail: Some(
+                    "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                        .into(),
+                ),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["privileged_system".into()],
+            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Read".into(),
+                content: "path=/tmp/sample.txt\noffset=0\nreturned_chars=24\nfile body".into(),
+                summary: Some("Read succeeded".into()),
+                detail: Some("path=/tmp/sample.txt\noffset=0\nreturned_chars=24\nfile body".into()),
+            }),
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-layout".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-layout-1".into()),
+                task_id: "task-layout-1".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                summary: "verify pending approval flow".into(),
+                result: "Task running".into(),
+                next_action: "wait for approval decision".into(),
+                worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
+                orchestration_group_id: Some("layout-group".into()),
+                phase: Some(rust_agent::task::types::WorkerPhase::Verify),
+                validation_state: Some(
+                    rust_agent::task::types::ValidationState::PendingVerification,
+                ),
+                step_id: None,
+                output_file: "/tmp/task-layout-1.log".into(),
+                usage: None,
+            }),
+        ],
+    };
+
+    let document = render_turn_document(&turn);
+    let screen = build_tui_screen(&document);
+    let rendered = render_document_tui_output(&document);
+    let empty_screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![],
+    }));
+    let loading_screen =
+        build_tui_loading_screen("run the verification command after approval", 1);
+
+    assert_eq!(
+        screen.main.first().map(String::as_str),
+        Some("Assistant summary: inspected the local workspace.")
+    );
+    assert!(
+        screen.main.iter().all(|line| !line.starts_with("Tool: ")),
+        "assistant main region should not absorb tool-result rows; main={:?}",
+        screen.main
+    );
+    assert!(
+        screen.main.iter().all(|line| !line.starts_with("[task]")),
+        "assistant main region should not absorb task rows; main={:?}",
+        screen.main
+    );
+    assert!(
+        screen.main.iter().all(|line| !line.starts_with("Reason: ")),
+        "assistant main region should not absorb approval rows; main={:?}",
+        screen.main
+    );
+
+    assert_eq!(screen.panels.len(), 3, "screen should keep approval, tool result, and task update in dedicated panels: panels={:?}", screen.panels);
+    assert_eq!(screen.panels[0].title, "Approval required");
+    assert_eq!(screen.panels[1].title, "Tool result");
+    assert_eq!(screen.panels[2].title, "Task update");
+
+    assert!(
+        screen.footer.iter().any(|line| line.starts_with("Controls: ")),
+        "footer should remain a dedicated status/control region; footer={:?}",
+        screen.footer
+    );
+    assert_eq!(
+        screen.prompt.get(1).map(String::as_str),
+        Some("  > enter a request and press return")
+    );
+
+    assert!(rendered.contains("[Main]"), "{rendered}");
+    assert!(rendered.contains("[Approval required]"), "{rendered}");
+    assert!(rendered.contains("[Tool result]"), "{rendered}");
+    assert!(rendered.contains("[Task update]"), "{rendered}");
+    assert!(rendered.contains("[Prompt]"), "{rendered}");
+    assert!(rendered.contains("[Footer]"), "{rendered}");
+
+    assert!(
+        empty_screen.panels.is_empty(),
+        "empty screen should not reuse the loading status panel structure; empty={:?}",
+        empty_screen
+    );
+    assert_eq!(
+        empty_screen.main.first().map(String::as_str),
+        Some("Welcome to RustAgent TUI.")
+    );
+    assert_eq!(loading_screen.panels.len(), 1);
+    assert_eq!(loading_screen.panels[0].title, "Status");
+    assert!(
+        loading_screen
+            .main
+            .first()
+            .map(|line| line.contains("Working..."))
+            .unwrap_or(false),
+        "loading screen should keep a working-state main region; loading={:?}",
+        loading_screen
+    );
+    assert_ne!(
+        empty_screen.prompt.get(1).map(String::as_str),
+        loading_screen.prompt.get(1).map(String::as_str),
+        "empty and loading screens should not reuse the same prompt region shape"
+    );
+    assert_ne!(
+        empty_screen.footer,
+        loading_screen.footer,
+        "empty and loading screens should not reuse the same footer/status semantics"
+    );
+}
+
+#[test]
 fn remote_channel_matrix_matches_final_contract() {
     assert_eq!(
         REMOTE_CHANNEL_MATRIX,
