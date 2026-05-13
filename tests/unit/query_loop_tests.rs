@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
 use rust_agent::state::app_state::{AppState, RuntimeRole};
@@ -71,16 +71,16 @@ struct EchoFixtureTool;
 struct SlowFixtureTool;
 struct CancellableFixtureTool {
     started: Arc<AtomicBool>,
-    dropped: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
 }
 
-struct DropSignalGuard(Option<Arc<Notify>>);
+struct DropSignalGuard(Option<Arc<AtomicBool>>);
 
 impl Drop for DropSignalGuard {
     fn drop(&mut self) {
-        if let Some(notify) = self.0.take() {
-            notify.notify_waiters();
+        if let Some(flag) = self.0.take() {
+            flag.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -1091,7 +1091,7 @@ async fn submit_turn_aggregates_the_same_streamed_event_sequence() {
 #[tokio::test]
 async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
     let started = Arc::new(AtomicBool::new(false));
-    let dropped = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
     let completed = Arc::new(AtomicBool::new(false));
     let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
         started: started.clone(),
@@ -1149,16 +1149,20 @@ async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
 
     drop(receiver);
 
-    timeout(Duration::from_millis(150), dropped.notified())
-        .await
-        .expect("dropping the receiver should cancel the in-flight tool");
+    timeout(Duration::from_millis(150), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("dropping the receiver should cancel the in-flight tool");
     assert!(!completed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
 async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
     let started = Arc::new(AtomicBool::new(false));
-    let dropped = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
     let completed = Arc::new(AtomicBool::new(false));
     let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
         started: started.clone(),
@@ -1219,9 +1223,13 @@ async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
     .expect("parent cancellation should end the turn promptly");
 
     assert_eq!(terminal, Terminal::AbortedStreaming);
-    timeout(Duration::from_millis(150), dropped.notified())
-        .await
-        .expect("tool future should be dropped on cancellation");
+    timeout(Duration::from_millis(150), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("tool future should be dropped on cancellation");
     assert!(!completed.load(Ordering::SeqCst));
 }
 
