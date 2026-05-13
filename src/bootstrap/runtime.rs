@@ -230,8 +230,30 @@ use crate::tool::builtin::{
 };
 use crate::tool::registry::{ToolAssemblyContext, ToolRegistry};
 
+#[derive(Debug, Clone, Copy)]
+struct RuntimeOnlyTuiCommand {
+    slash_name: &'static str,
+    accepted_inputs: &'static [&'static str],
+    detail: &'static str,
+    accent_color: &'static str,
+}
+
+const RUNTIME_ONLY_TUI_COMMANDS: &[RuntimeOnlyTuiCommand] = &[RuntimeOnlyTuiCommand {
+    slash_name: "exit",
+    accepted_inputs: &["/exit", "exit", "quit"],
+    detail: "Exit the interactive TUI session. Also accepts bare `exit` and `quit`.",
+    accent_color: "31",
+}];
+
 pub fn is_tui_exit_input(input: &str) -> bool {
-    matches!(input.trim(), "/exit" | "exit" | "quit")
+    let trimmed = input.trim();
+    RUNTIME_ONLY_TUI_COMMANDS.iter().any(|command| {
+        command.slash_name == "exit"
+            && command
+                .accepted_inputs
+                .iter()
+                .any(|accepted| accepted.eq_ignore_ascii_case(trimmed))
+    })
 }
 
 pub fn tui_clear_screen_prefix() -> &'static str {
@@ -316,12 +338,17 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
 
 fn runtime_only_tui_suggestions(query: &str) -> Vec<TuiSuggestion> {
     filter_suggestions(
-        vec![heuristic_suggestion(
-            "/exit ",
-            "/exit",
-            "Exit the interactive TUI session",
-            "31",
-        )],
+        RUNTIME_ONLY_TUI_COMMANDS
+            .iter()
+            .map(|command| {
+                heuristic_suggestion(
+                    format!("/{} ", command.slash_name),
+                    format!("/{}", command.slash_name),
+                    command.detail,
+                    command.accent_color,
+                )
+            })
+            .collect(),
         query,
     )
 }
@@ -3347,8 +3374,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars, resolve_skill_project_root,
-        runtime_only_tui_suggestions, step_terminal_from_tracked_ids, terminal_tail_stalled,
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS, preview_chars,
+        resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
+        terminal_tail_stalled,
     };
     use anyhow::anyhow;
 
@@ -3445,6 +3473,22 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].label, "/exit");
         assert_eq!(filtered[0].replacement, "/exit ");
+    }
+
+    #[test]
+    fn runtime_only_tui_command_catalog_keeps_exit_inputs_and_suggestions_in_sync() {
+        let exit_command = RUNTIME_ONLY_TUI_COMMANDS
+            .iter()
+            .find(|command| command.slash_name == "exit")
+            .expect("exit runtime-only command");
+
+        assert!(exit_command.accepted_inputs.contains(&"/exit"));
+        assert!(exit_command.accepted_inputs.contains(&"exit"));
+        assert!(exit_command.accepted_inputs.contains(&"quit"));
+        assert!(
+            exit_command.detail.contains("quit"),
+            "exit suggestion detail should mention bare quit support"
+        );
     }
 
     #[test]
