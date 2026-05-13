@@ -2127,7 +2127,9 @@ fn selected_text(content: &TuiRenderedContent, selection: &TuiSelectionState) ->
 
 fn osc52_copy_sequence(text: &str) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    format!("\u{1b}]52;c;{encoded}\u{7}")
+    format!(
+        "\u{1b}]52;c;{encoded}\u{7}\u{1b}]52;c;{encoded}\u{1b}\\"
+    )
 }
 
 fn set_clipboard(text: &str) -> anyhow::Result<()> {
@@ -2150,6 +2152,19 @@ fn copy_selected_text(
     }
     set_clipboard(&text)?;
     Ok(true)
+}
+
+fn tui_is_copy_key(key: &crossterm::event::KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('c' | 'C') => {
+            key.modifiers
+                .intersects(KeyModifiers::SUPER | KeyModifiers::META)
+                || key
+                    .modifiers
+                    .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        }
+        _ => false,
+    }
 }
 
 fn current_tui_scroll_top(
@@ -2437,7 +2452,7 @@ mod tui_output_tests {
         heuristic_tui_suggestions, insert_input_char, normalize_tui_newlines,
         osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
         render_tui_rendered_line, select_line_at, select_word_at, selected_text,
-        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
+        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_is_copy_key,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -2789,8 +2804,28 @@ mod tui_output_tests {
         assert_eq!(selected_text(&content, &selection).as_deref(), Some("copy me"));
         assert_eq!(
             osc52_copy_sequence("copy me"),
-            "\u{1b}]52;c;Y29weSBtZQ==\u{7}"
+            "\u{1b}]52;c;Y29weSBtZQ==\u{7}\u{1b}]52;c;Y29weSBtZQ==\u{1b}\\"
         );
+    }
+
+    #[test]
+    fn tui_copy_key_accepts_terminal_variants() {
+        assert!(tui_is_copy_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::SUPER
+        )));
+        assert!(tui_is_copy_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::META
+        )));
+        assert!(tui_is_copy_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!tui_is_copy_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -3812,9 +3847,7 @@ impl RuntimeBootstrap {
                         continue;
                     }
 
-                    if matches!(key.code, KeyCode::Char('c' | 'C'))
-                        && key.modifiers.contains(KeyModifiers::SUPER)
-                    {
+                    if tui_is_copy_key(&key) {
                         let _ = copy_selected_text(&rendered_content, &selection);
                         pending_exit_gesture = None;
                         continue;
