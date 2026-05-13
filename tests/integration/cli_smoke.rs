@@ -960,3 +960,103 @@ async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
         "approval-resume smoke should run the approved Bash command exactly once"
     );
 }
+
+#[tokio::test]
+async fn cli_smoke_pending_approval_user_facing_copy_is_actionable() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let target = workspace.path().join("smoke_user_copy_target.txt");
+    std::fs::write(&target, "status = \"todo\"\n").expect("seed user-copy smoke target");
+
+    let target_display = target.to_string_lossy().to_string();
+    let read_input = serde_json::json!({
+        "file_path": target_display,
+    })
+    .to_string();
+    let bash_input = serde_json::json!({
+        "command": format!("sudo grep -n 'status = \"todo\"' {}", target.display()),
+        "timeout": 5_000
+    })
+    .to_string();
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(workspace.path()));
+    permission_context.add_always_allow_rule("Edit");
+    permission_context.add_always_ask_rule("Bash");
+
+    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Inspecting the target file before verification.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "I need approval before running the verification command.".into(),
+                ),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: bash_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+        ],
+        permission_context,
+    ));
+
+    let result = engine
+        .submit_turn(Message::user(
+            "Read the local file and run the verification command, but stop for approval if needed.",
+        ))
+        .await;
+
+    assert_eq!(
+        result.state,
+        QueryLoopState::Interrupted,
+        "user-facing approval copy smoke should stop in pending approval"
+    );
+    assert_eq!(
+        result.terminal,
+        Terminal::AbortedTools,
+        "user-facing approval copy smoke should stop at the approval barrier"
+    );
+
+    let final_message = final_assistant_message_text(&result.messages).to_lowercase();
+    assert!(
+        final_message.contains("approval required for bash"),
+        "user-facing approval copy should clearly identify Bash approval, not a generic interruption; final={final_message:?}"
+    );
+    assert!(
+        final_message.contains("reason:")
+            || final_message.contains("bash_warning")
+            || final_message.contains("privileged")
+            || final_message.contains("warning"),
+        "user-facing approval copy should include a reason or warning context; final={final_message:?}"
+    );
+    assert!(
+        final_message.contains("approve")
+            || final_message.contains("deny")
+            || final_message.contains("next_step:"),
+        "user-facing approval copy should tell the user what action to take next; final={final_message:?}"
+    );
+    assert!(
+        !final_message.contains("verification passed")
+            && !final_message.contains("task completed")
+            && !final_message.contains("exit_code:")
+            && !final_message.contains("failed to"),
+        "user-facing approval copy should not look like a success summary or a generic runtime error; final={final_message:?}"
+    );
+}
