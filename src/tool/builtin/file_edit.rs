@@ -9,6 +9,8 @@ use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct FileEditTool;
 
+const EDIT_SNIPPET_PREVIEW_CHARS: usize = 40;
+
 #[derive(Debug, Deserialize)]
 struct EditInput {
     file_path: String,
@@ -16,6 +18,31 @@ struct EditInput {
     new_string: String,
     #[serde(default)]
     replace_all: bool,
+}
+
+fn preview_text(text: &str) -> String {
+    let mut preview: String = text.chars().take(EDIT_SNIPPET_PREVIEW_CHARS).collect();
+    if text.chars().count() > EDIT_SNIPPET_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview.replace('\n', "\\n")
+}
+
+fn format_edit_success(
+    path: &PathBuf,
+    replacements: usize,
+    replace_all: bool,
+    old_text: &str,
+    new_text: &str,
+) -> String {
+    format!(
+        "path={}\nreplacements={}\nreplace_all={}\nold_text={}\nnew_text={}\n\nEdit completed successfully.",
+        path.display(),
+        replacements,
+        replace_all,
+        preview_text(old_text),
+        preview_text(new_text)
+    )
 }
 
 #[async_trait]
@@ -60,7 +87,7 @@ impl Tool for FileEditTool {
             anyhow::bail!("old_string cannot be empty")
         }
         if input.old_string == input.new_string {
-            anyhow::bail!("new_string must differ from old_string")
+            anyhow::bail!("No changes to make: new_string is unchanged from old_string.")
         }
         Ok(())
     }
@@ -71,6 +98,9 @@ impl Tool for FileEditTool {
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let input = parse_input(&call.input)?;
+        if input.old_string == input.new_string {
+            anyhow::bail!("No changes to make: new_string is unchanged from old_string.")
+        }
         let path = PathBuf::from(input.file_path.trim());
         if let Some(policy) = permissions.filesystem_policy() {
             policy
@@ -90,16 +120,20 @@ impl Tool for FileEditTool {
 
         let occurrences = original.matches(&input.old_string).count();
         if occurrences == 0 {
-            anyhow::bail!("old_string not found in {}", path.display())
+            anyhow::bail!(
+                "String to replace not found in {}. No changes were made.",
+                path.display()
+            )
         }
         if occurrences > 1 && !input.replace_all {
             anyhow::bail!(
-                "old_string is not unique in {} ({} matches)",
-                path.display(),
-                occurrences
+                "Found {} matches for old_string in {}. Please provide more context or set replace_all=true.",
+                occurrences,
+                path.display()
             )
         }
 
+        let replacements = if input.replace_all { occurrences } else { 1 };
         let updated = if input.replace_all {
             original.replace(&input.old_string, &input.new_string)
         } else {
@@ -110,7 +144,13 @@ impl Tool for FileEditTool {
             .await
             .map_err(|error| anyhow::anyhow!("failed to write {}: {error}", path.display()))?;
 
-        Ok(ToolResult::Text(format!("edited {}", path.display())))
+        Ok(ToolResult::Text(format_edit_success(
+            &path,
+            replacements,
+            input.replace_all,
+            &input.old_string,
+            &input.new_string,
+        )))
     }
 }
 

@@ -629,10 +629,12 @@ async fn edit_tool_replaces_unique_match() {
         .await
         .expect("edit should succeed");
 
-    assert_eq!(
-        result,
-        ToolResult::Text(format!("edited {}", file.display()))
-    );
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result");
+    };
+    assert!(text.contains(&format!("path={}", file.display())));
+    assert!(text.contains("replacements=1"));
+    assert!(text.contains("replace_all=false"));
     let updated = fs::read_to_string(&file).await.expect("read edited file");
     assert_eq!(updated, "before\nreplacement\nafter");
 
@@ -666,7 +668,7 @@ async fn edit_tool_rejects_non_unique_match_without_replace_all() {
         .await
         .expect_err("edit should fail for duplicate match");
 
-    assert!(error.to_string().contains("old_string is not unique"));
+    assert!(error.to_string().contains("Please provide more context"));
     fs::remove_dir_all(&dir).await.expect("cleanup dir");
 }
 
