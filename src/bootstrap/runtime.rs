@@ -266,9 +266,6 @@ struct TuiSuggestion {
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
-    let Some(registry) = app_state.command_registry.as_deref() else {
-        return Vec::new();
-    };
     if !input.starts_with('/') {
         return Vec::new();
     }
@@ -284,30 +281,49 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
         .trim()
         .to_ascii_lowercase();
 
-    let mut commands = registry.metadata();
-    commands.retain(|command| !command.is_hidden);
-    commands.sort_by(|left, right| {
-        command_match_score(right, &query)
-            .cmp(&command_match_score(left, &query))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    commands
-        .into_iter()
-        .filter(|command| command_match_score(command, &query) > 0)
-        .take(8)
-        .map(|command| TuiSuggestion {
-            replacement: format!("/{} ", command.name),
-            label: format!("/{}", command.name),
-            detail: command.description,
-            accent_color: match command.source {
-                CommandSource::Builtin => "36",
-                CommandSource::Coding => "32",
-                CommandSource::Skill => "35",
-                CommandSource::Mcp => "34",
-                CommandSource::Plugin => "33",
-            },
+    let mut suggestions = app_state
+        .command_registry
+        .as_deref()
+        .map(|registry| {
+            registry
+                .metadata()
+                .into_iter()
+                .filter(|command| !command.is_hidden && command_match_score(command, &query) > 0)
+                .map(|command| TuiSuggestion {
+                    replacement: format!("/{} ", command.name),
+                    label: format!("/{}", command.name),
+                    detail: command.description,
+                    accent_color: match command.source {
+                        CommandSource::Builtin => "36",
+                        CommandSource::Coding => "32",
+                        CommandSource::Skill => "35",
+                        CommandSource::Mcp => "34",
+                        CommandSource::Plugin => "33",
+                    },
+                })
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .unwrap_or_default();
+    suggestions.extend(runtime_only_tui_suggestions(&query));
+    suggestions.sort_by(|left, right| {
+        suggestion_match_score(right, &query)
+            .cmp(&suggestion_match_score(left, &query))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    suggestions.truncate(8);
+    suggestions
+}
+
+fn runtime_only_tui_suggestions(query: &str) -> Vec<TuiSuggestion> {
+    filter_suggestions(
+        vec![heuristic_suggestion(
+            "/exit ",
+            "/exit",
+            "Exit the interactive TUI session",
+            "31",
+        )],
+        query,
+    )
 }
 
 fn heuristic_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<TuiSuggestion>> {
@@ -848,6 +864,31 @@ fn command_match_score(command: &CommandMetadata, query: &str) -> i32 {
         .any(|alias| alias.to_ascii_lowercase().contains(query))
     {
         return 1_000;
+    }
+    0
+}
+
+fn suggestion_match_score(suggestion: &TuiSuggestion, query: &str) -> i32 {
+    let label = suggestion.label.trim_start_matches('/').to_ascii_lowercase();
+    let detail = suggestion.detail.to_ascii_lowercase();
+
+    if query.is_empty() {
+        return match label.as_str() {
+            "exit" => 640,
+            _ => 0,
+        };
+    }
+    if label == query {
+        return 10_000;
+    }
+    if label.starts_with(query) {
+        return 7_000;
+    }
+    if label.contains(query) {
+        return 4_000;
+    }
+    if detail.contains(query) {
+        return 1_500;
     }
     0
 }
@@ -3307,7 +3348,7 @@ mod tests {
 
     use super::{
         BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, preview_chars, resolve_skill_project_root,
-        step_terminal_from_tracked_ids, terminal_tail_stalled,
+        runtime_only_tui_suggestions, step_terminal_from_tracked_ids, terminal_tail_stalled,
     };
     use anyhow::anyhow;
 
@@ -3393,6 +3434,17 @@ mod tests {
         let sync_result: anyhow::Result<bool> = Ok(true);
         let terminal_result: anyhow::Result<Option<String>> = Ok(None);
         assert!(!terminal_tail_stalled(&sync_result, &terminal_result, true));
+    }
+
+    #[test]
+    fn runtime_only_tui_suggestions_include_exit_command() {
+        let default = runtime_only_tui_suggestions("");
+        assert!(default.iter().any(|suggestion| suggestion.label == "/exit"));
+
+        let filtered = runtime_only_tui_suggestions("ex");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].label, "/exit");
+        assert_eq!(filtered[0].replacement, "/exit ");
     }
 
     #[test]
