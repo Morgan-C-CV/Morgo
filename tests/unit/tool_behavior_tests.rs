@@ -814,6 +814,48 @@ async fn edit_tool_replace_all_reports_full_replacement_count_and_updates_every_
 }
 
 #[tokio::test]
+async fn edit_tool_missing_file_failure_stays_distinct_from_not_found_in_file() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-edit-missing-file"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let missing_file = dir.join("missing.txt");
+
+    let error = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: serde_json::json!({
+                    "file_path": missing_file,
+                    "old_string": "needle",
+                    "new_string": "replacement"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect_err("missing file edit should fail");
+
+    let text = error.to_string();
+    assert!(
+        text.contains("failed to access")
+            || text.contains("failed to read")
+            || text.contains("No such file")
+            || text.contains("not found"),
+        "missing file failure should clearly read as a path/file access problem; text={text:?}"
+    );
+    assert!(
+        text.contains(&missing_file.display().to_string()),
+        "missing file failure should include the target path; text={text:?}"
+    );
+    assert!(
+        !text.contains("No changes were made."),
+        "missing file failure should not look like an in-file replacement miss; text={text:?}"
+    );
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn web_fetch_tool_returns_response_body() {
     let body = fetch_text_with("https://example.com", |_url| async {
         Ok((200, "hello client".into()))
