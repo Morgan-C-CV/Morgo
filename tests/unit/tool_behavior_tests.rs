@@ -766,6 +766,54 @@ async fn edit_tool_result_shape_stays_locatable_noop_distinguishable_and_failure
 }
 
 #[tokio::test]
+async fn edit_tool_replace_all_reports_full_replacement_count_and_updates_every_match() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-edit-replace-all"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+    let file = dir.join("sample.txt");
+    fs::write(&file, "needle\nkeep\nneedle\nneedle\n")
+        .await
+        .expect("write sample file");
+
+    let result = FileEditTool
+        .invoke(
+            &ToolCall {
+                name: "Edit".into(),
+                input: serde_json::json!({
+                    "file_path": file,
+                    "old_string": "needle",
+                    "new_string": "replacement",
+                    "replace_all": true
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("replace_all edit should succeed");
+
+    let ToolResult::Text(text) = result else {
+        panic!("expected text result for replace_all edit");
+    };
+    assert!(
+        text.contains(&format!("path={}", file.display())),
+        "replace_all edit should include file path; text={text:?}"
+    );
+    assert!(
+        text.contains("replace_all=true"),
+        "replace_all edit should explicitly report full replacement mode; text={text:?}"
+    );
+    assert!(
+        text.contains("replacements=3"),
+        "replace_all edit should report the real replacement count; text={text:?}"
+    );
+
+    let updated = fs::read_to_string(&file).await.expect("read edited file");
+    assert_eq!(updated, "replacement\nkeep\nreplacement\nreplacement\n");
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn web_fetch_tool_returns_response_body() {
     let body = fetch_text_with("https://example.com", |_url| async {
         Ok((200, "hello client".into()))
