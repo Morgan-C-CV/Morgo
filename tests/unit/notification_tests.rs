@@ -655,6 +655,74 @@ fn cli_renderer_read_result_panel_surfaces_path_offset_returned_chars_and_trunca
 }
 
 #[test]
+fn cli_renderer_edit_result_panel_surfaces_path_replacements_replace_all_and_text_previews() {
+    let turn = CliTurnOutput {
+        primary_text: "assistant reply".into(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+            tool_name: "Edit".into(),
+            content: "path=/tmp/sample.txt\nreplacements=2\nreplace_all=true\nold_text=status = \\\"todo\\\"\nnew_text=status = \\\"done\\\"".into(),
+            summary: Some("Edit succeeded".into()),
+            detail: Some(
+                "path=/tmp/sample.txt\nreplacements=2\nreplace_all=true\nold_text=status = \\\"todo\\\"\nnew_text=status = \\\"done\\\"".into(),
+            ),
+        })],
+    };
+
+    let document = render_turn_document(&turn);
+    let edit_panel = document
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
+                if panel.kind
+                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+            {
+                Some(panel)
+            }
+            _ => None,
+        })
+        .expect("edit tool-result panel present");
+
+    assert_eq!(edit_panel.title, "Tool result");
+    assert!(
+        edit_panel.lines.iter().any(|line| line == "Tool: Edit"),
+        "edit result panel should stay in a dedicated tool-result panel; lines={:?}",
+        edit_panel.lines
+    );
+    assert!(
+        edit_panel.lines.iter().any(|line| line.starts_with("Path: ")),
+        "edit result panel should surface the path on its own labeled line; lines={:?}",
+        edit_panel.lines
+    );
+    assert!(
+        edit_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Replacements: ")),
+        "edit result panel should surface replacements on its own labeled line; lines={:?}",
+        edit_panel.lines
+    );
+    assert!(
+        edit_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Replace all: ")),
+        "edit result panel should surface replace_all on its own labeled line; lines={:?}",
+        edit_panel.lines
+    );
+    assert!(
+        edit_panel.lines.iter().any(|line| line.starts_with("Old text: ")),
+        "edit result panel should surface old_text on its own labeled line; lines={:?}",
+        edit_panel.lines
+    );
+    assert!(
+        edit_panel.lines.iter().any(|line| line.starts_with("New text: ")),
+        "edit result panel should surface new_text on its own labeled line; lines={:?}",
+        edit_panel.lines
+    );
+}
+
+#[test]
 fn surface_and_remote_views_preserve_structured_tool_fields() {
     let turn = CliTurnOutput {
         primary_text: "Status".into(),
