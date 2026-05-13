@@ -290,9 +290,22 @@ struct TuiSuggestion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiInputViewport {
-    visible_input: String,
-    start_char: usize,
+    visible_lines: Vec<String>,
+    cursor_row_offset: usize,
     cursor_column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiWrappedInputLine {
+    text: String,
+    start_char: usize,
+    end_char: usize,
+    char_columns: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiWrappedInputLayout {
+    lines: Vec<TuiWrappedInputLine>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1287,43 +1300,170 @@ fn char_to_byte_index(value: &str, char_index: usize) -> usize {
         .unwrap_or(value.len())
 }
 
-fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> TuiInputViewport {
-    const PROMPT_VISIBLE_WIDTH: usize = 2;
-    const CURSOR_BASE_COLUMN: usize = 3;
-    let visible_width = total_cols.saturating_sub(PROMPT_VISIBLE_WIDTH + 1).max(1);
+fn tui_char_display_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
+}
+
+fn wrap_tui_input_lines(input: &str, available_cols: usize) -> TuiWrappedInputLayout {
+    let width = available_cols.max(1);
     let chars = input.chars().collect::<Vec<_>>();
-    let char_len = chars.len();
+    let mut lines = Vec::new();
+    let mut line_text = String::new();
+    let mut line_char_columns = vec![0usize];
+    let mut line_start_char = 0usize;
+    let mut display_col = 0usize;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\n' {
+            lines.push(TuiWrappedInputLine {
+                text: std::mem::take(&mut line_text),
+                start_char: line_start_char,
+                end_char: index,
+                char_columns: std::mem::take(&mut line_char_columns),
+            });
+            index += 1;
+            line_start_char = index;
+            line_char_columns = vec![0usize];
+            display_col = 0;
+            continue;
+        }
+
+        let char_width = tui_char_display_width(ch).min(width);
+        if display_col > 0 && display_col + char_width > width {
+            lines.push(TuiWrappedInputLine {
+                text: std::mem::take(&mut line_text),
+                start_char: line_start_char,
+                end_char: index,
+                char_columns: std::mem::take(&mut line_char_columns),
+            });
+            line_start_char = index;
+            line_char_columns = vec![0usize];
+            display_col = 0;
+        }
+
+        line_text.push(ch);
+        display_col += char_width;
+        line_char_columns.push(display_col);
+        index += 1;
+    }
+
+    lines.push(TuiWrappedInputLine {
+        text: line_text,
+        start_char: line_start_char,
+        end_char: chars.len(),
+        char_columns: line_char_columns,
+    });
+
+    if lines.is_empty() {
+        lines.push(TuiWrappedInputLine {
+            text: String::new(),
+            start_char: 0,
+            end_char: 0,
+            char_columns: vec![0],
+        });
+    }
+
+    TuiWrappedInputLayout { lines }
+}
+
+fn tui_cursor_position(
+    layout: &TuiWrappedInputLayout,
+    cursor_index: usize,
+) -> (usize, usize) {
+    let line_index = layout
+        .lines
+        .iter()
+        .position(|line| cursor_index >= line.start_char && cursor_index <= line.end_char)
+        .unwrap_or_else(|| layout.lines.len().saturating_sub(1));
+    let line = &layout.lines[line_index];
+    let cursor_in_line = cursor_index.saturating_sub(line.start_char);
+    let column = line
+        .char_columns
+        .get(cursor_in_line)
+        .copied()
+        .unwrap_or_else(|| *line.char_columns.last().unwrap_or(&0));
+    (line_index, column)
+}
+
+fn tui_cursor_index_for_line_column(
+    layout: &TuiWrappedInputLayout,
+    line_index: usize,
+    desired_column: usize,
+) -> usize {
+    let Some(line) = layout.lines.get(line_index) else {
+        return 0;
+    };
+    let mut best_char_index = line.start_char;
+    let mut best_distance = usize::MAX;
+    for (offset, column) in line.char_columns.iter().enumerate() {
+        let distance = column.abs_diff(desired_column);
+        if distance < best_distance || (distance == best_distance && *column <= desired_column) {
+            best_distance = distance;
+            best_char_index = line.start_char + offset;
+        }
+    }
+    best_char_index.min(line.end_char)
+}
+
+fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> TuiInputViewport {
+    const PROMPT_PREFIX_WIDTH: usize = 2;
+    const CURSOR_BASE_COLUMN: usize = 3;
+    const INPUT_VIEWPORT_ROWS: usize = 4;
+    let visible_width = total_cols.saturating_sub(PROMPT_PREFIX_WIDTH + 1).max(1);
+    let char_len = input.chars().count();
     let clamped_cursor = cursor_index.min(char_len);
-    let mut start_char = 0usize;
-
-    while display_width_for_chars(&chars[start_char..clamped_cursor]) > visible_width
-        && start_char < clamped_cursor
-    {
-        start_char += 1;
-    }
-
-    let mut end_char = clamped_cursor;
-    while end_char < char_len
-        && display_width_for_chars(&chars[start_char..=end_char]) <= visible_width
-    {
-        end_char += 1;
-    }
-
-    let visible_input = chars[start_char..end_char].iter().collect::<String>();
-    let cursor_display_offset = display_width_for_chars(&chars[start_char..clamped_cursor]);
+    let layout = wrap_tui_input_lines(input, visible_width);
+    let (cursor_line, cursor_column_offset) = tui_cursor_position(&layout, clamped_cursor);
+    let viewport_start = cursor_line.saturating_sub(INPUT_VIEWPORT_ROWS.saturating_sub(1));
+    let visible_lines = layout
+        .lines
+        .iter()
+        .skip(viewport_start)
+        .take(INPUT_VIEWPORT_ROWS)
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>();
 
     TuiInputViewport {
-        visible_input,
-        start_char,
-        cursor_column: CURSOR_BASE_COLUMN + cursor_display_offset,
+        visible_lines,
+        cursor_row_offset: cursor_line.saturating_sub(viewport_start),
+        cursor_column: CURSOR_BASE_COLUMN + cursor_column_offset,
     }
 }
 
 fn display_width_for_chars(chars: &[char]) -> usize {
     chars
         .iter()
-        .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0))
+        .map(|ch| tui_char_display_width(*ch))
         .sum()
+}
+
+fn move_tui_cursor_vertically(
+    input: &str,
+    cursor_index: usize,
+    total_cols: usize,
+    direction: isize,
+) -> Option<usize> {
+    const PROMPT_PREFIX_WIDTH: usize = 2;
+    let visible_width = total_cols.saturating_sub(PROMPT_PREFIX_WIDTH + 1).max(1);
+    let char_len = input.chars().count();
+    let clamped_cursor = cursor_index.min(char_len);
+    let layout = wrap_tui_input_lines(input, visible_width);
+    let (line_index, column) = tui_cursor_position(&layout, clamped_cursor);
+    let target_line = if direction < 0 {
+        line_index.checked_sub(direction.unsigned_abs())?
+    } else {
+        line_index.saturating_add(direction as usize)
+    };
+    if target_line >= layout.lines.len() {
+        return None;
+    }
+    Some(tui_cursor_index_for_line_column(
+        &layout,
+        target_line,
+        column,
+    ))
 }
 
 fn format_tui_elapsed(duration: Duration) -> String {
@@ -1398,7 +1538,7 @@ fn render_fixed_tui_layout(
     input: &str,
     suggestions: &[TuiSuggestion],
     selected_suggestion: usize,
-    content_scroll_offset: usize,
+    content_scroll_top: usize,
     turn_status: TuiTurnStatus,
     cursor_index: usize,
 ) -> String {
@@ -1415,6 +1555,7 @@ fn render_fixed_tui_layout(
             .collect::<Vec<_>>()
     };
 
+    const INPUT_BOX_HEIGHT: usize = 4;
     let (cols, rows) = size().unwrap_or((100, 32));
     let width = usize::from(cols.max(1));
     let height = usize::from(rows.max(3));
@@ -1433,26 +1574,27 @@ fn render_fixed_tui_layout(
     } else {
         Vec::new()
     };
-    let bottom_reserved_height = 3usize + suggestion_lines.len();
+    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_lines.len();
     let content_height = height.saturating_sub(bottom_reserved_height);
-    let max_scroll_offset = max_tui_content_scroll_offset(content_lines.len(), content_height);
-    let clamped_scroll_offset = content_scroll_offset.min(max_scroll_offset);
-    let visible_lines = if content_lines.len() > content_height {
-        let end = content_lines.len().saturating_sub(clamped_scroll_offset);
-        let start = end.saturating_sub(content_height);
-        content_lines[start..end].to_vec()
-    } else {
-        content_lines
-    };
+    let max_scroll_top = max_tui_content_scroll_offset(content_lines.len(), content_height);
+    let clamped_scroll_top = content_scroll_top.min(max_scroll_top);
+    let visible_lines = content_lines
+        .iter()
+        .skip(clamped_scroll_top)
+        .take(content_height)
+        .cloned()
+        .collect::<Vec<_>>();
 
     let viewport = tui_input_viewport(input, cursor_index, width);
     let status_line = status_line_for_tui(turn_status, width);
     let model_cwd_line = format_tui_model_and_cwd(app_state);
-    let input_padding = " "
-        .repeat(width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())));
+    let content_width = width.saturating_sub(1).max(1);
     let status_row = content_height.saturating_add(1).min(height);
     let model_row = content_height.saturating_add(2).min(height);
     let input_row = content_height.saturating_add(3).min(height);
+    let cursor_row = input_row
+        .saturating_add(viewport.cursor_row_offset)
+        .min(input_row.saturating_add(INPUT_BOX_HEIGHT.saturating_sub(1)));
     let cursor_col = viewport.cursor_column.min(width).max(1);
 
     let mut frame = String::from("\x1b[?25l");
@@ -1460,26 +1602,61 @@ fn render_fixed_tui_layout(
 
     for (row_index, line) in visible_lines.iter().enumerate() {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row_index + 1, line));
+        let scrollbar = render_tui_scrollbar_cell(
+            content_lines.len(),
+            content_height,
+            clamped_scroll_top,
+            row_index,
+        );
+        frame.push_str(&format!("\x1b[{};{}H{}", row_index + 1, width, scrollbar));
     }
     for row_index in visible_lines.len() + 1..=content_height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
+        let scrollbar = render_tui_scrollbar_cell(
+            content_lines.len(),
+            content_height,
+            clamped_scroll_top,
+            row_index.saturating_sub(1),
+        );
+        frame.push_str(&format!("\x1b[{};{}H{}", row_index, width, scrollbar));
     }
 
     frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", status_row, status_line));
     frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", model_row, model_cwd_line));
-    frame.push_str(&format!(
-        "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
-        input_row, viewport.visible_input, input_padding
-    ));
+    for row_offset in 0..INPUT_BOX_HEIGHT {
+        let row = input_row.saturating_add(row_offset).min(height);
+        let line = viewport
+            .visible_lines
+            .get(row_offset)
+            .cloned()
+            .unwrap_or_default();
+        let prefix = if row_offset == 0 {
+            colorize_ansi(">", "1;36")
+        } else {
+            " ".to_string()
+        };
+        let line_width = UnicodeWidthStr::width(line.as_str());
+        let padding = " ".repeat(content_width.saturating_sub(2 + line_width));
+        frame.push_str(&format!(
+            "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m{} {}{}\x1b[0m",
+            row, prefix, line, padding
+        ));
+    }
     for (index, line) in suggestion_lines.iter().enumerate() {
-        let row = input_row.saturating_add(1 + index).min(height);
+        let row = input_row
+            .saturating_add(INPUT_BOX_HEIGHT)
+            .saturating_add(index)
+            .min(height);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row, line));
     }
-    let suggestion_end_row = input_row.saturating_add(suggestion_lines.len());
+    let suggestion_end_row = input_row
+        .saturating_add(INPUT_BOX_HEIGHT)
+        .saturating_add(suggestion_lines.len())
+        .saturating_sub(1);
     for row in suggestion_end_row.saturating_add(1)..=height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row));
     }
-    frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", input_row, cursor_col));
+    frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", cursor_row, cursor_col));
     frame
 }
 
@@ -1487,18 +1664,70 @@ fn max_tui_content_scroll_offset(content_line_count: usize, content_height: usiz
     content_line_count.saturating_sub(content_height)
 }
 
+fn tui_document_line_count(
+    document: &crate::interaction::cli::renderer::RenderDocument,
+) -> usize {
+    let mut screen = build_tui_screen(document);
+    screen.prompt.clear();
+    let content = render_tui_screen_output(&screen);
+    if content.is_empty() {
+        0
+    } else {
+        content.lines().count()
+    }
+}
+
+fn max_tui_scroll_top_for_document(
+    document: &crate::interaction::cli::renderer::RenderDocument,
+    input: &str,
+    suggestions: &[TuiSuggestion],
+) -> usize {
+    let content_height = tui_visible_content_height(input, suggestions);
+    max_tui_content_scroll_offset(tui_document_line_count(document), content_height)
+}
+
 fn tui_content_height_for_layout(
     terminal_rows: usize,
     input: &str,
     suggestions: &[TuiSuggestion],
 ) -> usize {
+    const INPUT_BOX_HEIGHT: usize = 4;
     let suggestion_count = if input.starts_with('/') {
         suggestions.len().max(1)
     } else {
         0
     };
-    let bottom_reserved_height = 3usize + suggestion_count;
+    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_count;
     terminal_rows.max(3).saturating_sub(bottom_reserved_height)
+}
+
+fn render_tui_scrollbar_cell(
+    total_lines: usize,
+    viewport_height: usize,
+    scroll_top: usize,
+    row_index: usize,
+) -> String {
+    if viewport_height == 0 {
+        return String::new();
+    }
+    if total_lines <= viewport_height {
+        return colorize_ansi("│", "2;37");
+    }
+    let thumb_height =
+        ((viewport_height * viewport_height) + total_lines - 1) / total_lines.max(1);
+    let thumb_height = thumb_height.clamp(1, viewport_height);
+    let max_scroll_top = total_lines.saturating_sub(viewport_height);
+    let track_span = viewport_height.saturating_sub(thumb_height);
+    let thumb_start = if max_scroll_top == 0 {
+        0
+    } else {
+        scroll_top * track_span / max_scroll_top
+    };
+    if row_index >= thumb_start && row_index < thumb_start + thumb_height {
+        colorize_ansi("█", "38;5;245")
+    } else {
+        colorize_ansi("│", "2;37")
+    }
 }
 
 fn tui_visible_content_height(input: &str, suggestions: &[TuiSuggestion]) -> usize {
@@ -1555,19 +1784,27 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_input_viewport_keeps_cursor_visible_in_scrolled_input_box() {
+    fn tui_input_viewport_keeps_cursor_visible_in_multiline_input_box() {
         let viewport = tui_input_viewport("abcdefghij", 10, 8);
-        assert_eq!(viewport.visible_input, "fghij");
-        assert_eq!(viewport.start_char, 5);
+        assert_eq!(viewport.visible_lines, vec!["abcde", "fghij"]);
+        assert_eq!(viewport.cursor_row_offset, 1);
         assert_eq!(viewport.cursor_column, 8);
     }
 
     #[test]
-    fn tui_input_viewport_accounts_for_wide_cjk_characters() {
-        let viewport = tui_input_viewport("ab中文cd", "ab中文cd".chars().count(), 10);
-        assert_eq!(viewport.visible_input, "b中文cd");
-        assert_eq!(viewport.start_char, 1);
-        assert_eq!(viewport.cursor_column, 10);
+    fn tui_input_viewport_accounts_for_wide_cjk_characters_without_spilling_cursor_row() {
+        let viewport = tui_input_viewport("ab中文cd", "ab中文cd".chars().count(), 9);
+        assert_eq!(viewport.visible_lines, vec!["ab中文", "cd"]);
+        assert_eq!(viewport.cursor_row_offset, 1);
+        assert_eq!(viewport.cursor_column, 5);
+    }
+
+    #[test]
+    fn tui_input_viewport_tracks_explicit_newlines() {
+        let viewport = tui_input_viewport("ab\ncd\nef", "ab\ncd\nef".chars().count(), 12);
+        assert_eq!(viewport.visible_lines, vec!["ab", "cd", "ef"]);
+        assert_eq!(viewport.cursor_row_offset, 2);
+        assert_eq!(viewport.cursor_column, 5);
     }
 
     #[test]
@@ -2636,7 +2873,8 @@ impl RuntimeBootstrap {
         let mut input = String::new();
         let mut cursor_index = 0usize;
         let mut selected_suggestion = 0usize;
-        let mut content_scroll_offset = 0usize;
+        let mut content_scroll_top = usize::MAX;
+        let mut follow_content_tail = true;
         let mut active_turn_started_at: Option<Instant> = None;
         let mut last_turn_duration: Option<Duration> = None;
 
@@ -2658,7 +2896,11 @@ impl RuntimeBootstrap {
                 &input,
                 &suggestions,
                 selected_suggestion,
-                content_scroll_offset,
+                if follow_content_tail {
+                    usize::MAX
+                } else {
+                    content_scroll_top
+                },
                 turn_status,
                 cursor_index,
             );
@@ -2680,9 +2922,13 @@ impl RuntimeBootstrap {
                     input.clear();
                     cursor_index = 0;
                     selected_suggestion = 0;
-                    content_scroll_offset = 0;
                 }
                 KeyCode::Enter => {
+                    if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
+                        insert_input_char(&mut input, &mut cursor_index, '\n');
+                        selected_suggestion = 0;
+                        continue;
+                    }
                     if input.trim().is_empty() {
                         continue;
                     }
@@ -2698,7 +2944,8 @@ impl RuntimeBootstrap {
                     input.clear();
                     cursor_index = 0;
                     selected_suggestion = 0;
-                    content_scroll_offset = 0;
+                    follow_content_tail = true;
+                    content_scroll_top = usize::MAX;
                     active_turn_started_at = Some(Instant::now());
                     last_turn_duration = None;
 
@@ -2729,6 +2976,16 @@ impl RuntimeBootstrap {
                                 let next_document = render_turn_document(snapshot);
                                 if next_document != current_document {
                                     current_document = next_document;
+                                    if follow_content_tail {
+                                        content_scroll_top = usize::MAX;
+                                    } else {
+                                        let max_scroll_top = max_tui_scroll_top_for_document(
+                                            &current_document,
+                                            "",
+                                            &[],
+                                        );
+                                        content_scroll_top = content_scroll_top.min(max_scroll_top);
+                                    }
                                     self.print_tui_interactive_frame(
                                         app_state,
                                         &current_document,
@@ -2748,7 +3005,13 @@ impl RuntimeBootstrap {
                         )
                         .await?;
                     current_document = render_turn_document(&output);
-                    content_scroll_offset = 0;
+                    if follow_content_tail {
+                        content_scroll_top = usize::MAX;
+                    } else {
+                        let max_scroll_top =
+                            max_tui_scroll_top_for_document(&current_document, "", &[]);
+                        content_scroll_top = content_scroll_top.min(max_scroll_top);
+                    }
                     last_turn_duration =
                         active_turn_started_at.map(|started_at| started_at.elapsed());
                     active_turn_started_at = None;
@@ -2785,30 +3048,104 @@ impl RuntimeBootstrap {
                 }
                 KeyCode::Up => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        content_scroll_offset = content_scroll_offset.saturating_add(1);
+                        let max_scroll_top =
+                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                        content_scroll_top = if follow_content_tail {
+                            max_scroll_top
+                        } else {
+                            content_scroll_top
+                        }
+                        .saturating_sub(1);
+                        follow_content_tail = false;
                     } else if !suggestions.is_empty() {
                         selected_suggestion =
                             (selected_suggestion + suggestions.len() - 1) % suggestions.len();
+                    } else if let Some(next_cursor) =
+                        move_tui_cursor_vertically(&input, cursor_index, usize::from(size().unwrap_or((100, 32)).0.max(1)), -1)
+                    {
+                        cursor_index = next_cursor;
                     } else {
-                        content_scroll_offset = content_scroll_offset.saturating_add(1);
+                        let max_scroll_top =
+                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                        content_scroll_top = if follow_content_tail {
+                            max_scroll_top
+                        } else {
+                            content_scroll_top
+                        }
+                        .saturating_sub(1);
+                        follow_content_tail = false;
                     }
                 }
                 KeyCode::Down => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        content_scroll_offset = content_scroll_offset.saturating_sub(1);
+                        let max_scroll_top =
+                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                        let next_scroll_top = if follow_content_tail {
+                            max_scroll_top
+                        } else {
+                            content_scroll_top
+                        }
+                        .saturating_add(1)
+                        .min(max_scroll_top);
+                        follow_content_tail = next_scroll_top >= max_scroll_top;
+                        content_scroll_top = if follow_content_tail {
+                            usize::MAX
+                        } else {
+                            next_scroll_top
+                        };
                     } else if !suggestions.is_empty() {
                         selected_suggestion = (selected_suggestion + 1) % suggestions.len();
+                    } else if let Some(next_cursor) =
+                        move_tui_cursor_vertically(&input, cursor_index, usize::from(size().unwrap_or((100, 32)).0.max(1)), 1)
+                    {
+                        cursor_index = next_cursor;
                     } else {
-                        content_scroll_offset = content_scroll_offset.saturating_sub(1);
+                        let max_scroll_top =
+                            max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                        let next_scroll_top = if follow_content_tail {
+                            max_scroll_top
+                        } else {
+                            content_scroll_top
+                        }
+                        .saturating_add(1)
+                        .min(max_scroll_top);
+                        follow_content_tail = next_scroll_top >= max_scroll_top;
+                        content_scroll_top = if follow_content_tail {
+                            usize::MAX
+                        } else {
+                            next_scroll_top
+                        };
                     }
                 }
                 KeyCode::PageUp => {
                     let page = tui_visible_content_height(&input, &suggestions).max(1);
-                    content_scroll_offset = content_scroll_offset.saturating_add(page);
+                    let max_scroll_top =
+                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                    content_scroll_top = if follow_content_tail {
+                        max_scroll_top
+                    } else {
+                        content_scroll_top
+                    }
+                    .saturating_sub(page);
+                    follow_content_tail = false;
                 }
                 KeyCode::PageDown => {
                     let page = tui_visible_content_height(&input, &suggestions).max(1);
-                    content_scroll_offset = content_scroll_offset.saturating_sub(page);
+                    let max_scroll_top =
+                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
+                    let next_scroll_top = if follow_content_tail {
+                        max_scroll_top
+                    } else {
+                        content_scroll_top
+                    }
+                    .saturating_add(page)
+                    .min(max_scroll_top);
+                    follow_content_tail = next_scroll_top >= max_scroll_top;
+                    content_scroll_top = if follow_content_tail {
+                        usize::MAX
+                    } else {
+                        next_scroll_top
+                    };
                 }
                 KeyCode::Char(ch) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2830,7 +3167,7 @@ impl RuntimeBootstrap {
         input: &str,
         suggestions: &[TuiSuggestion],
         selected_suggestion: usize,
-        content_scroll_offset: usize,
+        content_scroll_top: usize,
         turn_status: TuiTurnStatus,
         cursor_index: usize,
     ) {
@@ -2850,7 +3187,7 @@ impl RuntimeBootstrap {
             input,
             suggestions,
             selected_suggestion,
-            content_scroll_offset,
+            content_scroll_top,
             turn_status,
             cursor_index,
         ));
