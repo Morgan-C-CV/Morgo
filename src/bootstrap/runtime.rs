@@ -327,6 +327,7 @@ enum TuiTurnStatus {
     Idle,
     Working(Duration),
     Worked(Duration),
+    Selection,
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -1510,8 +1511,21 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
             let right = available.saturating_sub(left);
             format!("{}{}{}", "─".repeat(left), label, "─".repeat(right))
         }
+        TuiTurnStatus::Selection => {
+            "• Selection mode (drag to select and copy • esc to return)".to_string()
+        }
     };
     colorize_ansi(&base, "2;37")
+}
+
+fn set_tui_mouse_capture(enabled: bool) -> anyhow::Result<()> {
+    let mut stdout = io::stdout();
+    if enabled {
+        execute!(stdout, EnableMouseCapture)?;
+    } else {
+        execute!(stdout, DisableMouseCapture)?;
+    }
+    Ok(())
 }
 
 fn format_tui_model_and_cwd(app_state: &AppState) -> String {
@@ -1888,7 +1902,7 @@ mod tui_output_tests {
     use super::{
         backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
         normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
-        tui_context_document, tui_input_viewport, TuiTurnStatus,
+        status_line_for_tui, tui_context_document, tui_input_viewport, TuiTurnStatus,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -2042,6 +2056,14 @@ mod tui_output_tests {
 
         assert!(status_pos < model_pos);
         assert!(model_pos < input_pos);
+    }
+
+    #[test]
+    fn tui_selection_mode_status_line_explains_copy_flow() {
+        let rendered = strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::Selection, 80));
+        assert!(rendered.contains("Selection mode"));
+        assert!(rendered.contains("drag to select and copy"));
+        assert!(rendered.contains("esc to return"));
     }
 
     #[test]
@@ -3103,13 +3125,16 @@ impl RuntimeBootstrap {
         let wheel_uses_xterm_decay = tui_detect_xterm_js();
         let mut active_turn_started_at: Option<Instant> = None;
         let mut last_turn_duration: Option<Duration> = None;
+        let mut selection_mode = false;
 
         loop {
             let suggestions = tui_command_suggestions(app_state, &input);
             if selected_suggestion >= suggestions.len() {
                 selected_suggestion = 0;
             }
-            let turn_status = if let Some(started_at) = active_turn_started_at {
+            let turn_status = if selection_mode {
+                TuiTurnStatus::Selection
+            } else if let Some(started_at) = active_turn_started_at {
                 TuiTurnStatus::Working(started_at.elapsed())
             } else if let Some(duration) = last_turn_duration {
                 TuiTurnStatus::Worked(duration)
@@ -3145,7 +3170,25 @@ impl RuntimeBootstrap {
                         continue;
                     }
 
+                    if selection_mode {
+                        if key.code == KeyCode::Esc {
+                            set_tui_mouse_capture(true)?;
+                            selection_mode = false;
+                        }
+                        continue;
+                    }
+
                     match key.code {
+                KeyCode::Char('s' | 'S')
+                    if key
+                        .modifiers
+                        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    if active_turn_started_at.is_none() {
+                        set_tui_mouse_capture(false)?;
+                        selection_mode = true;
+                    }
+                }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.print_tui_message("Exiting TUI session.");
                     execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
