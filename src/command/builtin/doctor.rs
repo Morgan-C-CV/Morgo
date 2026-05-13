@@ -5,6 +5,7 @@ use crate::command::types::{
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
+use crate::state::permission_context::PermissionMode;
 
 pub struct DoctorCommand;
 
@@ -33,10 +34,48 @@ impl Command for DoctorCommand {
     ) -> anyhow::Result<CommandResult> {
         let surface_info = format!("{:?}", app_state.surface);
         let session_id = &app_state.active_session_id;
+        let cwd = app_state.current_working_directory();
+        let permission_mode = match app_state.permission_context.mode() {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::BypassPermissions => "bypass_permissions",
+            PermissionMode::Plan => "plan",
+        };
+        let auth_status = &app_state.active_model_provider_summary.auth_status;
+        let pending_approval = app_state.permission_context.pending_approval();
+        let cwd_state = if cwd.is_dir() {
+            format!("cwd: {} (workspace available)", cwd.display())
+        } else {
+            format!("cwd: {} (missing or not a directory)", cwd.display())
+        };
+        let mut coding_blockers = Vec::new();
+        if auth_status.contains("(unset)") {
+            coding_blockers.push(format!(
+                "model/API auth: {}",
+                auth_status
+            ));
+        } else {
+            coding_blockers.push(format!("model/API auth: {}", auth_status));
+        }
+        coding_blockers.push(cwd_state);
+        if let Some(pending) = pending_approval {
+            coding_blockers.push(format!(
+                "permission mode: {} | pending approval: {} ({})",
+                permission_mode, pending.tool_name, pending.tool_input
+            ));
+        } else {
+            coding_blockers.push(format!("permission mode: {}", permission_mode));
+        }
 
-        // Future enhancements can run checks for tools (cargo, node, gh, etc.)
+        let coding_blockers_section = if coding_blockers.is_empty() {
+            "Coding blockers:\n- none detected".to_string()
+        } else {
+            format!("Coding blockers:\n- {}", coding_blockers.join("\n- "))
+        };
+
         let message = format!(
-            "⚕️  Doctor Diagnostics\n\
+            "⚕️  Doctor Diagnostics\n\n{}\n\
+            \nSecondary diagnostics:\n\
             \nSystem Context:\n\
             - Interaction Surface: {}\n\
             - Default Session ID: {}\n\
@@ -46,6 +85,7 @@ impl Command for DoctorCommand {
             - Local Components: OK\n\
             - Rust Toolchains Validation: OK\n\
             \n(NOTE: Component UI is currently running in a purely unrendered text CLI loop.)",
+            coding_blockers_section,
             surface_info,
             session_id,
             if app_state.session_store.is_some() {
