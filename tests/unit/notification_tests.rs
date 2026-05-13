@@ -1123,6 +1123,48 @@ fn cli_renderer_tui_screen_uses_welcome_empty_state_when_document_is_empty() {
 }
 
 #[test]
+fn cli_startup_hint_prioritizes_coding_path_over_legacy_capabilities() {
+    let screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![],
+    }));
+    let hint_text = screen.main.join("\n");
+    let lower = hint_text.to_ascii_lowercase();
+
+    assert!(
+        lower.contains("code")
+            || lower.contains("coding")
+            || lower.contains("edit")
+            || lower.contains("fix")
+            || lower.contains("implement"),
+        "startup hint should foreground the coding-agent path instead of a generic shell/help surface; main={:?}",
+        screen.main
+    );
+    assert!(
+        lower.contains("ask")
+            || lower.contains("request")
+            || lower.contains("change")
+            || lower.contains("fix ")
+            || lower.contains("implement"),
+        "startup hint should tell the user how to begin a coding request; main={:?}",
+        screen.main
+    );
+    assert!(
+        lower.contains("/exit") || lower.contains("exit") || lower.contains("quit"),
+        "startup hint should tell the user how to exit; main={:?}",
+        screen.main
+    );
+    assert!(
+        !lower.contains("lism")
+            && !lower.contains("um")
+            && !lower.contains("swarm")
+            && !lower.contains("plugin"),
+        "startup hint should not foreground legacy or non-V1 capability surfaces; main={:?}",
+        screen.main
+    );
+}
+
+#[test]
 fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
     let turn = CliTurnOutput {
         primary_text: "Assistant summary: inspected the local workspace.".into(),

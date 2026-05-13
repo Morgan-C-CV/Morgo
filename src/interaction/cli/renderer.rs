@@ -138,9 +138,9 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
 
     if main.is_empty() && panels.is_empty() {
         main = vec![
-            "Welcome to RustAgent TUI.".into(),
-            "Run a command or ask for help to populate this screen.".into(),
-            "Try /help to inspect the current command surface.".into(),
+            "Morgo is ready for coding tasks.".into(),
+            "Ask me to inspect code, edit files, or run verification commands.".into(),
+            "Use /help to see commands if needed, or /exit to leave the TUI.".into(),
         ];
     }
 
