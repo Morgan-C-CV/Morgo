@@ -8,9 +8,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use base64::Engine as _;
 use clap::Parser;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags, poll, read,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags, poll, read,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -275,6 +275,7 @@ impl TuiRawModeGuard {
         execute!(
             stdout,
             EnterAlternateScreen,
+            EnableBracketedPaste,
             EnableMouseCapture,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
@@ -295,6 +296,7 @@ impl Drop for TuiRawModeGuard {
         let _ = execute!(
             stdout,
             PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -1371,6 +1373,20 @@ fn insert_input_char(input: &mut String, cursor_index: &mut usize, ch: char) {
     let byte_index = char_to_byte_index(input, *cursor_index);
     input.insert(byte_index, ch);
     *cursor_index += 1;
+}
+
+fn normalize_tui_pasted_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn insert_input_text(input: &mut String, cursor_index: &mut usize, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let normalized = normalize_tui_pasted_text(text);
+    let byte_index = char_to_byte_index(input, *cursor_index);
+    input.insert_str(byte_index, &normalized);
+    *cursor_index += normalized.chars().count();
 }
 
 fn backspace_input_char(input: &mut String, cursor_index: &mut usize) -> bool {
@@ -2487,11 +2503,11 @@ mod tui_output_tests {
     use super::{
         TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState, TuiTurnStatus,
         backspace_input_char, begin_selection, build_tui_rendered_content, delete_input_char,
-        heuristic_tui_suggestions, insert_input_char, normalize_tui_newlines,
-        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
-        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
-        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_is_copy_key,
-        tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
+        heuristic_tui_suggestions, insert_input_char, insert_input_text, normalize_tui_newlines,
+        normalize_tui_pasted_text, osc52_copy_sequence, render_command_suggestion_line,
+        render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
+        selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
+        tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
         tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -2531,6 +2547,25 @@ mod tui_output_tests {
 
         assert!(delete_input_char(&mut input, 2));
         assert_eq!(input, "heo");
+    }
+
+    #[test]
+    fn tui_multiline_paste_inserts_text_without_submitting() {
+        let mut input = "before after".to_string();
+        let mut cursor_index = "before ".chars().count();
+
+        insert_input_text(&mut input, &mut cursor_index, "line1\r\nline2\rline3");
+
+        assert_eq!(input, "before line1\nline2\nline3after");
+        assert_eq!(cursor_index, "before line1\nline2\nline3".chars().count());
+    }
+
+    #[test]
+    fn tui_paste_normalization_converts_crlf_and_cr_to_lf() {
+        assert_eq!(
+            normalize_tui_pasted_text("a\r\nb\rc\n"),
+            "a\nb\nc\n"
+        );
     }
 
     #[test]
@@ -4174,6 +4209,11 @@ impl RuntimeBootstrap {
                         }
                         _ => {}
                     }
+                }
+                Event::Paste(data) => {
+                    pending_exit_gesture = None;
+                    insert_input_text(&mut input, &mut cursor_index, &data);
+                    selected_suggestion = Some(0);
                 }
                 Event::Mouse(mouse) => {
                     pending_exit_gesture = None;
