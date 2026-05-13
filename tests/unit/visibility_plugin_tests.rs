@@ -21,6 +21,7 @@ use rust_agent::history::resume::RestoredSession;
 use rust_agent::history::session::{SessionId, SessionSnapshot};
 use rust_agent::history::transcript::Transcript;
 use rust_agent::interaction::cli::renderer::render_turn_output;
+use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent};
 use rust_agent::interaction::cli::repl::CliTurnOutput;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
@@ -2036,6 +2037,174 @@ async fn v1_release_gate_minimal_coding_cli_surface_stays_green() {
             && tasks_text.contains("Completed tasks:")
             && tasks_text.to_ascii_lowercase().contains("task output"),
         "release gate expects /tasks to distinguish active vs terminal tasks with output hints; text={tasks_text}"
+    );
+}
+
+#[tokio::test]
+async fn v1_release_gate_coding_cli_and_resume_surface_stays_green() {
+    let registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PermissionsCommand))
+            .register(Arc::new(ResumeCommand))
+            .register(Arc::new(StatusCommand))
+            .register(Arc::new(TasksCommand))
+            .register(Arc::new(DoctorCommand)),
+    );
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let root = unique_temp_path("rust-agent-v1-release-gate-2");
+    let mut app_state = test_app_state(Some(registry), Some(manager.clone()), None, None);
+    let snapshot = SessionSnapshot {
+        session_id: SessionId("release-gate-session-2".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: Some("2026-05-13T11:10:00Z".into()),
+        prompt_seed: None,
+    };
+    app_state.session = Some(snapshot.clone());
+    app_state.active_session_id = "release-gate-session-2".into();
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "cargo test --manifest-path RustAgent/Agent/Cargo.toml v1_release_gate_".into(),
+            message: "Bash approval required: command requires explicit approval by ask rule.".into(),
+            code: Some("explicit_ask_rule".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: explicit approval is required by ask rule for Bash.\nChoose approve to run it, or deny to keep it from executing."
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["explicit_ask_rule".into()],
+        }));
+    let history = rust_agent::history::session::SessionHistory {
+        entries: vec![rust_agent::history::session::SessionHistoryEntry {
+            message: Message::user("repair the failing verification and rerun tests"),
+            timestamp: Some("2026-05-13T11:09:00Z".into()),
+            tool_refs: vec!["Edit".into(), "Bash".into()],
+            milestone: None,
+        }],
+    };
+    app_state.history = Some(history.clone());
+    app_state.restored_session = Some(RestoredSession {
+        snapshot,
+        history: history.clone(),
+        transcript: Transcript::from(history),
+    });
+
+    let running = manager.create(
+        "rerun verification",
+        "release-gate-session-2",
+        InteractionSurface::Cli,
+    );
+    manager.start(&running.id);
+    let failed = manager.create(
+        "inspect failure logs",
+        "release-gate-session-2",
+        InteractionSurface::Cli,
+    );
+    manager.append_output(&failed.id, "verification failed\n");
+    manager.fail(&failed.id, &dispatcher);
+
+    let help_text = HelpCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
+        .await
+        .expect("help command should render")
+        .to_plain_text()
+        .expect("help command should produce plain text");
+    let status_text = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status command should render")
+        .to_plain_text()
+        .expect("status command should produce plain text");
+    let doctor_text = DoctorCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/doctor"),
+            &app_state,
+        )
+        .await
+        .expect("doctor command should render")
+        .to_plain_text()
+        .expect("doctor command should produce plain text");
+    let resume_text = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render")
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+    let tasks_text = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
+        .await
+        .expect("tasks command should render")
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+    let approval_rendered = render_turn_output(&CliTurnOutput {
+        primary_text: status_text.clone(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+            tool_name: "Bash".into(),
+            message: "Bash approval required: command requires explicit approval by ask rule.".into(),
+            code: Some("explicit_ask_rule".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: explicit approval is required by ask rule for Bash.\nChoose approve to run it, or deny to keep it from executing."
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["explicit_ask_rule".into()],
+        })],
+    });
+
+    assert!(
+        help_text.contains("Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."),
+        "release gate expects /help to keep the coding workflow visible; text={help_text}"
+    );
+    assert!(
+        status_text.contains("Working status:")
+            && status_text.contains("mode: plan")
+            && status_text.to_ascii_lowercase().contains("pending approval"),
+        "release gate expects /status to keep restored working state and approval visible; text={status_text}"
+    );
+    assert!(
+        doctor_text.contains("Coding blockers:")
+            && doctor_text.to_ascii_lowercase().contains("model/api auth")
+            && doctor_text.to_ascii_lowercase().contains("permission mode"),
+        "release gate expects /doctor to keep coding blockers actionable; text={doctor_text}"
+    );
+    assert!(
+        resume_text.contains("Resume summary:")
+            && resume_text.contains("last task: repair the failing verification and rerun tests")
+            && resume_text.to_ascii_lowercase().contains("pending approval: bash"),
+        "release gate expects /resume to keep restore target and approval state visible; text={resume_text}"
+    );
+    assert!(
+        tasks_text.contains("Running tasks:")
+            && tasks_text.contains("Failed tasks:")
+            && tasks_text.to_ascii_lowercase().contains("inspect task output"),
+        "release gate expects /tasks to keep task states and output hints visible; text={tasks_text}"
+    );
+    assert!(
+        approval_rendered.contains("== Approval required ==")
+            && approval_rendered.contains("Tool: Bash")
+            && approval_rendered.contains("Reason:")
+            && approval_rendered.contains("Action:"),
+        "release gate expects approval rendering to stay structurally actionable; rendered={approval_rendered}"
     );
 }
 
