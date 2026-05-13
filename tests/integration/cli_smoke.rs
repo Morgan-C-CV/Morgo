@@ -1060,3 +1060,179 @@ async fn cli_smoke_pending_approval_user_facing_copy_is_actionable() {
         "user-facing approval copy should not look like a success summary or a generic runtime error; final={final_message:?}"
     );
 }
+
+#[tokio::test]
+async fn v1_release_gate_coding_smoke_bundle_stays_green() {
+    let success_workspace = tempfile::tempdir().expect("tempdir");
+    let success_target = success_workspace.path().join("release_gate_success_target.txt");
+    std::fs::write(&success_target, "status = \"todo\"\n").expect("seed release gate success target");
+    let success_read_input = serde_json::json!({
+        "file_path": success_target.to_string_lossy().to_string(),
+    })
+    .to_string();
+    let success_edit_input = serde_json::json!({
+        "file_path": success_target.to_string_lossy().to_string(),
+        "old_string": "status = \"todo\"",
+        "new_string": "status = \"done\""
+    })
+    .to_string();
+    let success_bash_input = serde_json::json!({
+        "command": format!("grep -n 'status = \"done\"' {}", success_target.display()),
+        "timeout": 5_000
+    })
+    .to_string();
+    let success_engine = QueryEngine::new(coding_smoke_context(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: success_read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "Edit".into(),
+                    input: success_edit_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: success_bash_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Updated the file and verification passed.".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        success_workspace.path(),
+    ));
+    let success_result = success_engine
+        .submit_turn(Message::user(
+            "Inspect the file, edit it, run verification, and conclude clearly.",
+        ))
+        .await;
+    assert_eq!(
+        success_result.state,
+        QueryLoopState::Completed,
+        "release gate smoke: straight-line coding loop should complete"
+    );
+    assert_tool_started(&success_result.events, "Read");
+    assert_tool_started(&success_result.events, "Edit");
+    assert_tool_started(&success_result.events, "Bash");
+    assert!(
+        final_assistant_message_text(&success_result.messages).contains("verification passed"),
+        "release gate smoke: straight-line path should conclude with a concrete success summary"
+    );
+
+    let approval_workspace = tempfile::tempdir().expect("tempdir");
+    let approval_target = approval_workspace.path().join("release_gate_approval_target.txt");
+    let approval_marker = approval_workspace.path().join("release_gate_approval_marker.txt");
+    std::fs::write(&approval_target, "status = \"todo\"\n")
+        .expect("seed release gate approval target");
+    let approval_permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(approval_workspace.path()));
+    approval_permission_context.add_always_allow_rule("Edit");
+    approval_permission_context.add_always_ask_rule("Bash");
+    let approval_engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: serde_json::json!({
+                        "file_path": approval_target.to_string_lossy().to_string(),
+                    })
+                    .to_string(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: serde_json::json!({
+                        "command": format!(
+                            "grep -n 'status = \"todo\"' {} && printf 'approved\\n' > {}",
+                            approval_target.display(),
+                            approval_marker.display()
+                        ),
+                        "timeout": 5_000
+                    })
+                    .to_string(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+        ],
+        approval_permission_context,
+    ));
+    let approval_pending = approval_engine
+        .submit_turn(Message::user(
+            "Read the file and run verification, but pause for approval if Bash needs it.",
+        ))
+        .await;
+    assert_eq!(
+        approval_pending.state,
+        QueryLoopState::Interrupted,
+        "release gate smoke: approval path should stop at a real approval barrier"
+    );
+    assert!(
+        approval_pending.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::PendingApproval { tool_name, .. } if tool_name == "Bash"
+        )),
+        "release gate smoke: approval path should emit PendingApproval for Bash"
+    );
+    let pending_copy = final_assistant_message_text(&approval_pending.messages).to_lowercase();
+    assert!(
+        pending_copy.contains("approval required for bash")
+            && (pending_copy.contains("approve") || pending_copy.contains("deny")),
+        "release gate smoke: approval barrier should produce actionable user-facing approval copy; final={pending_copy:?}"
+    );
+    assert!(
+        !approval_marker.exists(),
+        "release gate smoke: pending approval should not execute Bash before approval"
+    );
+
+    let approved = approval_engine
+        .context
+        .app_state
+        .resolve_pending_approval(true)
+        .await
+        .expect("approval should resolve");
+    let CommandResult::Message(approved_message) = approved else {
+        panic!("expected message result after approving bundled smoke gate");
+    };
+    assert!(
+        approved_message.contains("exit_code: 0"),
+        "release gate smoke: approved Bash should run and report a successful command result; message={approved_message:?}"
+    );
+    assert!(
+        approval_marker.exists(),
+        "release gate smoke: approved Bash should execute exactly after approval replay"
+    );
+}
