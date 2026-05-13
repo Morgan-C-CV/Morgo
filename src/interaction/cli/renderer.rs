@@ -174,6 +174,8 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
                 lines.extend(render_bash_result_lines(content));
             } else if tool_name == "Read" {
                 lines.extend(render_read_result_lines(content));
+            } else if tool_name == "Edit" {
+                lines.extend(render_edit_result_lines(content));
             } else {
                 lines.extend(content.lines().map(|line| line.to_string()));
             }
@@ -284,6 +286,27 @@ fn render_read_result_lines(content: &str) -> Vec<String> {
                 .and_then(|rest| rest.strip_suffix(']'))
             {
                 format!("Truncation: {}", truncated.trim())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
+}
+
+fn render_edit_result_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(|line| {
+            if let Some(path) = line.strip_prefix("path=") {
+                format!("Path: {}", path.trim())
+            } else if let Some(replacements) = line.strip_prefix("replacements=") {
+                format!("Replacements: {}", replacements.trim())
+            } else if let Some(replace_all) = line.strip_prefix("replace_all=") {
+                format!("Replace all: {}", replace_all.trim())
+            } else if let Some(old_text) = line.strip_prefix("old_text=") {
+                format!("Old text: {}", old_text.trim())
+            } else if let Some(new_text) = line.strip_prefix("new_text=") {
+                format!("New text: {}", new_text.trim())
             } else {
                 line.to_string()
             }
