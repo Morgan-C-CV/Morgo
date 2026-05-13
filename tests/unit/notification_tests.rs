@@ -1341,6 +1341,98 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
 }
 
 #[test]
+fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
+    let loading_screen =
+        build_tui_loading_screen("run verification after reviewing the current diff", 0);
+    let loading_rendered = rust_agent::interaction::cli::renderer::render_tui_screen_output(
+        &loading_screen,
+    );
+
+    let approval_turn = CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+            tool_name: "Bash".into(),
+            message: "approval needed before running the verification command".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        })],
+    };
+    let approval_document = render_turn_document(&approval_turn);
+    let approval_screen = build_tui_screen(&approval_document);
+    let approval_rendered = render_document_tui_output(&approval_document);
+
+    let task_turn = CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![CliDisplayEvent::TaskEvent(TaskEvent {
+            owner: TaskOwner {
+                session_id: "session-task-role".into(),
+                surface: InteractionSurface::Cli,
+            },
+            target_task_id: Some("task-role-1".into()),
+            task_id: "task-role-1".into(),
+            task_type: rust_agent::task::types::TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            summary: "verify the CLI output layout".into(),
+            result: "Task running".into(),
+            next_action: "wait for verify worker".into(),
+            worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
+            orchestration_group_id: Some("group-role-1".into()),
+            phase: Some(rust_agent::task::types::WorkerPhase::Verify),
+            validation_state: Some(
+                rust_agent::task::types::ValidationState::PendingVerification,
+            ),
+            step_id: None,
+            output_file: "/tmp/task-role-1.log".into(),
+            usage: None,
+        })],
+    };
+    let task_document = render_turn_document(&task_turn);
+    let task_screen = build_tui_screen(&task_document);
+    let task_rendered = render_document_tui_output(&task_document);
+
+    assert!(
+        loading_screen
+            .panels
+            .iter()
+            .any(|panel| panel.title.contains("Loading")),
+        "loading screen should use a dedicated loading/status panel title instead of a generic shared role; panels={:?}",
+        loading_screen.panels
+    );
+    assert!(
+        loading_rendered.contains("[Loading]"),
+        "loading screen should render an explicit loading section label; rendered={loading_rendered}"
+    );
+
+    assert_eq!(approval_screen.panels.len(), 1);
+    assert_eq!(approval_screen.panels[0].title, "Approval required");
+    assert!(
+        approval_rendered.contains("[Approval required]"),
+        "approval screen should foreground approval rather than generic waiting; rendered={approval_rendered}"
+    );
+    assert!(
+        !approval_rendered.contains("[Loading]") && !approval_rendered.contains("[Status]"),
+        "approval screen should not visually collapse back into loading/status semantics; rendered={approval_rendered}"
+    );
+
+    assert_eq!(task_screen.panels.len(), 1);
+    assert_eq!(task_screen.panels[0].title, "Task update");
+    assert!(
+        task_rendered.contains("[Task update]"),
+        "task update screen should foreground task progress; rendered={task_rendered}"
+    );
+    assert!(
+        !task_rendered.contains("[Tool result]"),
+        "task update screen should not read like a tool-result state; rendered={task_rendered}"
+    );
+}
+
+#[test]
 fn remote_channel_matrix_matches_final_contract() {
     assert_eq!(
         REMOTE_CHANNEL_MATRIX,
