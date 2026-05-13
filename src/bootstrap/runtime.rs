@@ -71,8 +71,8 @@ use crate::plugins::runtime_state::{
 use crate::plugins::types::{
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
 };
-use crate::security::audit::AuditLog;
 use crate::security::approval_protocol::approval_always_allow_detail;
+use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::security::workspace_capability::WorkspaceCapabilityConfig;
@@ -495,7 +495,10 @@ fn tui_input_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion
         .unwrap_or_else(|| tui_command_suggestions(app_state, input))
 }
 
-fn pending_approval_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<TuiSuggestion>> {
+fn pending_approval_tui_suggestions(
+    app_state: &AppState,
+    input: &str,
+) -> Option<Vec<TuiSuggestion>> {
     let pending = app_state.permission_context.pending_approval()?;
     let query = input.trim();
     Some(filter_suggestions(
@@ -517,8 +520,9 @@ fn pending_approval_tui_suggestions(app_state: &AppState, input: &str) -> Option
             TuiSuggestion {
                 replacement: "No, and tell what to do".into(),
                 label: "No, and tell what to do".into(),
-                detail: "Deny this run, stop here, and wait for a safer command or new instructions."
-                    .into(),
+                detail:
+                    "Deny this run, stop here, and wait for a safer command or new instructions."
+                        .into(),
                 accent_color: "31",
                 submit_on_enter: true,
             },
@@ -2211,9 +2215,7 @@ fn selected_text(content: &TuiRenderedContent, selection: &TuiSelectionState) ->
 
 fn osc52_copy_sequence(text: &str) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    format!(
-        "\u{1b}]52;c;{encoded}\u{7}\u{1b}]52;c;{encoded}\u{1b}\\"
-    )
+    format!("\u{1b}]52;c;{encoded}\u{7}\u{1b}]52;c;{encoded}\u{1b}\\")
 }
 
 fn set_clipboard(text: &str) -> anyhow::Result<()> {
@@ -2488,8 +2490,8 @@ fn tui_terminal_program_is_ide(value: &str) -> bool {
         "antigravity",
         "trae",
     ]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn tui_detect_ide_terminal() -> bool {
@@ -2622,10 +2624,7 @@ mod tui_output_tests {
 
     #[test]
     fn tui_paste_normalization_converts_crlf_and_cr_to_lf() {
-        assert_eq!(
-            normalize_tui_pasted_text("a\r\nb\rc\n"),
-            "a\nb\nc\n"
-        );
+        assert_eq!(normalize_tui_pasted_text("a\r\nb\rc\n"), "a\nb\nc\n");
     }
 
     #[test]
@@ -2851,7 +2850,10 @@ mod tui_output_tests {
         let mut selection = TuiSelectionState::default();
 
         select_word_at(&mut selection, &content, 0, 5);
-        assert_eq!(selected_text(&content, &selection).as_deref(), Some("hello"));
+        assert_eq!(
+            selected_text(&content, &selection).as_deref(),
+            Some("hello")
+        );
 
         select_line_at(&mut selection, &content, 0);
         assert_eq!(
@@ -2876,7 +2878,10 @@ mod tui_output_tests {
             dragging: false,
         };
 
-        assert_eq!(selected_text(&content, &selection).as_deref(), Some("b中文c"));
+        assert_eq!(
+            selected_text(&content, &selection).as_deref(),
+            Some("b中文c")
+        );
     }
 
     #[test]
@@ -2916,7 +2921,10 @@ mod tui_output_tests {
         selection.focus = Some(TuiDocumentPosition { line: 0, unit: 2 });
         shift_selection_for_scroll(&mut selection, &content, 1);
 
-        assert_eq!(selection.focus, Some(TuiDocumentPosition { line: 1, unit: 2 }));
+        assert_eq!(
+            selection.focus,
+            Some(TuiDocumentPosition { line: 1, unit: 2 })
+        );
     }
 
     #[test]
@@ -2935,7 +2943,10 @@ mod tui_output_tests {
             dragging: false,
         };
 
-        assert_eq!(selected_text(&content, &selection).as_deref(), Some("copy me"));
+        assert_eq!(
+            selected_text(&content, &selection).as_deref(),
+            Some("copy me")
+        );
         assert_eq!(
             osc52_copy_sequence("copy me"),
             "\u{1b}]52;c;Y29weSBtZQ==\u{7}\u{1b}]52;c;Y29weSBtZQ==\u{1b}\\"
@@ -3052,8 +3063,7 @@ mod tui_output_tests {
             .iter()
             .position(|item| item.label == "use")
             .expect("use suggestion present");
-        let completed =
-            super::autocomplete_slash_command("/model", &suggestions, Some(use_index))
+        let completed = super::autocomplete_slash_command("/model", &suggestions, Some(use_index))
             .expect("enter should autocomplete to use stage");
         assert_eq!(completed, "/model use ");
     }
@@ -3951,7 +3961,11 @@ impl RuntimeBootstrap {
             }
             let suggestions = tui_input_suggestions(app_state, &input);
             selected_suggestion = if !suggestions.is_empty() {
-                Some(selected_suggestion.unwrap_or(0).min(suggestions.len().saturating_sub(1)))
+                Some(
+                    selected_suggestion
+                        .unwrap_or(0)
+                        .min(suggestions.len().saturating_sub(1)),
+                )
             } else {
                 None
             };
@@ -3959,8 +3973,10 @@ impl RuntimeBootstrap {
             let content_screen = tui_content_screen(app_state, &current_document);
             let layout_metrics = tui_layout_metrics(terminal_height, &input, &suggestions);
             let rendered_content = build_tui_rendered_content(&content_screen, terminal_width);
-            let max_scroll_top =
-                max_tui_content_scroll_offset(rendered_content.lines.len(), layout_metrics.content_height);
+            let max_scroll_top = max_tui_content_scroll_offset(
+                rendered_content.lines.len(),
+                layout_metrics.content_height,
+            );
             if !follow_content_tail {
                 content_scroll_top = content_scroll_top.min(max_scroll_top);
             }
@@ -4010,7 +4026,10 @@ impl RuntimeBootstrap {
                     }
 
                     if let Some(gesture) = tui_exit_gesture_for_key(&key) {
-                        if input.starts_with('/') && !suggestions.is_empty() && selected_suggestion.is_some() {
+                        if input.starts_with('/')
+                            && !suggestions.is_empty()
+                            && selected_suggestion.is_some()
+                        {
                             selected_suggestion = None;
                             pending_exit_gesture = None;
                             continue;
@@ -4202,15 +4221,14 @@ impl RuntimeBootstrap {
                                 );
                             } else if !suggestions.is_empty() {
                                 selected_suggestion = Some(match selected_suggestion {
-                                    Some(index) => (index + suggestions.len() - 1) % suggestions.len(),
+                                    Some(index) => {
+                                        (index + suggestions.len() - 1) % suggestions.len()
+                                    }
                                     None => suggestions.len().saturating_sub(1),
                                 });
-                            } else if let Some(next_cursor) = move_tui_cursor_vertically(
-                                &input,
-                                cursor_index,
-                                terminal_width,
-                                -1,
-                            ) {
+                            } else if let Some(next_cursor) =
+                                move_tui_cursor_vertically(&input, cursor_index, terminal_width, -1)
+                            {
                                 cursor_index = next_cursor;
                             } else {
                                 apply_tui_scroll(
@@ -4238,12 +4256,9 @@ impl RuntimeBootstrap {
                                     Some(index) => (index + 1) % suggestions.len(),
                                     None => 0,
                                 });
-                            } else if let Some(next_cursor) = move_tui_cursor_vertically(
-                                &input,
-                                cursor_index,
-                                terminal_width,
-                                1,
-                            ) {
+                            } else if let Some(next_cursor) =
+                                move_tui_cursor_vertically(&input, cursor_index, terminal_width, 1)
+                            {
                                 cursor_index = next_cursor;
                             } else {
                                 apply_tui_scroll(
@@ -4294,8 +4309,11 @@ impl RuntimeBootstrap {
                 }
                 Event::Mouse(mouse) => {
                     pending_exit_gesture = None;
-                    let current_scroll_top =
-                        current_tui_scroll_top(follow_content_tail, content_scroll_top, max_scroll_top);
+                    let current_scroll_top = current_tui_scroll_top(
+                        follow_content_tail,
+                        content_scroll_top,
+                        max_scroll_top,
+                    );
                     let content_line_at_row = |row: u16| -> Option<usize> {
                         let row = usize::from(row);
                         if row >= layout_metrics.content_height {
@@ -4310,18 +4328,19 @@ impl RuntimeBootstrap {
                                 continue;
                             };
                             let now = Instant::now();
-                            click_state.count = if let Some((col, row, last_at)) = click_state.last_down {
-                                if col == mouse.column
-                                    && row == mouse.row
-                                    && now.duration_since(last_at) <= TUI_MULTI_CLICK_WINDOW
-                                {
-                                    (click_state.count + 1).min(3)
+                            click_state.count =
+                                if let Some((col, row, last_at)) = click_state.last_down {
+                                    if col == mouse.column
+                                        && row == mouse.row
+                                        && now.duration_since(last_at) <= TUI_MULTI_CLICK_WINDOW
+                                    {
+                                        (click_state.count + 1).min(3)
+                                    } else {
+                                        1
+                                    }
                                 } else {
                                     1
-                                }
-                            } else {
-                                1
-                            };
+                                };
                             click_state.last_down = Some((mouse.column, mouse.row, now));
                             match click_state.count {
                                 2 => {
@@ -5702,7 +5721,6 @@ mod tests {
         resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
         terminal_tail_stalled, tui_input_suggestions,
     };
-    use anyhow::anyhow;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
     use crate::cost::tracker::CostTracker;
@@ -5713,7 +5731,10 @@ mod tests {
     use crate::state::app_state::{
         ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
     };
-    use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+    use crate::state::permission_context::{
+        PendingApproval, PermissionMode, ToolPermissionContext,
+    };
+    use anyhow::anyhow;
 
     fn test_app_state() -> AppState {
         AppState {
@@ -5899,7 +5920,11 @@ mod tests {
             ]
         );
         assert!(suggestions[1].detail.contains("find *"));
-        assert!(suggestions.iter().all(|suggestion| suggestion.submit_on_enter));
+        assert!(
+            suggestions
+                .iter()
+                .all(|suggestion| suggestion.submit_on_enter)
+        );
     }
 
     #[test]

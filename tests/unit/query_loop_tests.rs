@@ -910,10 +910,12 @@ async fn query_loop_requests_final_report_when_turn_ends_with_tool_status_text()
             "Implemented the requested change, validation passed, and no remaining risk was found."
         )
     );
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Transition(Continue::FinalUserReport)
-    )));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Transition(Continue::FinalUserReport)))
+    );
 }
 
 #[tokio::test]
@@ -945,13 +947,24 @@ async fn query_loop_synthesizes_final_report_after_invalid_final_report_retry() 
     assert_eq!(result.state, QueryLoopState::Completed);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::FinalUserReport));
-    let final_assistant = last_assistant_text(&result.messages)
-        .expect("synthetic final report should be appended");
-    assert_eq!(final_assistant, "Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one.");
-    assert!(result.messages.iter().any(|message| {
-        message.text() == "tool batch result:\nRead succeeded"
-    }));
-    assert!(result.messages.iter().any(|message| message.text() == "tool Read result: alpha"));
+    let final_assistant =
+        last_assistant_text(&result.messages).expect("synthetic final report should be appended");
+    assert_eq!(
+        final_assistant,
+        "Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one."
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| { message.text() == "tool batch result:\nRead succeeded" })
+    );
+    assert!(
+        result
+            .messages
+            .iter()
+            .any(|message| message.text() == "tool Read result: alpha")
+    );
 }
 
 #[tokio::test]
@@ -988,11 +1001,16 @@ async fn query_loop_skips_tool_execution_during_final_report_retry() {
     assert_eq!(result.transition, Some(Continue::FinalUserReport));
     assert_eq!(
         last_assistant_text(&result.messages).as_deref(),
-        Some("Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one.")
+        Some(
+            "Final update: completed the requested runtime work, but the runtime had to synthesize this closing report because the model did not provide one."
+        )
     );
-    assert!(!result.messages.iter().any(|message| {
-        message.text().contains("tool EchoFixture result:")
-    }));
+    assert!(
+        !result
+            .messages
+            .iter()
+            .any(|message| { message.text().contains("tool EchoFixture result:") })
+    );
     assert!(result.events.iter().any(|event| matches!(
         event,
         EngineEvent::ToolCallStarted { tool_name, .. } if tool_name == "EchoFixture"
@@ -1575,7 +1593,9 @@ async fn owner_busy_turn_does_not_persist_history() {
         })
         .expect("persisted history should exist before busy rejection");
 
-    let busy = engine.submit_turn(Message::user("should be rejected")).await;
+    let busy = engine
+        .submit_turn(Message::user("should be rejected"))
+        .await;
     assert_eq!(busy.terminal, Terminal::OwnerBusy);
 
     let (_, persisted_history) = session_store
@@ -1620,7 +1640,9 @@ async fn interrupt_active_turn_cancels_inflight_turn_and_releases_owner_slot() {
         registry,
     ));
 
-    let mut receiver = engine.stream_turn(Message::user("cancel current turn")).await;
+    let mut receiver = engine
+        .stream_turn(Message::user("cancel current turn"))
+        .await;
     assert!(engine.has_active_turn());
     assert!(engine.interrupt_active_turn());
 
@@ -1727,7 +1749,11 @@ async fn cli_streaming_primary_text_ends_with_final_user_report_after_status_ret
     assert!(output.primary_text.ends_with(
         "Implemented the requested change, validation passed, and no remaining risk was found."
     ));
-    assert!(!output.primary_text.ends_with("tool batch result:\nRead succeeded"));
+    assert!(
+        !output
+            .primary_text
+            .ends_with("tool batch result:\nRead succeeded")
+    );
 }
 
 #[tokio::test]

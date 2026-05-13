@@ -306,8 +306,7 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
             turn_token.cancel();
             let _ = hb_handle.await;
             let events = EventCollector::from_events(events.take(), sink.clone());
-            return if state.final_report_attempted
-                && !is_user_facing_final_report(&state.messages)
+            return if state.final_report_attempted && !is_user_facing_final_report(&state.messages)
             {
                 query_result_with_synthetic_final_report(state, events)
             } else {
@@ -620,7 +619,10 @@ async fn decide_next_turn(
             let events = EventCollector::from_events(turn_outcome.events, events.sink_clone());
             if loop_state.final_report_attempted
                 && !is_user_facing_final_report(&loop_state.messages)
-                && !matches!(terminal, Terminal::StopHookPrevented | Terminal::AbortedTools)
+                && !matches!(
+                    terminal,
+                    Terminal::StopHookPrevented | Terminal::AbortedTools
+                )
             {
                 NextTurnDecision::Return(query_result_with_synthetic_final_report(
                     loop_state, events,
