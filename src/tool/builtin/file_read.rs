@@ -41,6 +41,16 @@ fn slice_contents(contents: &str, offset: usize, limit: usize) -> (String, bool,
     (text, end < total_chars, total_chars)
 }
 
+fn format_read_result(path: &Path, offset: usize, slice: &str, total_chars: usize) -> String {
+    format!(
+        "path={}\noffset={}\nreturned_chars={}\n\n{}",
+        path.display(),
+        offset,
+        slice.chars().count(),
+        slice
+    )
+}
+
 fn should_block_structured_data_paging(path: &Path, offset: usize) -> bool {
     offset > 0
         && path
@@ -100,6 +110,7 @@ impl Tool for FileReadTool {
         call: &ToolCall,
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
+        let structured_input = call.json_input().is_some();
         let input = parse_input(call)?;
         let raw_path = input.file_path;
         let path = Path::new(raw_path.trim());
@@ -120,9 +131,10 @@ impl Tool for FileReadTool {
             )));
         }
         let (slice, truncated, total_chars) = slice_contents(&contents, offset, limit);
+        let formatted = format_read_result(path, offset, &slice, total_chars);
         if truncated || offset > 0 || total_chars > slice.chars().count() {
             return Ok(ToolResult::Text(format!(
-                "{slice}\n\n[Read truncated: path={}, offset={}, returned_chars={}, total_chars={}. Use Read with offset={} and limit<={} to continue.]",
+                "{formatted}\n\n[Read truncated: path={}, offset={}, returned_chars={}, total_chars={}. Use Read with offset={} and limit<={} to continue.]",
                 path.display(),
                 offset,
                 slice.chars().count(),
@@ -130,6 +142,9 @@ impl Tool for FileReadTool {
                 offset.saturating_add(slice.chars().count()),
                 MAX_READ_LIMIT_CHARS
             )));
+        }
+        if structured_input {
+            return Ok(ToolResult::Text(formatted));
         }
         Ok(ToolResult::Text(slice))
     }

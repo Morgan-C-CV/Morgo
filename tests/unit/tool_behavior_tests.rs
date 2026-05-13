@@ -161,7 +161,11 @@ async fn read_tool_truncates_large_files_and_supports_offsets() {
     let ToolResult::Text(second_text) = second else {
         panic!("expected text result");
     };
-    assert!(second_text.starts_with(&"a".repeat(1_000)));
+    assert!(second_text.contains(&format!("path={}", file.display())));
+    assert!(second_text.contains("offset=8000"));
+    assert!(second_text.contains("returned_chars=1000"));
+    assert!(second_text.contains(&"a".repeat(1_000)));
+    assert!(second_text.contains("[Read truncated:"));
 
     fs::remove_dir_all(&dir).await.expect("cleanup dir");
 }
