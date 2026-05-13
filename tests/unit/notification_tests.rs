@@ -1262,6 +1262,110 @@ async fn cli_help_prioritizes_coding_workflow_over_legacy_surfaces() {
     }
 }
 
+#[tokio::test]
+async fn cli_help_default_sections_defer_legacy_capabilities_after_coding_commands() {
+    let registry = Arc::new(register_builtin_commands(CommandRegistry::new()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: Some(registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
+        active_session_id: "session-help-default-sections".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: None,
+    };
+
+    let result = HelpCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
+        .await
+        .expect("help command should render");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected help message");
+    };
+
+    assert!(
+        text.contains("Coding commands:")
+            || text.contains("Coding workflow commands:")
+            || text.contains("Start coding with:"),
+        "default /help should give coding commands their own top-level section instead of mixing everything into one generic command block; text={text}"
+    );
+
+    let coding_anchor = text
+        .find("Coding commands:")
+        .or_else(|| text.find("Coding workflow commands:"))
+        .or_else(|| text.find("Start coding with:"))
+        .expect("coding section anchor present");
+
+    let read_search_anchor = text
+        .find("/help")
+        .or_else(|| text.find("/permissions"))
+        .or_else(|| text.find("/resume"))
+        .expect("coding-oriented command anchor present");
+
+    assert!(
+        coding_anchor < read_search_anchor,
+        "coding command section should appear before the default command dump; text={text}"
+    );
+
+    assert!(
+        text.contains("Advanced commands:")
+            || text.contains("Legacy and advanced:")
+            || text.contains("Other commands:"),
+        "default /help should demote non-V1 surfaces into a secondary section; text={text}"
+    );
+
+    let advanced_anchor = text
+        .find("Advanced commands:")
+        .or_else(|| text.find("Legacy and advanced:"))
+        .or_else(|| text.find("Other commands:"))
+        .expect("advanced section anchor present");
+
+    for legacy in ["/plugins", "/swarm", "/LisM", "/UM"] {
+        let idx = text.find(legacy).unwrap_or_else(|| panic!("expected {legacy} in help text"));
+        assert!(
+            idx > advanced_anchor,
+            "{legacy} should be deferred into an advanced/legacy section instead of the default coding section; text={text}"
+        );
+    }
+}
+
 #[test]
 fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
     let turn = CliTurnOutput {

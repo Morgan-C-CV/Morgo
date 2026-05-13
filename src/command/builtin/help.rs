@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -56,59 +57,12 @@ impl Command for HelpCommand {
             "Available commands:".to_string(),
             "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category] [sensitive] [model_invocation=disabled] [immediate]".to_string(),
         ];
-        let mut current_source = None;
-        for command in &metadata {
-            if current_source != Some(command.source) {
-                current_source = Some(command.source);
-                let source_count = metadata
-                    .iter()
-                    .filter(|item| item.source == command.source)
-                    .count();
-                lines.push(String::new());
-                lines.push(format!(
-                    "{} ({source_count}):",
-                    command.source.display_name()
-                ));
-            }
-            let aliases = if command.aliases.is_empty() {
-                String::new()
-            } else {
-                format!(" aliases={}", command.aliases.join(", "))
-            };
-            let availability = command
-                .availability
-                .short_label()
-                .map(|label| format!(" [availability={label}]"))
-                .unwrap_or_default();
-            let sensitivity = if command.is_sensitive {
-                " [sensitive]"
-            } else {
-                ""
-            };
-            let invocation = if command.disable_model_invocation {
-                " [model_invocation=disabled]"
-            } else {
-                ""
-            };
-            let immediacy = if command.immediate {
-                " [immediate]"
-            } else {
-                ""
-            };
-            lines.push(format!(
-                "- /{} — {} [type={}] [{}:{}]{}{}{}{}{}",
-                command.name,
-                command.description,
-                command.command_type.as_str(),
-                command.source.as_str(),
-                command.category,
-                aliases,
-                availability,
-                sensitivity,
-                invocation,
-                immediacy
-            ));
-        }
+        let (coding_commands, advanced_commands): (Vec<_>, Vec<_>) = metadata
+            .into_iter()
+            .partition(is_coding_command);
+
+        append_command_section(&mut lines, "Coding commands:", &coding_commands);
+        append_command_section(&mut lines, "Advanced commands:", &advanced_commands);
 
         if let Some(plugin_load_result) = app_state.plugin_load_result.as_ref() {
             if !plugin_load_result.diagnostics.is_empty() {
@@ -128,11 +82,90 @@ impl Command for HelpCommand {
             }
         }
 
-        if lines.len() == 6 {
+        if coding_commands.is_empty() && advanced_commands.is_empty() {
             lines.push(String::new());
             lines.push("No commands are currently visible.".to_string());
         }
 
         Ok(CommandResult::Message(lines.join("\n")))
     }
+}
+
+fn is_coding_command(command: &CommandMetadata) -> bool {
+    match command.name.as_str() {
+        "help" | "permissions" | "resume" | "tasks" | "plan" | "status" | "session"
+        | "model" | "compact" => true,
+        "plugins" | "swarm" | "LisM" | "UM" | "skills" | "computer" => false,
+        _ => command.source == CommandSource::Coding,
+    }
+}
+
+fn append_command_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    commands: &[CommandMetadata],
+) {
+    if commands.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(format!("{title} ({})", commands.len()));
+
+    let mut grouped: BTreeMap<CommandSource, Vec<&CommandMetadata>> = BTreeMap::new();
+    for command in commands {
+        grouped.entry(command.source).or_default().push(command);
+    }
+    let show_source_headers = grouped.len() > 1;
+
+    for (source, entries) in grouped {
+        if show_source_headers {
+            lines.push(format!("{} ({}):", source.display_name(), entries.len()));
+        }
+        for command in entries {
+            lines.push(format_command_line(command));
+        }
+    }
+}
+
+fn format_command_line(command: &CommandMetadata) -> String {
+    let aliases = if command.aliases.is_empty() {
+        String::new()
+    } else {
+        format!(" aliases={}", command.aliases.join(", "))
+    };
+    let availability = command
+        .availability
+        .short_label()
+        .map(|label| format!(" [availability={label}]"))
+        .unwrap_or_default();
+    let sensitivity = if command.is_sensitive {
+        " [sensitive]"
+    } else {
+        ""
+    };
+    let invocation = if command.disable_model_invocation {
+        " [model_invocation=disabled]"
+    } else {
+        ""
+    };
+    let immediacy = if command.immediate {
+        " [immediate]"
+    } else {
+        ""
+    };
+
+    format!(
+        "- /{} — {} [type={}] [{}:{}]{}{}{}{}{}",
+        command.name,
+        command.description,
+        command.command_type.as_str(),
+        command.source.as_str(),
+        command.category,
+        aliases,
+        availability,
+        sensitivity,
+        invocation,
+        immediacy
+    )
 }
