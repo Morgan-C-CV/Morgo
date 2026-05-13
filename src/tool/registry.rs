@@ -156,6 +156,8 @@ const V1_DEFAULT_CODING_LOCAL_CORE_TOOLS: &[&str] =
 const V1_DEFAULT_CODING_DEFERRED_TOOLS: &[&str] =
     &["WebSearch", "WebFetch", "AskUserQuestion", "NotebookEdit"];
 
+/// V1 default coding surface currently applies only to the local coordinator path
+/// used by CLI/headless coding runs.
 fn is_v1_default_coding_surface(context: ToolAssemblyContext) -> bool {
     context.runtime_role == RuntimeRole::Coordinator
         && context.surface == InteractionSurface::Cli
@@ -178,6 +180,52 @@ fn is_tool_visible_in_v1_default_coding_surface(metadata: &ToolMetadata) -> bool
         return false;
     }
     !metadata.is_open_world
+}
+
+/// Post-assembly gates should be shared by `visible_tools()` and
+/// `visible_model_tools()` so those two views cannot drift.
+fn passes_post_assembly_visibility_gates(
+    metadata: &ToolMetadata,
+    permissions: &ToolPermissionContext,
+) -> bool {
+    if !(metadata.always_load || (!metadata.should_defer || permissions.include_deferred_tools)) {
+        return false;
+    }
+    if metadata.requires_user_interaction && !permissions.include_interactive_tools {
+        return false;
+    }
+    is_tool_allowed(metadata, permissions)
+}
+
+fn passes_surface_assembly_policy(
+    metadata: &ToolMetadata,
+    context: ToolAssemblyContext,
+    permissions: &ToolPermissionContext,
+) -> bool {
+    if is_v1_default_coding_surface(context) {
+        return is_tool_visible_in_v1_default_coding_surface(metadata)
+            && is_tool_allowed(metadata, permissions);
+    }
+
+    if metadata.is_open_world && !context.include_open_world_tools {
+        return false;
+    }
+
+    match context.runtime_role {
+        RuntimeRole::Coordinator => is_tool_allowed(metadata, permissions),
+        RuntimeRole::Worker => {
+            if metadata.name == "Agent" || metadata.aliases.contains(&"Agent") {
+                // Only ExecutorB in Execution phase may see Agent.
+                return context.is_boss_executor_b() && is_tool_allowed(metadata, permissions);
+            }
+            if metadata.name == "Bash" {
+                // Production worker execution needs Bash in headless LisM mode, but
+                // actual invocation remains gated later by permission/workspace policy.
+                return context.include_open_world_tools;
+            }
+            is_tool_allowed(metadata, permissions)
+        }
+    }
 }
 
 impl std::fmt::Debug for ToolRegistry {
@@ -305,14 +353,7 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|tool| tool.metadata())
-            .filter(|metadata| {
-                metadata.always_load
-                    || (!metadata.should_defer || permissions.include_deferred_tools)
-            })
-            .filter(|metadata| {
-                !metadata.requires_user_interaction || permissions.include_interactive_tools
-            })
-            .filter(|metadata| is_tool_allowed(metadata, permissions))
+            .filter(|metadata| passes_post_assembly_visibility_gates(metadata, permissions))
             .collect()
     }
 
@@ -324,15 +365,7 @@ impl ToolRegistry {
             .iter()
             .filter_map(|tool| {
                 let metadata = tool.metadata();
-                if !(metadata.always_load
-                    || (!metadata.should_defer || permissions.include_deferred_tools))
-                {
-                    return None;
-                }
-                if metadata.requires_user_interaction && !permissions.include_interactive_tools {
-                    return None;
-                }
-                if !is_tool_allowed(&metadata, permissions) {
+                if !passes_post_assembly_visibility_gates(&metadata, permissions) {
                     return None;
                 }
                 let input_schema = tool.input_schema()?;
@@ -502,34 +535,7 @@ impl ToolRegistry {
         let tools = self
             .tools
             .iter()
-            .filter(|tool| {
-                let metadata = tool.metadata();
-                if is_v1_default_coding_surface(context) {
-                    if !is_tool_visible_in_v1_default_coding_surface(&metadata) {
-                        return false;
-                    }
-                    return is_tool_allowed(&metadata, &permissions);
-                }
-                if metadata.is_open_world && !context.include_open_world_tools {
-                    return false;
-                }
-                match context.runtime_role {
-                    RuntimeRole::Coordinator => is_tool_allowed(&metadata, &permissions),
-                    RuntimeRole::Worker => {
-                        if metadata.name == "Agent" || metadata.aliases.contains(&"Agent") {
-                            // Only ExecutorB in Execution phase may see Agent.
-                            return context.is_boss_executor_b()
-                                && is_tool_allowed(&metadata, &permissions);
-                        }
-                        if metadata.name == "Bash" {
-                            // Production worker execution needs Bash in headless LisM mode, but
-                            // actual invocation remains gated later by permission/workspace policy.
-                            return context.include_open_world_tools;
-                        }
-                        is_tool_allowed(&metadata, &permissions)
-                    }
-                }
-            })
+            .filter(|tool| passes_surface_assembly_policy(&tool.metadata(), context, &permissions))
             .cloned()
             .collect();
         Self { tools }
