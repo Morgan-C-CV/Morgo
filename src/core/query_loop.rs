@@ -2527,7 +2527,10 @@ mod tests {
 
         let follow_up = batch_follow_up_message(&state, &report);
 
-        assert!(follow_up.contains("tool batch result:\nGlob succeeded (0 chars); Grep found no matches"));
+        assert!(
+            follow_up
+                .contains("tool batch result:\nGlob succeeded (0 chars); Grep found no matches")
+        );
         assert!(follow_up.contains("Do not call Glob/Grep/ToolSearch again"));
         assert!(follow_up.contains("file_path=/tmp/ui.md, offset=3000, limit=477"));
     }

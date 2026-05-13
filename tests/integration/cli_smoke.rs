@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rust_agent::command::builtin::resume::ResumeCommand;
-use rust_agent::command::builtin::tasks::TasksCommand;
-use rust_agent::command::types::Command;
 use rust_agent::bootstrap::{
     BootstrapPhase, BootstrapState, ClientType, InteractionSurface, SessionMode, SessionSource,
 };
+use rust_agent::command::builtin::resume::ResumeCommand;
+use rust_agent::command::builtin::tasks::TasksCommand;
+use rust_agent::command::types::Command;
 use rust_agent::command::types::CommandResult;
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
@@ -17,7 +17,9 @@ use rust_agent::core::query_loop::{
 };
 use rust_agent::cost::tracker::CostTracker;
 use rust_agent::history::resume::resolved_from_snapshot;
-use rust_agent::history::session::{SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot};
+use rust_agent::history::session::{
+    SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
+};
 use rust_agent::hook::registry::HookRegistry;
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
@@ -83,10 +85,7 @@ fn allow_write_policy_for(root: &Path) -> Arc<FilesystemPolicy> {
     )
 }
 
-fn coding_smoke_context(
-    turns: Vec<Vec<StreamEvent>>,
-    workspace_root: &Path,
-) -> QueryContext {
+fn coding_smoke_context(turns: Vec<Vec<StreamEvent>>, workspace_root: &Path) -> QueryContext {
     let permission_context = ToolPermissionContext::new(PermissionMode::Default)
         .with_task_manager(Arc::new(TaskManager::default()))
         .with_active_session_id("cli-smoke-coding-session")
@@ -102,7 +101,6 @@ fn coding_smoke_context_with_permissions(
     turns: Vec<Vec<StreamEvent>>,
     permission_context: ToolPermissionContext,
 ) -> QueryContext {
-
     let tool_registry = ToolRegistry::new()
         .register(Arc::new(FileReadTool))
         .register(Arc::new(FileEditTool))
@@ -188,9 +186,7 @@ fn assert_tool_result_contains(events: &[EngineEvent], tool_name: &str, expected
     );
 }
 
-fn final_assistant_message_text(
-    messages: &[rust_agent::core::message::Message],
-) -> String {
+fn final_assistant_message_text(messages: &[rust_agent::core::message::Message]) -> String {
     messages
         .iter()
         .rev()
@@ -311,8 +307,7 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
 
     let updated = std::fs::read_to_string(&target).expect("read updated target");
     assert_eq!(
-        updated,
-        "status = \"done\"\n",
+        updated, "status = \"done\"\n",
         "coding smoke stalled at edit verification: file contents were not updated"
     );
 }
@@ -447,10 +442,12 @@ async fn cli_smoke_coding_loop_repairs_after_failed_verification() {
     let edit_successes = result
         .events
         .iter()
-        .filter(|event| matches!(
-            event,
-            EngineEvent::ToolResultCommitted { tool_name, .. } if tool_name == "Edit"
-        ))
+        .filter(|event| {
+            matches!(
+                event,
+                EngineEvent::ToolResultCommitted { tool_name, .. } if tool_name == "Edit"
+            )
+        })
         .count();
     assert!(
         edit_successes >= 2,
@@ -474,7 +471,9 @@ async fn cli_smoke_coding_loop_repairs_after_failed_verification() {
         bash_results.len()
     );
     assert!(
-        bash_results.iter().any(|content| content.contains("exit_code: 1")),
+        bash_results
+            .iter()
+            .any(|content| content.contains("exit_code: 1")),
         "repair smoke stalled at first verification failure: missing Bash result with exit_code 1"
     );
     assert!(
@@ -496,8 +495,7 @@ async fn cli_smoke_coding_loop_repairs_after_failed_verification() {
 
     let updated = std::fs::read_to_string(&target).expect("read repaired target");
     assert_eq!(
-        updated,
-        "status = \"done\"\n",
+        updated, "status = \"done\"\n",
         "repair smoke stalled at final file verification: file contents were not repaired"
     );
 }
@@ -585,8 +583,7 @@ async fn cli_smoke_coding_loop_requests_more_context_when_target_is_underspecifi
 
     let sentinel_contents = std::fs::read_to_string(&sentinel).expect("read sentinel");
     assert_eq!(
-        sentinel_contents,
-        "leave me alone\n",
+        sentinel_contents, "leave me alone\n",
         "underspecified-context smoke should not modify files when the target is unclear"
     );
 }
@@ -832,7 +829,12 @@ async fn cli_smoke_coding_loop_surfaces_bash_denial_with_clear_next_step() {
         "denial smoke should not execute the pending Bash command after user rejection: marker={marker_display}"
     );
     assert!(
-        engine.context.app_state.permission_context.pending_approval().is_none(),
+        engine
+            .context
+            .app_state
+            .permission_context
+            .pending_approval()
+            .is_none(),
         "denial smoke should clear the pending approval after rejection"
     );
 }
@@ -922,7 +924,12 @@ async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
         "approval-resume smoke must first reach a real pending approval event"
     );
     assert!(
-        engine.context.app_state.permission_context.pending_approval().is_some(),
+        engine
+            .context
+            .app_state
+            .permission_context
+            .pending_approval()
+            .is_some(),
         "approval-resume smoke should leave a pending approval before approval replay"
     );
     assert!(
@@ -951,7 +958,12 @@ async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
         "approval-resume smoke should preserve verification output after approval; message={approved_message:?}"
     );
     assert!(
-        engine.context.app_state.permission_context.pending_approval().is_none(),
+        engine
+            .context
+            .app_state
+            .permission_context
+            .pending_approval()
+            .is_none(),
         "approval-resume smoke should clear the pending approval after approval replay"
     );
     assert!(
@@ -961,8 +973,7 @@ async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
 
     let marker_contents = std::fs::read_to_string(&marker).expect("read approval marker");
     assert_eq!(
-        marker_contents,
-        "approved\n",
+        marker_contents, "approved\n",
         "approval-resume smoke should run the approved Bash command exactly once"
     );
 }
@@ -1068,7 +1079,8 @@ async fn cli_smoke_pending_approval_user_facing_copy_is_actionable() {
 }
 
 #[tokio::test]
-async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_without_false_completion() {
+async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_without_false_completion()
+ {
     let workspace = tempfile::tempdir().expect("tempdir");
     let marker = workspace.path().join("resume_continuation_marker.txt");
 
@@ -1121,7 +1133,9 @@ async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_witho
     let pending_final = final_assistant_message_text(&pending_result.messages);
     assert!(
         !pending_final.to_ascii_lowercase().contains("completed")
-            && !pending_final.to_ascii_lowercase().contains("verification passed")
+            && !pending_final
+                .to_ascii_lowercase()
+                .contains("verification passed")
             && !pending_final.to_ascii_lowercase().contains("finished"),
         "resume-continuation smoke should not falsely claim completion before restore; final={pending_final:?}"
     );
@@ -1223,8 +1237,11 @@ async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_witho
 #[tokio::test]
 async fn v1_release_gate_coding_smoke_bundle_stays_green() {
     let success_workspace = tempfile::tempdir().expect("tempdir");
-    let success_target = success_workspace.path().join("release_gate_success_target.txt");
-    std::fs::write(&success_target, "status = \"todo\"\n").expect("seed release gate success target");
+    let success_target = success_workspace
+        .path()
+        .join("release_gate_success_target.txt");
+    std::fs::write(&success_target, "status = \"todo\"\n")
+        .expect("seed release gate success target");
     let success_read_input = serde_json::json!({
         "file_path": success_target.to_string_lossy().to_string(),
     })
@@ -1301,8 +1318,12 @@ async fn v1_release_gate_coding_smoke_bundle_stays_green() {
     );
 
     let approval_workspace = tempfile::tempdir().expect("tempdir");
-    let approval_target = approval_workspace.path().join("release_gate_approval_target.txt");
-    let approval_marker = approval_workspace.path().join("release_gate_approval_marker.txt");
+    let approval_target = approval_workspace
+        .path()
+        .join("release_gate_approval_target.txt");
+    let approval_marker = approval_workspace
+        .path()
+        .join("release_gate_approval_marker.txt");
     std::fs::write(&approval_target, "status = \"todo\"\n")
         .expect("seed release gate approval target");
     let approval_permission_context = ToolPermissionContext::new(PermissionMode::Default)

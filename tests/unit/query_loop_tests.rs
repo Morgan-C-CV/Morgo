@@ -9,7 +9,10 @@ use rust_agent::core::query_loop::{
     Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
-use rust_agent::history::session::{SessionHistory, SessionHistoryEntry};
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
+    SessionStore,
+};
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
@@ -380,6 +383,31 @@ async fn run_openai_tool_loop_mock_server(
     }
 }
 
+async fn run_openai_single_turn_mock_server(
+    listener: TcpListener,
+    request_bodies: Arc<Mutex<Vec<String>>>,
+    response_body: &'static str,
+) {
+    let (mut stream, _) = listener.accept().await.expect("accept request");
+    let mut buffer = vec![0_u8; 32 * 1024];
+    let bytes_read = stream.read(&mut buffer).await.expect("read request");
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+    request_bodies
+        .lock()
+        .expect("request bodies poisoned")
+        .push(request);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+    stream.flush().await.expect("flush response");
+}
+
 #[test]
 fn query_context_composes_turn_prompt_in_system_tools_context_user_order() {
     let context =
@@ -486,6 +514,109 @@ async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript(
     assert!(
         second.contains("tool result for EchoFixture: echoed 123"),
         "follow-up prompt must carry the concrete tool result"
+    );
+
+    drop(bodies);
+    server.await.expect("mock server finished");
+}
+
+#[tokio::test]
+async fn query_engine_submit_turn_restores_transcript_from_store_before_current_input() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let request_bodies = Arc::new(Mutex::new(Vec::new()));
+    let request_bodies_for_server = request_bodies.clone();
+    let server = tokio::spawn(async move {
+        run_openai_single_turn_mock_server(
+            listener,
+            request_bodies_for_server,
+            concat!(
+                "data: {\"id\":\"chatcmpl-resume\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"continued after restore\"},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"model\":\"test-model\",\"prompt_tokens\":18,\"completion_tokens\":4,\"total_tokens\":22}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        )
+        .await;
+    });
+
+    let observability = ServiceObservabilityTracker::default();
+    let config = ModelProviderConfig {
+        provider_id: "openai-compatible".into(),
+        protocol: ProviderProtocol::OpenAICompatible,
+        compatibility_profile: ProviderCompatibilityProfileKind::OpenAICompatible,
+        base_url: format!("http://{addr}"),
+        chat_completions_path: "/v1/chat/completions".into(),
+        auth_strategy: ProviderAuthStrategy::NoAuth,
+        model_id: "test-model".into(),
+        retry_policy: RetryPolicy::default(),
+        ..ModelProviderConfig::default()
+    };
+    let client = ModelProviderClient::from_config_with_observability(config, observability.clone());
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let session_id = SessionId("resume-session".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/resume-query".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    session_store
+        .save(
+            snapshot.clone(),
+            SessionHistory {
+                entries: vec![
+                    SessionHistoryEntry {
+                        message: Message::user("restored objective"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    },
+                    SessionHistoryEntry {
+                        message: Message::assistant("restored assistant context"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    },
+                ],
+            },
+        )
+        .expect("seed restored session history");
+
+    let mut context =
+        test_context_with_production_client(client, ToolRegistry::new(), observability);
+    context.app_state.active_session_id = session_id.0.clone();
+    context.app_state.session_store = Some(session_store);
+    context.app_state.session = Some(snapshot);
+    context.app_state.history = Some(SessionHistory::default());
+
+    let result = QueryEngine::new(context)
+        .submit_turn(Message::user("continue from here"))
+        .await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+
+    let bodies = request_bodies.lock().expect("request bodies poisoned");
+    assert_eq!(bodies.len(), 1, "expected a single restored turn request");
+    let request = &bodies[0];
+    assert!(
+        request.contains("Conversation transcript:"),
+        "restored turn should render transcript into the query prompt; request={request}"
+    );
+    assert!(
+        request.contains("restored objective"),
+        "restored user message must be included in the first resumed request; request={request}"
+    );
+    assert!(
+        request.contains("restored assistant context"),
+        "restored assistant message must be included in the first resumed request; request={request}"
+    );
+    assert!(
+        request.contains("continue from here"),
+        "current user input must still be appended after restored history; request={request}"
     );
 
     drop(bodies);

@@ -16,13 +16,13 @@ use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
 use rust_agent::core::message::Message;
-use rust_agent::history::resume::resolved_from_snapshot;
 use rust_agent::history::resume::RestoredSession;
+use rust_agent::history::resume::resolved_from_snapshot;
 use rust_agent::history::session::{SessionId, SessionSnapshot};
 use rust_agent::history::transcript::Transcript;
 use rust_agent::interaction::cli::renderer::render_turn_output;
-use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent};
 use rust_agent::interaction::cli::repl::CliTurnOutput;
+use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::telegram::gateway::TelegramGateway;
@@ -47,7 +47,9 @@ use rust_agent::skills::types::{
     SkillDefinition, SkillExecutionContext, SkillSource, SkillWorkflowExecution,
 };
 use rust_agent::state::app_state::{AppState, RuntimeRole, WorkerRole};
-use rust_agent::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+use rust_agent::state::permission_context::{
+    PendingApproval, PermissionMode, ToolPermissionContext,
+};
 use rust_agent::task::manager::TaskManager;
 use rust_agent::tool::definition::{ToolCall, ToolResult};
 use rust_agent::tool::registry::ToolRegistry;
@@ -1740,7 +1742,11 @@ async fn cli_tasks_summary_distinguishes_running_failed_and_completed_with_outpu
     let running = manager.create("stream logs", "test-session", InteractionSurface::Cli);
     manager.start(&running.id);
 
-    let failed = manager.create("run failing verification", "test-session", InteractionSurface::Cli);
+    let failed = manager.create(
+        "run failing verification",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.append_output(&failed.id, "verification failed\n");
     manager.fail(&failed.id, &dispatcher);
 
@@ -1810,11 +1816,19 @@ async fn cli_tasks_summary_keeps_stopped_tasks_distinct_from_failed_tasks() {
     let running = manager.create("stream logs", "test-session", InteractionSurface::Cli);
     manager.start(&running.id);
 
-    let failed = manager.create("run failing verification", "test-session", InteractionSurface::Cli);
+    let failed = manager.create(
+        "run failing verification",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.append_output(&failed.id, "verification failed\n");
     manager.fail(&failed.id, &dispatcher);
 
-    let stopped = manager.create("cancel stale worker", "test-session", InteractionSurface::Cli);
+    let stopped = manager.create(
+        "cancel stale worker",
+        "test-session",
+        InteractionSurface::Cli,
+    );
     manager.launch(&stopped.id, "work", std::future::pending::<()>());
     assert!(manager.kill(&stopped.id, "test-session", &dispatcher));
 
@@ -1844,7 +1858,9 @@ async fn cli_tasks_summary_keeps_stopped_tasks_distinct_from_failed_tasks() {
         "/tasks should keep the stopped task visible in its own terminal-state section; text={text}"
     );
 
-    let failed_anchor = text.find("Failed tasks:").expect("failed section should be present");
+    let failed_anchor = text
+        .find("Failed tasks:")
+        .expect("failed section should be present");
     let stopped_anchor = text
         .find("Stopped tasks:")
         .or_else(|| text.find("Killed tasks:"))
@@ -1958,11 +1974,15 @@ async fn cli_resume_restores_cwd_mode_and_pending_approval_consistently() {
         "/status should agree with /resume about the restored permission mode; text={status_text}"
     );
     assert!(
-        resume_text.to_ascii_lowercase().contains("pending approval: bash"),
+        resume_text
+            .to_ascii_lowercase()
+            .contains("pending approval: bash"),
         "/resume summary should keep pending approval visible after restore instead of dropping it; text={resume_text}"
     );
     assert!(
-        status_text.to_ascii_lowercase().contains("pending approval")
+        status_text
+            .to_ascii_lowercase()
+            .contains("pending approval")
             && status_text.contains("Bash"),
         "/status should still show the same pending approval after restore; text={status_text}"
     );
@@ -2116,12 +2136,19 @@ async fn v1_release_gate_minimal_coding_cli_surface_stays_green() {
     };
     app_state.history = Some(history.clone());
     app_state.restored_session = Some(RestoredSession {
-        snapshot: app_state.session.clone().expect("session snapshot should exist"),
+        snapshot: app_state
+            .session
+            .clone()
+            .expect("session snapshot should exist"),
         history: history.clone(),
         transcript: Transcript::from(history),
     });
 
-    let running = manager.create("stream logs", "release-gate-session", InteractionSurface::Cli);
+    let running = manager.create(
+        "stream logs",
+        "release-gate-session",
+        InteractionSurface::Cli,
+    );
     manager.start(&running.id);
     let completed = manager.create(
         "finish repair",
@@ -2179,24 +2206,29 @@ async fn v1_release_gate_minimal_coding_cli_surface_stays_green() {
 
     assert!(
         help_text.contains("RustAgent is optimized for coding tasks.")
-            && help_text.contains("Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."),
+            && help_text.contains(
+                "Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."
+            ),
         "release gate expects /help to stay coding-first; text={help_text}"
     );
     assert!(
         status_text.contains("Working status:")
             && status_text.contains("Diagnostics:")
-            && status_text.to_ascii_lowercase().contains("pending approval"),
+            && status_text
+                .to_ascii_lowercase()
+                .contains("pending approval"),
         "release gate expects /status to keep working-state and diagnostics layering; text={status_text}"
     );
     assert!(
-        doctor_text.contains("Coding blockers:")
-            && doctor_text.contains("Secondary diagnostics:"),
+        doctor_text.contains("Coding blockers:") && doctor_text.contains("Secondary diagnostics:"),
         "release gate expects /doctor to foreground coding blockers before secondary diagnostics; text={doctor_text}"
     );
     assert!(
         resume_text.contains("Resume summary:")
             && resume_text.contains("last task:")
-            && resume_text.to_ascii_lowercase().contains("pending approval"),
+            && resume_text
+                .to_ascii_lowercase()
+                .contains("pending approval"),
         "release gate expects /resume to summarize the restore target before raw resume instructions; text={resume_text}"
     );
     assert!(
@@ -2339,13 +2371,17 @@ async fn v1_release_gate_coding_cli_and_resume_surface_stays_green() {
     });
 
     assert!(
-        help_text.contains("Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."),
+        help_text.contains(
+            "Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."
+        ),
         "release gate expects /help to keep the coding workflow visible; text={help_text}"
     );
     assert!(
         status_text.contains("Working status:")
             && status_text.contains("mode: plan")
-            && status_text.to_ascii_lowercase().contains("pending approval"),
+            && status_text
+                .to_ascii_lowercase()
+                .contains("pending approval"),
         "release gate expects /status to keep restored working state and approval visible; text={status_text}"
     );
     assert!(
@@ -2357,13 +2393,17 @@ async fn v1_release_gate_coding_cli_and_resume_surface_stays_green() {
     assert!(
         resume_text.contains("Resume summary:")
             && resume_text.contains("last task: rerun verification")
-            && resume_text.to_ascii_lowercase().contains("pending approval: bash"),
+            && resume_text
+                .to_ascii_lowercase()
+                .contains("pending approval: bash"),
         "release gate expects /resume to keep restore target and approval state visible; text={resume_text}"
     );
     assert!(
         tasks_text.contains("Running tasks:")
             && tasks_text.contains("Failed tasks:")
-            && tasks_text.to_ascii_lowercase().contains("inspect task output"),
+            && tasks_text
+                .to_ascii_lowercase()
+                .contains("inspect task output"),
         "release gate expects /tasks to keep task states and output hints visible; text={tasks_text}"
     );
     assert!(

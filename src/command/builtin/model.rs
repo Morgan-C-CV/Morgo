@@ -54,7 +54,9 @@ impl Command for ModelCommand {
         let action = parts.next().unwrap_or("");
 
         match action {
-            "" => Ok(CommandResult::Message(render_active_model_summary(app_state)?)),
+            "" => Ok(CommandResult::Message(render_active_model_summary(
+                app_state,
+            )?)),
             "list" => Ok(CommandResult::Message(render_model_list(app_state)?)),
             "show" => Ok(CommandResult::Message(render_model_show(app_state)?)),
             "use" => {
@@ -151,7 +153,10 @@ fn render_model_list(app_state: &AppState) -> anyhow::Result<String> {
         ),
         format!(
             "- active_level: {}",
-            registry.active_level.map(|level| level.as_str()).unwrap_or("none")
+            registry
+                .active_level
+                .map(|level| level.as_str())
+                .unwrap_or("none")
         ),
         format!("- profiles: {}", registry.profiles.len()),
     ];
@@ -164,7 +169,10 @@ fn render_model_list(app_state: &AppState) -> anyhow::Result<String> {
     ] {
         match registry.levels.get(&level) {
             Some(profile_name) => {
-                let spec = registry.profiles.get(profile_name).expect("mapped profile exists");
+                let spec = registry
+                    .profiles
+                    .get(profile_name)
+                    .expect("mapped profile exists");
                 let view = build_model_profile_display_view(profile_name, spec)?;
                 lines.push(format!(
                     "- {} -> {}: provider_id={}, model={}, auth_strategy={}",
@@ -195,7 +203,10 @@ fn render_model_show(app_state: &AppState) -> anyhow::Result<String> {
         ModelLevel::Xhigh,
     ] {
         if let Some(profile_name) = registry.levels.get(&level) {
-            let spec = registry.profiles.get(profile_name).expect("mapped profile exists");
+            let spec = registry
+                .profiles
+                .get(profile_name)
+                .expect("mapped profile exists");
             let view = build_model_profile_display_view(profile_name, spec)?;
             lines.push(format!(
                 "- {} -> profile={} provider_id={} model={} base_url={}",
@@ -345,7 +356,10 @@ fn render_model_reload(app_state: &AppState) -> anyhow::Result<String> {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "none".into()),
-        registry.active_level.map(|level| level.as_str()).unwrap_or("none"),
+        registry
+            .active_level
+            .map(|level| level.as_str())
+            .unwrap_or("none"),
         registry.profiles.len()
     ))
 }
@@ -415,8 +429,9 @@ fn write_workspace_active_level(
             table.remove("active_level");
         }
     }
-    let serialized = toml::to_string_pretty(&doc)
-        .map_err(|error| anyhow::anyhow!("invalid_configuration: failed to serialize models.toml: {error}"))?;
+    let serialized = toml::to_string_pretty(&doc).map_err(|error| {
+        anyhow::anyhow!("invalid_configuration: failed to serialize models.toml: {error}")
+    })?;
     fs::write(path, serialized)?;
     Ok(())
 }

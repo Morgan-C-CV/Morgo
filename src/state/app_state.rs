@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{
-    PersistedSessionRecord, SessionHistory, SessionId, SessionLifecycleStatus, SessionSnapshot,
-    SessionStore, SessionStoreWriteError,
+    PersistedSessionRecord, SessionHistory, SessionId, SessionLifecycleStatus,
+    SessionRestoreRequest, SessionSnapshot, SessionStore, SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::approval_protocol::{ApprovalDecision, ApprovalSurface};
@@ -168,6 +168,32 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn stored_session_history(&self, session_id: &SessionId) -> Option<SessionHistory> {
+        self.session_store.as_ref().and_then(|session_store| {
+            session_store
+                .load(&SessionRestoreRequest {
+                    resume: Some(session_id.0.clone()),
+                    continue_session: false,
+                })
+                .map(|(_, history)| history)
+        })
+    }
+
+    pub fn canonical_session_history(&self) -> SessionHistory {
+        let session_id = self.current_session_id();
+        self.canonical_session_history_for(&session_id, self.history.as_ref())
+    }
+
+    pub fn canonical_session_history_for(
+        &self,
+        session_id: &SessionId,
+        fallback: Option<&SessionHistory>,
+    ) -> SessionHistory {
+        self.stored_session_history(session_id)
+            .or_else(|| fallback.cloned())
+            .unwrap_or_default()
+    }
+
     pub fn current_working_directory(&self) -> PathBuf {
         self.session
             .as_ref()
@@ -210,9 +236,10 @@ impl AppState {
             return Err(SessionPersistFailure::MissingSessionSnapshot);
         };
         let session_id = snapshot.session_id.clone();
+        let history = self.canonical_session_history_for(&session_id, self.history.as_ref());
         let record = PersistedSessionRecord {
             snapshot: snapshot.clone(),
-            history: self.history.clone().unwrap_or_default(),
+            history,
             task_list: session_store.load_task_list(&session_id),
             plan_state: session_store.load_plan_state(&session_id),
             external_memory_entries: Some(self.permission_context.external_memory_entries()),
@@ -325,9 +352,10 @@ impl AppState {
             return Err(SessionPersistFailure::MissingSessionStore);
         };
         let session_id = resolved.snapshot.session_id.clone();
+        let history = self.canonical_session_history_for(&session_id, Some(&resolved.history));
         let record = PersistedSessionRecord {
             snapshot: resolved.snapshot.clone(),
-            history: resolved.history.clone(),
+            history,
             task_list: session_store.load_task_list(&session_id),
             plan_state: session_store.load_plan_state(&session_id),
             external_memory_entries: Some(self.permission_context.external_memory_entries()),

@@ -85,7 +85,10 @@ pub fn build_tui_loading_screen(request: &str, _frame_index: usize) -> TuiScreen
     let request = truncate_for_tui(request, 96);
 
     TuiScreen {
-        main: vec!["Working...".into(), "The agent is processing your request.".into()],
+        main: vec![
+            "Working...".into(),
+            "The agent is processing your request.".into(),
+        ],
         panels: vec![TuiPanelSection {
             title: "Status".into(),
             lines: vec![
@@ -174,7 +177,11 @@ fn visible_tui_primary_lines(text: &str) -> Vec<String> {
         lines.push(line);
     }
 
-    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.pop();
     }
 
@@ -242,7 +249,10 @@ fn raw_runtime_lines_for_tui(text: &str) -> Option<Vec<String>> {
         return None;
     }
 
-    let lines = text.lines().map(|line| line.to_string()).collect::<Vec<_>>();
+    let lines = text
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
     if lines.is_empty() || lines.iter().all(|line| line.starts_with("[delta]")) {
         return None;
     }
@@ -287,7 +297,11 @@ fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -
     let mut action = None;
 
     if let Some(detail) = detail {
-        for raw_line in detail.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for raw_line in detail
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             if raw_line.starts_with("Reason:") {
                 reason = Some(raw_line.to_string());
             } else if raw_line.starts_with("Choose ") || raw_line.starts_with("Action:") {
@@ -331,9 +345,12 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                 summary,
                 detail,
             } => {
-                if let Some((headline, detail_lines)) =
-                    tool_result_activity_block(tool_name, content, summary.as_deref(), detail.as_deref())
-                {
+                if let Some((headline, detail_lines)) = tool_result_activity_block(
+                    tool_name,
+                    content,
+                    summary.as_deref(),
+                    detail.as_deref(),
+                ) {
                     let detail_lines = detail_lines
                         .into_iter()
                         .filter(|line| !is_low_signal_tool_detail(line))
@@ -354,7 +371,11 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
         let exploration_len = exploration.len();
         let mut prefixed = vec![style_activity_action("EXPLORED")];
         for (index, line) in exploration.into_iter().enumerate() {
-            let branch = if index + 1 == exploration_len { "└" } else { "├" };
+            let branch = if index + 1 == exploration_len {
+                "└"
+            } else {
+                "├"
+            };
             prefixed.push(format!("  {branch} {line}"));
         }
         prefixed.extend(lines);
@@ -369,7 +390,10 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
 }
 
 fn is_exploration_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "Read" | "Grep" | "Glob" | "ToolSearch" | "WebSearch" | "WebFetch")
+    matches!(
+        tool_name,
+        "Read" | "Grep" | "Glob" | "ToolSearch" | "WebSearch" | "WebFetch"
+    )
 }
 
 fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
@@ -377,7 +401,11 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
     match tool_name {
         "Read" => {
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!("{} {}", style_activity_action("READ"), short_path(&path)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("READ"),
+                short_path(&path)
+            ))
         }
         "Grep" => {
             let pattern = json_string_field(parsed.as_ref(), &["pattern", "query"])?;
@@ -426,7 +454,11 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
         }
         "Edit" | "Write" | "FileEdit" | "FileWrite" => {
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!("{} {}", style_activity_action("UPDATED"), short_path(&path)))
+            Some(format!(
+                "{} {}",
+                style_activity_action("UPDATED"),
+                short_path(&path)
+            ))
         }
         _ => Some(format!("{} {tool_name}", style_activity_action("USED"))),
     }
@@ -450,7 +482,13 @@ fn tool_result_activity_block(
     let headline = match tool_name {
         "Bash" => summary
             .strip_suffix(" succeeded")
-            .map(|value| format!("{} {}", style_activity_action("RAN"), truncate_for_tui(value, 72)))
+            .map(|value| {
+                format!(
+                    "{} {}",
+                    style_activity_action("RAN"),
+                    truncate_for_tui(value, 72)
+                )
+            })
             .unwrap_or_else(|| truncate_for_tui(summary, 72)),
         "Edit" | "Write" | "FileEdit" | "FileWrite" => truncate_for_tui(summary, 72),
         _ => truncate_for_tui(summary, 72),
@@ -474,12 +512,17 @@ fn summarize_bash_activity_detail(content: &str) -> Vec<String> {
     compact_tool_detail_lines(lines)
 }
 
-fn render_edit_activity_block(content: &str, detail: Option<&str>) -> Option<(String, Vec<String>)> {
+fn render_edit_activity_block(
+    content: &str,
+    detail: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let detail_source = detail.unwrap_or(content);
     let fields = parse_key_value_lines(detail_source);
     let path = fields.get("path")?;
-    let old_text = decode_tool_preview_text(fields.get("old_text").map(String::as_str).unwrap_or(""));
-    let new_text = decode_tool_preview_text(fields.get("new_text").map(String::as_str).unwrap_or(""));
+    let old_text =
+        decode_tool_preview_text(fields.get("old_text").map(String::as_str).unwrap_or(""));
+    let new_text =
+        decode_tool_preview_text(fields.get("new_text").map(String::as_str).unwrap_or(""));
 
     let old_count = count_nonempty_lines(&old_text);
     let new_count = count_nonempty_lines(&new_text);
@@ -519,7 +562,11 @@ fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<Str
     }
 
     if rendered.is_empty() {
-        rendered.push(style_added_diff_line(start_line, width, &truncate_for_tui(new_text, 96)));
+        rendered.push(style_added_diff_line(
+            start_line,
+            width,
+            &truncate_for_tui(new_text, 96),
+        ));
     }
 
     rendered
@@ -552,17 +599,26 @@ fn locate_line_number(file_text: &str, snippet: &str) -> Option<usize> {
     }
 
     let byte_index = file_text.find(snippet)?;
-    Some(file_text[..byte_index].bytes().filter(|byte| *byte == b'\n').count() + 1)
+    Some(
+        file_text[..byte_index]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1,
+    )
 }
 
 fn count_nonempty_lines(text: &str) -> usize {
     let count = text.lines().count();
-    if count == 0 { usize::from(!text.is_empty()) } else { count }
+    if count == 0 {
+        usize::from(!text.is_empty())
+    } else {
+        count
+    }
 }
 
 fn display_activity_path(path: &str) -> String {
-    current_dir_relative_path(path)
-        .unwrap_or_else(|| path.to_string())
+    current_dir_relative_path(path).unwrap_or_else(|| path.to_string())
 }
 
 fn current_dir_relative_path(path: &str) -> Option<String> {
@@ -682,10 +738,12 @@ fn build_tui_footer(document: &RenderDocument) -> Vec<String> {
 
 fn pending_approval_tool_name(document: &RenderDocument) -> Option<String> {
     document.blocks.iter().find_map(|block| match block {
-        RenderBlock::Panel(panel) if panel.kind == PanelKind::Approval => panel
-            .lines
-            .iter()
-            .find_map(|line| line.strip_prefix("Tool: ").map(|tool| tool.trim().to_string())),
+        RenderBlock::Panel(panel) if panel.kind == PanelKind::Approval => {
+            panel.lines.iter().find_map(|line| {
+                line.strip_prefix("Tool: ")
+                    .map(|tool| tool.trim().to_string())
+            })
+        }
         _ => None,
     })
 }
@@ -875,9 +933,7 @@ mod tests {
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
                     text: "morg".into(),
                 }),
-                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
-                    text: "o".into(),
-                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text: "o".into() }),
             ],
         };
 
@@ -988,8 +1044,12 @@ mod tests {
         assert!(plain.contains("EDITED"));
         assert!(plain.contains("(+1 -1)"));
         assert!(plain.contains("renderer_edit_activity_preview.rs"));
-        assert!(plain.contains("+     println!(\"old\");") || plain.contains("+ println!(\"old\");"));
-        assert!(plain.contains("-     println!(\"todo\");") || plain.contains("- println!(\"todo\");"));
+        assert!(
+            plain.contains("+     println!(\"old\");") || plain.contains("+ println!(\"old\");")
+        );
+        assert!(
+            plain.contains("-     println!(\"todo\");") || plain.contains("- println!(\"todo\");")
+        );
         assert!(rendered.contains("\x1b[48;5;120m"));
         assert!(rendered.contains("\x1b[48;5;224m"));
 

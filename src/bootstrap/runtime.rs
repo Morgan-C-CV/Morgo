@@ -6,10 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
-use crossterm::execute;
 
 use crate::bootstrap::config_root::{
     is_managed_config_root, preferred_home_config_root, resolve_config_root,
@@ -40,8 +40,8 @@ use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    build_tui_loading_screen, build_tui_screen, render_document_output,
-    render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
+    build_tui_loading_screen, build_tui_screen, render_document_output, render_document_tui_output,
+    render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{
     CliTurnOutput, handle_cli_input, handle_cli_input_streaming, handle_normalized_input,
@@ -368,12 +368,26 @@ fn heuristic_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<Tu
     let trailing_space = input.ends_with(' ');
     match command {
         "/model" => Some(model_command_suggestions(args.as_slice(), trailing_space)),
-        "/permissions" | "/perms" => Some(permissions_command_suggestions(args.as_slice(), trailing_space)),
+        "/permissions" | "/perms" => Some(permissions_command_suggestions(
+            args.as_slice(),
+            trailing_space,
+        )),
         "/plan" => Some(plan_command_suggestions(args.as_slice(), trailing_space)),
-        "/plugins" => Some(plugins_command_suggestions(app_state, args.as_slice(), trailing_space)),
+        "/plugins" => Some(plugins_command_suggestions(
+            app_state,
+            args.as_slice(),
+            trailing_space,
+        )),
         "/mcp" => Some(mcp_command_suggestions(args.as_slice(), trailing_space)),
-        "/swarm" => Some(swarm_command_suggestions(app_state, args.as_slice(), trailing_space)),
-        "/computer" => Some(computer_command_suggestions(args.as_slice(), trailing_space)),
+        "/swarm" => Some(swarm_command_suggestions(
+            app_state,
+            args.as_slice(),
+            trailing_space,
+        )),
+        "/computer" => Some(computer_command_suggestions(
+            args.as_slice(),
+            trailing_space,
+        )),
         "/LisM" | "/lism" => Some(lism_command_suggestions(args.as_slice(), trailing_space)),
         "/UM" | "/um" => Some(um_command_suggestions(args.as_slice(), trailing_space)),
         _ => None,
@@ -383,10 +397,25 @@ fn heuristic_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<Tu
 fn model_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
         heuristic_suggestion("/model list ", "list", "Show configured model levels", "33"),
-        heuristic_suggestion("/model show ", "show", "Show level -> profile mapping", "33"),
-        heuristic_suggestion("/model use ", "use", "Switch session or workspace model level", "33"),
+        heuristic_suggestion(
+            "/model show ",
+            "show",
+            "Show level -> profile mapping",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/model use ",
+            "use",
+            "Switch session or workspace model level",
+            "33",
+        ),
         heuristic_suggestion("/model clear ", "clear", "Clear model override", "33"),
-        heuristic_suggestion("/model reload ", "reload", "Reload models.toml registry", "33"),
+        heuristic_suggestion(
+            "/model reload ",
+            "reload",
+            "Reload models.toml registry",
+            "33",
+        ),
     ];
     if args.is_empty() {
         return base;
@@ -457,9 +486,19 @@ fn model_clear_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugges
 
 fn permissions_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
-        heuristic_suggestion("/permissions show ", "show", "Show mode, rules, and pending approval", "33"),
+        heuristic_suggestion(
+            "/permissions show ",
+            "show",
+            "Show mode, rules, and pending approval",
+            "33",
+        ),
         heuristic_suggestion("/permissions mode ", "mode", "Switch permission mode", "33"),
-        heuristic_suggestion("/permissions allow ", "allow", "Add always-allow rules", "32"),
+        heuristic_suggestion(
+            "/permissions allow ",
+            "allow",
+            "Add always-allow rules",
+            "32",
+        ),
         heuristic_suggestion("/permissions deny ", "deny", "Add always-deny rules", "31"),
         heuristic_suggestion("/permissions ask ", "ask", "Add always-ask rules", "35"),
     ];
@@ -472,19 +511,59 @@ fn permissions_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<T
     match args[0] {
         "mode" => filter_suggestions(
             vec![
-                heuristic_suggestion("/permissions mode default ", "default", "Standard interactive approvals", "36"),
-                heuristic_suggestion("/permissions mode plan ", "plan", "Plan-only mode with restricted execution", "36"),
-                heuristic_suggestion("/permissions mode accept-edits ", "accept-edits", "Auto-accept file edits only", "36"),
-                heuristic_suggestion("/permissions mode bypass ", "bypass", "Bypass permission prompts", "36"),
+                heuristic_suggestion(
+                    "/permissions mode default ",
+                    "default",
+                    "Standard interactive approvals",
+                    "36",
+                ),
+                heuristic_suggestion(
+                    "/permissions mode plan ",
+                    "plan",
+                    "Plan-only mode with restricted execution",
+                    "36",
+                ),
+                heuristic_suggestion(
+                    "/permissions mode accept-edits ",
+                    "accept-edits",
+                    "Auto-accept file edits only",
+                    "36",
+                ),
+                heuristic_suggestion(
+                    "/permissions mode bypass ",
+                    "bypass",
+                    "Bypass permission prompts",
+                    "36",
+                ),
             ],
             args.get(1).copied().unwrap_or(""),
         ),
         "allow" | "deny" | "ask" => filter_suggestions(
             vec![
-                heuristic_suggestion(format!("/permissions {} Bash ", args[0]), "Bash", "Terminal commands", "32"),
-                heuristic_suggestion(format!("/permissions {} Edit ", args[0]), "Edit", "File edits", "32"),
-                heuristic_suggestion(format!("/permissions {} Read ", args[0]), "Read", "File reads", "32"),
-                heuristic_suggestion(format!("/permissions {} WebSearch ", args[0]), "WebSearch", "Web search access", "32"),
+                heuristic_suggestion(
+                    format!("/permissions {} Bash ", args[0]),
+                    "Bash",
+                    "Terminal commands",
+                    "32",
+                ),
+                heuristic_suggestion(
+                    format!("/permissions {} Edit ", args[0]),
+                    "Edit",
+                    "File edits",
+                    "32",
+                ),
+                heuristic_suggestion(
+                    format!("/permissions {} Read ", args[0]),
+                    "Read",
+                    "File reads",
+                    "32",
+                ),
+                heuristic_suggestion(
+                    format!("/permissions {} WebSearch ", args[0]),
+                    "WebSearch",
+                    "Web search access",
+                    "32",
+                ),
             ],
             args.get(1).copied().unwrap_or(""),
         ),
@@ -494,7 +573,12 @@ fn permissions_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<T
 
 fn plan_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
-        heuristic_suggestion("/plan status ", "status", "Show current plan mode status", "33"),
+        heuristic_suggestion(
+            "/plan status ",
+            "status",
+            "Show current plan mode status",
+            "33",
+        ),
         heuristic_suggestion("/plan show ", "show", "Show current plan steps", "33"),
         heuristic_suggestion("/plan history ", "history", "Show plan history", "33"),
         heuristic_suggestion("/plan add ", "add", "Add a plan step", "32"),
@@ -551,12 +635,31 @@ fn plan_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugge
     }
 }
 
-fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
+fn plugins_command_suggestions(
+    app_state: &AppState,
+    args: &[&str],
+    trailing_space: bool,
+) -> Vec<TuiSuggestion> {
     let base = vec![
-        heuristic_suggestion("/plugins list ", "list", "List plugin inventory and state", "33"),
+        heuristic_suggestion(
+            "/plugins list ",
+            "list",
+            "List plugin inventory and state",
+            "33",
+        ),
         heuristic_suggestion("/plugins show ", "show", "Show one plugin in detail", "33"),
-        heuristic_suggestion("/plugins diagnostics ", "diagnostics", "Show plugin diagnostics", "33"),
-        heuristic_suggestion("/plugins reload ", "reload", "Reload one plugin or all plugins", "35"),
+        heuristic_suggestion(
+            "/plugins diagnostics ",
+            "diagnostics",
+            "Show plugin diagnostics",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/plugins reload ",
+            "reload",
+            "Reload one plugin or all plugins",
+            "35",
+        ),
         heuristic_suggestion("/plugins enable ", "enable", "Enable a plugin", "32"),
         heuristic_suggestion("/plugins disable ", "disable", "Disable a plugin", "31"),
     ];
@@ -570,7 +673,13 @@ fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_spa
     let plugin_names = app_state
         .plugin_load_result
         .as_ref()
-        .map(|result| result.plugins.iter().map(|plugin| plugin.name.clone()).collect::<Vec<_>>())
+        .map(|result| {
+            result
+                .plugins
+                .iter()
+                .map(|plugin| plugin.name.clone())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     match args[0] {
@@ -578,7 +687,13 @@ fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_spa
             format!("/plugins {} ", args[0]),
             &plugin_names,
             args.get(1).copied().unwrap_or(""),
-            if args[0] == "enable" { "32" } else if args[0] == "disable" { "31" } else { "33" },
+            if args[0] == "enable" {
+                "32"
+            } else if args[0] == "disable" {
+                "31"
+            } else {
+                "33"
+            },
             "Installed plugin",
         ),
         "diagnostics" => {
@@ -589,7 +704,15 @@ fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_spa
                 "33",
                 "Show diagnostics for one plugin",
             );
-            suggestions.insert(0, heuristic_suggestion("/plugins diagnostics ", "all", "Show diagnostics for all plugins", "33"));
+            suggestions.insert(
+                0,
+                heuristic_suggestion(
+                    "/plugins diagnostics ",
+                    "all",
+                    "Show diagnostics for all plugins",
+                    "33",
+                ),
+            );
             suggestions
         }
         "reload" => {
@@ -600,7 +723,10 @@ fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_spa
                 "35",
                 "Reload this plugin only",
             );
-            suggestions.insert(0, heuristic_suggestion("/plugins reload all ", "all", "Reload all plugins", "35"));
+            suggestions.insert(
+                0,
+                heuristic_suggestion("/plugins reload all ", "all", "Reload all plugins", "35"),
+            );
             suggestions
         }
         _ => base,
@@ -610,12 +736,37 @@ fn plugins_command_suggestions(app_state: &AppState, args: &[&str], trailing_spa
 fn mcp_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
         heuristic_suggestion("/mcp list ", "list", "List configured MCP servers", "33"),
-        heuristic_suggestion("/mcp status ", "status", "Alias of list with runtime status", "33"),
+        heuristic_suggestion(
+            "/mcp status ",
+            "status",
+            "Alias of list with runtime status",
+            "33",
+        ),
         heuristic_suggestion("/mcp connect ", "connect", "Connect one MCP server", "32"),
-        heuristic_suggestion("/mcp disconnect ", "disconnect", "Disconnect one MCP server", "31"),
-        heuristic_suggestion("/mcp reconnect ", "reconnect", "Reconnect one MCP server", "35"),
-        heuristic_suggestion("/mcp approve ", "approve", "Approve MCP governance for a server", "32"),
-        heuristic_suggestion("/mcp deny ", "deny", "Deny MCP governance for a server", "31"),
+        heuristic_suggestion(
+            "/mcp disconnect ",
+            "disconnect",
+            "Disconnect one MCP server",
+            "31",
+        ),
+        heuristic_suggestion(
+            "/mcp reconnect ",
+            "reconnect",
+            "Reconnect one MCP server",
+            "35",
+        ),
+        heuristic_suggestion(
+            "/mcp approve ",
+            "approve",
+            "Approve MCP governance for a server",
+            "32",
+        ),
+        heuristic_suggestion(
+            "/mcp deny ",
+            "deny",
+            "Deny MCP governance for a server",
+            "31",
+        ),
     ];
     if args.is_empty() {
         return base;
@@ -628,7 +779,11 @@ fn mcp_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugges
             format!("/mcp {} <server> ", args[0]),
             "<server>",
             "Enter the MCP server id or display name",
-            if matches!(args[0], "disconnect") { "31" } else { "35" },
+            if matches!(args[0], "disconnect") {
+                "31"
+            } else {
+                "35"
+            },
         )],
         "deny" => vec![heuristic_suggestion(
             "/mcp deny <server> <reason> ".to_string(),
@@ -640,11 +795,25 @@ fn mcp_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugges
     }
 }
 
-fn swarm_command_suggestions(app_state: &AppState, args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
+fn swarm_command_suggestions(
+    app_state: &AppState,
+    args: &[&str],
+    trailing_space: bool,
+) -> Vec<TuiSuggestion> {
     let base = vec![
         heuristic_suggestion("/swarm status ", "status", "Show active swarm tasks", "33"),
-        heuristic_suggestion("/swarm teammates ", "teammates", "List available teammate profiles", "33"),
-        heuristic_suggestion("/swarm spawn ", "spawn", "Spawn a teammate for a task", "35"),
+        heuristic_suggestion(
+            "/swarm teammates ",
+            "teammates",
+            "List available teammate profiles",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/swarm spawn ",
+            "spawn",
+            "Spawn a teammate for a task",
+            "35",
+        ),
     ];
     if args.is_empty() {
         return base;
@@ -686,10 +855,30 @@ fn swarm_command_suggestions(app_state: &AppState, args: &[&str], trailing_space
 
 fn computer_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
-        heuristic_suggestion("/computer screenshot ", "screenshot", "Capture the current screen", "33"),
-        heuristic_suggestion("/computer click ", "click", "Click at absolute screen coordinates", "31"),
-        heuristic_suggestion("/computer move ", "move", "Move the pointer without clicking", "35"),
-        heuristic_suggestion("/computer stop ", "stop", "Stop the active computer control session", "31"),
+        heuristic_suggestion(
+            "/computer screenshot ",
+            "screenshot",
+            "Capture the current screen",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/computer click ",
+            "click",
+            "Click at absolute screen coordinates",
+            "31",
+        ),
+        heuristic_suggestion(
+            "/computer move ",
+            "move",
+            "Move the pointer without clicking",
+            "35",
+        ),
+        heuristic_suggestion(
+            "/computer stop ",
+            "stop",
+            "Stop the active computer control session",
+            "31",
+        ),
     ];
     if args.is_empty() {
         return base;
@@ -713,10 +902,30 @@ fn lism_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSugge
         args,
         trailing_space,
         vec![
-            heuristic_suggestion("/LisM on ", "on", "Enable session-level Less-is-More mode", "32"),
-            heuristic_suggestion("/LisM off ", "off", "Disable session-level Less-is-More mode", "31"),
-            heuristic_suggestion("/LisM status ", "status", "Show LisM status and routed metadata", "33"),
-            heuristic_suggestion("/LisM explain ", "explain", "Show LisM building blocks and deferred items", "35"),
+            heuristic_suggestion(
+                "/LisM on ",
+                "on",
+                "Enable session-level Less-is-More mode",
+                "32",
+            ),
+            heuristic_suggestion(
+                "/LisM off ",
+                "off",
+                "Disable session-level Less-is-More mode",
+                "31",
+            ),
+            heuristic_suggestion(
+                "/LisM status ",
+                "status",
+                "Show LisM status and routed metadata",
+                "33",
+            ),
+            heuristic_suggestion(
+                "/LisM explain ",
+                "explain",
+                "Show LisM building blocks and deferred items",
+                "35",
+            ),
         ],
     )
 }
@@ -728,7 +937,12 @@ fn um_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggest
         vec![
             heuristic_suggestion("/UM on ", "on", "Enable shared step memory", "32"),
             heuristic_suggestion("/UM off ", "off", "Disable shared step memory", "31"),
-            heuristic_suggestion("/UM status ", "status", "Show shared step memory status", "33"),
+            heuristic_suggestion(
+                "/UM status ",
+                "status",
+                "Show shared step memory status",
+                "33",
+            ),
         ],
     )
 }
@@ -775,8 +989,16 @@ fn named_target_suggestions(
         )];
     }
     filter_suggestions(
-        names.iter()
-            .map(|name| heuristic_suggestion(format!("{prefix}{name} "), name.clone(), detail, accent_color))
+        names
+            .iter()
+            .map(|name| {
+                heuristic_suggestion(
+                    format!("{prefix}{name} "),
+                    name.clone(),
+                    detail,
+                    accent_color,
+                )
+            })
             .collect(),
         query,
     )
@@ -790,7 +1012,13 @@ fn load_tui_teammate_ids(app_state: &AppState) -> Vec<String> {
     crate::bootstrap::teammate_registry::load_teammate_registry_from_root(&config_root)
         .ok()
         .flatten()
-        .map(|registry| registry.profiles.into_iter().map(|profile| profile.id).collect())
+        .map(|registry| {
+            registry
+                .profiles
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -820,12 +1048,25 @@ fn model_level_suggestions() -> Vec<TuiSuggestion> {
     .map(|(level, accent_color)| {
         let combo_summary = registry
             .as_ref()
-            .and_then(|registry| registry.levels.get(&level).map(|profile| (registry, profile)))
-            .and_then(|(registry, profile_name)| registry.profiles.get(profile_name).map(|spec| (profile_name, spec)))
+            .and_then(|registry| {
+                registry
+                    .levels
+                    .get(&level)
+                    .map(|profile| (registry, profile))
+            })
+            .and_then(|(registry, profile_name)| {
+                registry
+                    .profiles
+                    .get(profile_name)
+                    .map(|spec| (profile_name, spec))
+            })
             .and_then(|(profile_name, spec)| {
-                crate::bootstrap::model_profiles::build_model_profile_display_view(profile_name, spec)
-                    .ok()
-                    .map(|view| format!("Mapped to {} via {}", view.model, view.provider_id))
+                crate::bootstrap::model_profiles::build_model_profile_display_view(
+                    profile_name,
+                    spec,
+                )
+                .ok()
+                .map(|view| format!("Mapped to {} via {}", view.model, view.provider_id))
             });
         let detail = match combo_summary {
             Some(summary) => format!("{} · {}", model_level_combo_copy(level), summary),
@@ -843,10 +1084,18 @@ fn model_level_suggestions() -> Vec<TuiSuggestion> {
 
 fn model_level_combo_copy(level: ModelLevel) -> &'static str {
     match level {
-        ModelLevel::Low => "Fastest and most cost-efficient. Best for quick questions, small edits, and rapid iteration.",
-        ModelLevel::Medium => "Balanced speed and quality. Best default for everyday coding, review, and analysis.",
-        ModelLevel::High => "Stronger reasoning with more consistency. Best for larger changes, debugging, and refactors.",
-        ModelLevel::Xhigh => "Maximum capability for the hardest work. Best for multi-step tasks, ambiguous problems, and deep investigations.",
+        ModelLevel::Low => {
+            "Fastest and most cost-efficient. Best for quick questions, small edits, and rapid iteration."
+        }
+        ModelLevel::Medium => {
+            "Balanced speed and quality. Best default for everyday coding, review, and analysis."
+        }
+        ModelLevel::High => {
+            "Stronger reasoning with more consistency. Best for larger changes, debugging, and refactors."
+        }
+        ModelLevel::Xhigh => {
+            "Maximum capability for the hardest work. Best for multi-step tasks, ambiguous problems, and deep investigations."
+        }
     }
 }
 
@@ -854,10 +1103,14 @@ fn load_tui_model_registry() -> Option<crate::bootstrap::model_profiles::ModelPr
     let workspace_root = std::env::current_dir().ok()?;
     let home_root = preferred_home_config_root();
     let home_registry = match home_root.as_ref() {
-        Some(path) if path != &workspace_root => load_model_profiles_registry_from_root(path).ok().flatten(),
+        Some(path) if path != &workspace_root => {
+            load_model_profiles_registry_from_root(path).ok().flatten()
+        }
         _ => None,
     };
-    let workspace_registry = load_model_profiles_registry_from_root(&workspace_root).ok().flatten();
+    let workspace_registry = load_model_profiles_registry_from_root(&workspace_root)
+        .ok()
+        .flatten();
     merge_model_profiles_registry(home_registry.as_ref(), workspace_registry.as_ref())
 }
 
@@ -870,7 +1123,11 @@ fn command_match_score(command: &CommandMetadata, query: &str) -> i32 {
     if name == query {
         return 10_000;
     }
-    if command.aliases.iter().any(|alias| alias.eq_ignore_ascii_case(query)) {
+    if command
+        .aliases
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(query))
+    {
         return 9_000;
     }
     if name.starts_with(query) {
@@ -903,7 +1160,10 @@ fn command_match_score(command: &CommandMetadata, query: &str) -> i32 {
 }
 
 fn suggestion_match_score(suggestion: &TuiSuggestion, query: &str) -> i32 {
-    let label = suggestion.label.trim_start_matches('/').to_ascii_lowercase();
+    let label = suggestion
+        .label
+        .trim_start_matches('/')
+        .to_ascii_lowercase();
     let detail = suggestion.detail.to_ascii_lowercase();
 
     if query.is_empty() {
@@ -1067,7 +1327,10 @@ fn render_fixed_tui_layout(
     let content_lines = if content.is_empty() {
         Vec::new()
     } else {
-        content.lines().map(|line| line.to_string()).collect::<Vec<_>>()
+        content
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
     };
 
     let (cols, rows) = size().unwrap_or((100, 32));
@@ -1107,9 +1370,7 @@ fn render_fixed_tui_layout(
     ));
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
-        input_row,
-        viewport.visible_input,
-        input_padding
+        input_row, viewport.visible_input, input_padding
     ));
     frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", input_row, cursor_col));
     frame
@@ -1132,7 +1393,9 @@ mod tui_output_tests {
     use crate::interaction::telegram::gateway::TelegramGateway;
     use crate::security::audit::AuditLog;
     use crate::service::observability::ServiceObservabilityTracker;
-    use crate::state::app_state::{ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole};
+    use crate::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+    };
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
@@ -1213,15 +1476,20 @@ mod tui_output_tests {
     #[test]
     fn tui_model_command_shows_use_suggestion_with_detail() {
         let app_state = test_app_state();
-        let suggestions = heuristic_tui_suggestions(&app_state, "/model").expect("model suggestions");
-        assert!(suggestions.iter().any(|item| item.label == "use" && !item.detail.is_empty()));
+        let suggestions =
+            heuristic_tui_suggestions(&app_state, "/model").expect("model suggestions");
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| item.label == "use" && !item.detail.is_empty())
+        );
     }
 
     #[test]
     fn tui_model_enter_autocomplete_advances_to_use_stage() {
         let app_state = test_app_state();
-        let suggestions = heuristic_tui_suggestions(&app_state, "/model")
-            .expect("model suggestions");
+        let suggestions =
+            heuristic_tui_suggestions(&app_state, "/model").expect("model suggestions");
         let use_index = suggestions
             .iter()
             .position(|item| item.label == "use")
@@ -1288,8 +1556,7 @@ mod tui_output_tests {
     fn tui_mcp_and_computer_show_parameter_hints() {
         let app_state = test_app_state();
 
-        let mcp = heuristic_tui_suggestions(&app_state, "/mcp ")
-            .expect("mcp suggestions");
+        let mcp = heuristic_tui_suggestions(&app_state, "/mcp ").expect("mcp suggestions");
         assert!(mcp.iter().any(|item| item.label == "connect"));
         assert!(mcp.iter().any(|item| item.label == "approve"));
 
@@ -1303,18 +1570,16 @@ mod tui_output_tests {
     fn tui_lism_um_and_swarm_show_subcommand_or_task_hints() {
         let app_state = test_app_state();
 
-        let lism = heuristic_tui_suggestions(&app_state, "/LisM ")
-            .expect("LisM suggestions");
+        let lism = heuristic_tui_suggestions(&app_state, "/LisM ").expect("LisM suggestions");
         assert!(lism.iter().any(|item| item.label == "on"));
         assert!(lism.iter().any(|item| item.label == "status"));
 
-        let um = heuristic_tui_suggestions(&app_state, "/UM ")
-            .expect("UM suggestions");
+        let um = heuristic_tui_suggestions(&app_state, "/UM ").expect("UM suggestions");
         assert!(um.iter().any(|item| item.label == "off"));
         assert!(um.iter().any(|item| item.label == "status"));
 
-        let swarm = heuristic_tui_suggestions(&app_state, "/swarm spawn ")
-            .expect("swarm suggestions");
+        let swarm =
+            heuristic_tui_suggestions(&app_state, "/swarm spawn ").expect("swarm suggestions");
         assert!(swarm.iter().any(|item| {
             item.label == "<teammate_id> <task description>"
                 || item.label == "<name>"
@@ -2033,7 +2298,8 @@ impl RuntimeBootstrap {
 
         if self.cli.interactive {
             if self.cli.tui {
-                self.run_interactive_tui(&router, &engine, &app_state).await?;
+                self.run_interactive_tui(&router, &engine, &app_state)
+                    .await?;
             } else {
                 for line in io::stdin().lock().lines() {
                     let line = line?;
@@ -2157,11 +2423,9 @@ impl RuntimeBootstrap {
                     if input.trim().is_empty() {
                         continue;
                     }
-                    if let Some(completed) = autocomplete_slash_command(
-                        &input,
-                        &suggestions,
-                        selected_suggestion,
-                    ) {
+                    if let Some(completed) =
+                        autocomplete_slash_command(&input, &suggestions, selected_suggestion)
+                    {
                         input = completed;
                         cursor_index = input.chars().count();
                         continue;
@@ -2179,19 +2443,25 @@ impl RuntimeBootstrap {
                     }
 
                     let output = self
-                        .handle_tui_input_with_loading(router, engine, app_state, line, |snapshot| {
-                            let next_document = render_turn_document(snapshot);
-                            if next_document != current_document {
-                                current_document = next_document;
-                                self.print_tui_interactive_frame(
-                                    &current_document,
-                                    "",
-                                    &[],
-                                    0,
-                                    0,
-                                );
-                            }
-                        })
+                        .handle_tui_input_with_loading(
+                            router,
+                            engine,
+                            app_state,
+                            line,
+                            |snapshot| {
+                                let next_document = render_turn_document(snapshot);
+                                if next_document != current_document {
+                                    current_document = next_document;
+                                    self.print_tui_interactive_frame(
+                                        &current_document,
+                                        "",
+                                        &[],
+                                        0,
+                                        0,
+                                    );
+                                }
+                            },
+                        )
                         .await?;
                     current_document = render_turn_document(&output);
                 }
@@ -2206,11 +2476,9 @@ impl RuntimeBootstrap {
                     }
                 }
                 KeyCode::Tab => {
-                    if let Some(completed) = apply_selected_suggestion(
-                        &input,
-                        &suggestions,
-                        selected_suggestion,
-                    ) {
+                    if let Some(completed) =
+                        apply_selected_suggestion(&input, &suggestions, selected_suggestion)
+                    {
                         input = completed;
                         cursor_index = input.chars().count();
                     }
@@ -2260,13 +2528,15 @@ impl RuntimeBootstrap {
         cursor_index: usize,
     ) {
         let mut screen = build_tui_screen(document);
-        screen.prompt = vec![format!(
-            "{} {}",
-            colorize_ansi(">", "1;36"),
-            if input.is_empty() { "" } else { input }
-        )
-        .trim_end()
-        .to_string()];
+        screen.prompt = vec![
+            format!(
+                "{} {}",
+                colorize_ansi(">", "1;36"),
+                if input.is_empty() { "" } else { input }
+            )
+            .trim_end()
+            .to_string(),
+        ];
 
         if input.starts_with('/') {
             let lines = if suggestions.is_empty() {
@@ -2280,10 +2550,12 @@ impl RuntimeBootstrap {
                     })
                     .collect()
             };
-            screen.panels.push(crate::interaction::cli::renderer::TuiPanelSection {
-                title: "Commands".into(),
-                lines,
-            });
+            screen
+                .panels
+                .push(crate::interaction::cli::renderer::TuiPanelSection {
+                    title: "Commands".into(),
+                    lines,
+                });
             screen.footer = vec![
                 "Enter sends | Tab completes | Up/Down selects | Esc clears".into(),
                 "Slash commands and arguments are suggested heuristically from local runtime context.".into(),
@@ -2548,8 +2820,7 @@ impl RuntimeBootstrap {
             active_model_profile_name,
             active_model_level,
             active_model_profile_source,
-        ) =
-            self.build_model_provider_config(&config_root)?;
+        ) = self.build_model_provider_config(&config_root)?;
         validate_provider_config(&provider_config)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let api_client = ModelProviderClient::from_config_with_observability(
@@ -2994,7 +3265,12 @@ impl RuntimeBootstrap {
 
         if has_explicit_provider_env_override() {
             let provider_config = self.build_model_provider_config_from_env()?;
-            return Ok((provider_config, None, None, ActiveModelProfileSource::EnvOverride));
+            return Ok((
+                provider_config,
+                None,
+                None,
+                ActiveModelProfileSource::EnvOverride,
+            ));
         }
 
         let home_root = preferred_home_config_root();
@@ -3008,25 +3284,18 @@ impl RuntimeBootstrap {
 
         if let Some(registry) = merged_registry {
             let resolved = resolve_active_model_profile_from_registry(&registry)?;
-            let source = if workspace_registry
-                .as_ref()
-                .is_some_and(|registry| registry.active_level.is_some() || registry.active.is_some())
-            {
+            let source = if workspace_registry.as_ref().is_some_and(|registry| {
+                registry.active_level.is_some() || registry.active.is_some()
+            }) {
                 ActiveModelProfileSource::WorkspaceModelsToml
-            } else if home_registry
-                .as_ref()
-                .is_some_and(|registry| registry.active_level.is_some() || registry.active.is_some())
-            {
+            } else if home_registry.as_ref().is_some_and(|registry| {
+                registry.active_level.is_some() || registry.active.is_some()
+            }) {
                 ActiveModelProfileSource::HomeModelsToml
             } else {
                 ActiveModelProfileSource::ModelsToml
             };
-            return Ok((
-                resolved.config,
-                Some(resolved.name),
-                resolved.level,
-                source,
-            ));
+            return Ok((resolved.config, Some(resolved.name), resolved.level, source));
         }
 
         let provider_config = self.build_model_provider_config_from_env()?;

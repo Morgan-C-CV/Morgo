@@ -50,10 +50,7 @@ impl Command for DoctorCommand {
         };
         let mut coding_blockers = Vec::new();
         if auth_status.contains("(unset)") {
-            coding_blockers.push(format!(
-                "model/API auth: {}",
-                auth_status
-            ));
+            coding_blockers.push(format!("model/API auth: {}", auth_status));
         } else {
             coding_blockers.push(format!("model/API auth: {}", auth_status));
         }

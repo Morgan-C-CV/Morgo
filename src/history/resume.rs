@@ -1,5 +1,5 @@
-use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use crate::bootstrap::model_profiles::ModelLevel;
+use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
 use crate::history::session::{
     SessionHistory, SessionId, SessionRestoreRequest, SessionSnapshot, SessionStore,
 };
@@ -8,6 +8,10 @@ use crate::state::permission_context::{
     sanitize_external_memory_entries, sanitize_nested_memory_lineage,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static FRESH_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreSource {
@@ -93,7 +97,7 @@ pub fn resolve_session_state(
 
     resolved_from_snapshot(
         SessionSnapshot {
-            session_id: SessionId("local-session".into()),
+            session_id: generate_fresh_session_id(),
             surface: detected_surface,
             session_mode: detected_mode,
             cwd: current_cwd.display().to_string(),
@@ -140,4 +144,18 @@ pub fn surface_binding(surface: InteractionSurface) -> (ClientType, SessionSourc
         InteractionSurface::Telegram => (ClientType::Bot, SessionSource::Telegram),
         InteractionSurface::Remote => (ClientType::RemoteControl, SessionSource::RemoteControl),
     }
+}
+
+fn generate_fresh_session_id() -> SessionId {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let counter = FRESH_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    SessionId(format!(
+        "session-{:x}-{:x}-{:x}",
+        now_ms,
+        std::process::id(),
+        counter
+    ))
 }

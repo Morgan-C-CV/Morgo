@@ -77,7 +77,9 @@ pub fn describe_memory_context(app_state: &AppState) -> String {
     lines.join("\n")
 }
 
-fn effective_history(app_state: &AppState) -> Option<Cow<'_, crate::history::session::SessionHistory>> {
+fn effective_history(
+    app_state: &AppState,
+) -> Option<Cow<'_, crate::history::session::SessionHistory>> {
     let session_id = app_state.current_session_id();
     if let Some(session_store) = app_state.session_store.as_ref() {
         let request = crate::history::session::SessionRestoreRequest {

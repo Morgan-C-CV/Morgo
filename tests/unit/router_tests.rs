@@ -949,7 +949,10 @@ auth_strategy = "none"
         panic!("expected model use result");
     };
     assert!(use_text.contains("Updated workspace model level to high"));
-    assert_eq!(store.load_model_level_override(&app_state.current_session_id()), None);
+    assert_eq!(
+        store.load_model_level_override(&app_state.current_session_id()),
+        None
+    );
 
     let saved = fs::read_to_string(root.join(".claude/models.toml")).expect("read models.toml");
     assert!(saved.contains("active_level = \"high\""));
@@ -1031,7 +1034,10 @@ auth_strategy = "none"
         panic!("expected model clear result");
     };
     assert!(clear_text.contains("Cleared session model override"));
-    assert_eq!(store.load_model_level_override(&app_state.current_session_id()), None);
+    assert_eq!(
+        store.load_model_level_override(&app_state.current_session_id()),
+        None
+    );
 
     let saved = fs::read_to_string(root.join(".claude/models.toml")).expect("read models.toml");
     assert!(saved.contains("active_level = \"low\""));
@@ -1073,7 +1079,8 @@ auth_strategy = "none"
 "#,
     )
     .expect("write models.toml");
-    let app_state = app_state_with_session_root_and_store(&root, Arc::new(InMemorySessionStore::default()));
+    let app_state =
+        app_state_with_session_root_and_store(&root, Arc::new(InMemorySessionStore::default()));
 
     let clear_result = router
         .route(

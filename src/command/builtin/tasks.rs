@@ -187,12 +187,7 @@ impl Command for TasksCommand {
                 &running_tasks,
                 task_manager,
             );
-            push_user_facing_task_section(
-                &mut lines,
-                "Failed tasks:",
-                &failed_tasks,
-                task_manager,
-            );
+            push_user_facing_task_section(&mut lines, "Failed tasks:", &failed_tasks, task_manager);
             push_user_facing_task_section(
                 &mut lines,
                 "Stopped tasks:",

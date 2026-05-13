@@ -374,7 +374,10 @@ fn context_prompt_uses_session_store_history_when_app_state_history_is_empty() {
     let prompt = rust_agent::prompt::context::build_context_prompt(&app_state);
 
     assert!(prompt.contains("- history_entries: 1"), "{prompt}");
-    assert!(prompt.contains("assistant: restored from store"), "{prompt}");
+    assert!(
+        prompt.contains("assistant: restored from store"),
+        "{prompt}"
+    );
     assert!(prompt.contains("src/store.rs"), "{prompt}");
 }
 

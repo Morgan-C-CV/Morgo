@@ -2145,7 +2145,18 @@ fn resolve_session_state_reuses_store_for_continue_resume_and_fresh_start() {
         SessionMode::InitOnly,
         std::path::Path::new("/tmp/fresh-start"),
     );
-    assert_eq!(fresh.snapshot.session_id.0, "local-session");
+    let fresh_again = resolve_session_state(
+        &store,
+        None,
+        InteractionSurface::Cli,
+        SessionMode::InitOnly,
+        std::path::Path::new("/tmp/fresh-start-2"),
+    );
+    assert_ne!(fresh.snapshot.session_id.0, "local-session");
+    assert_ne!(
+        fresh.snapshot.session_id.0,
+        fresh_again.snapshot.session_id.0
+    );
     assert_eq!(fresh.snapshot.surface, InteractionSurface::Cli);
     assert_eq!(fresh.snapshot.session_mode, SessionMode::InitOnly);
     assert!(fresh.history.entries.is_empty());
@@ -2688,6 +2699,109 @@ fn persist_current_session_state_commits_all_fields_in_one_record_write() {
     );
 
     std::fs::remove_dir_all(root).expect("cleanup current aggregate test store");
+}
+
+#[test]
+fn persist_current_session_state_preserves_store_appends_instead_of_rewriting_stale_history() {
+    let root = unique_temp_path("rust-agent-persist-current-history-monotonic");
+    let store = Arc::new(FileBackedSessionStore::new(root.clone()));
+    let session_id = SessionId("session-current-history-monotonic".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/current-history".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    let stale_history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::assistant("before append"),
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: None,
+        }],
+    };
+    store
+        .save(snapshot.clone(), stale_history.clone())
+        .expect("seed session");
+    store
+        .append_entry(
+            &session_id,
+            SessionHistoryEntry {
+                message: Message::assistant("after append"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+        )
+        .expect("append latest history entry");
+
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: rust_agent::bootstrap::ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default)
+            .with_active_session_id(session_id.0.clone())
+            .with_active_surface(InteractionSurface::Cli),
+        command_registry: None,
+        runtime_tool_registry: None,
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: rust_agent::cost::tracker::CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: rust_agent::interaction::dispatcher::NotificationDispatcher::new(
+            rust_agent::interaction::telegram::gateway::TelegramGateway::default(),
+        ),
+        audit_log: Arc::new(std::sync::Mutex::new(
+            rust_agent::security::audit::AuditLog::default(),
+        )),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "none".into(),
+        },
+        active_session_id: session_id.0.clone(),
+        session_store: Some(store.clone()),
+        session: Some(snapshot.clone()),
+        history: Some(stale_history),
+        restored_session: None,
+        last_activity_ts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: None,
+    };
+
+    assert_eq!(app_state.persist_current_session_state(), Ok(()));
+
+    let (_, persisted_history) = store
+        .load(&SessionRestoreRequest {
+            resume: Some(session_id.0.clone()),
+            continue_session: false,
+        })
+        .expect("persisted session should still exist");
+    let persisted_messages: Vec<_> = persisted_history
+        .entries
+        .into_iter()
+        .map(|entry| entry.message.text())
+        .collect();
+    assert_eq!(persisted_messages, vec!["before append", "after append"]);
+
+    std::fs::remove_dir_all(root).expect("cleanup monotonic current-history test store");
 }
 
 #[test]
@@ -3504,7 +3618,8 @@ async fn runtime_initializes_fresh_session_record_in_store() {
         continue_session: true,
     });
     let (snapshot, history) = loaded.expect("expected initialized session record");
-    assert_eq!(snapshot.session_id.0, "local-session");
+    assert_ne!(snapshot.session_id.0, "local-session");
+    assert!(!snapshot.session_id.0.trim().is_empty());
     assert_eq!(snapshot.surface, InteractionSurface::Cli);
     assert_eq!(snapshot.session_mode, SessionMode::InitOnly);
     assert!(history.entries.is_empty());

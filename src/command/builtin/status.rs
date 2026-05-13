@@ -165,15 +165,9 @@ impl Command for StatusCommand {
                     .unwrap_or("none"),
             ),
             OutputBlock::kv("cost", app_state.cost_tracker.format_report()),
-            OutputBlock::kv(
-                "active_model_profile",
-                active_model_profile,
-            ),
+            OutputBlock::kv("active_model_profile", active_model_profile),
             OutputBlock::kv("active_model_level", active_model_level),
-            OutputBlock::kv(
-                "active_model_source",
-                active_model_source,
-            ),
+            OutputBlock::kv("active_model_source", active_model_source),
             OutputBlock::kv(
                 "active_model_summary",
                 format!(
@@ -516,23 +510,20 @@ impl Command for StatusCommand {
 
         let blocks = vec![
             OutputBlock::text("Status"),
-            OutputBlock::section(
-                "Working status",
-                {
-                    let mode_summary = if let Some(pending) = pending_approval {
-                        format!(
-                            "{permission_mode} | pending approval: {} ({})",
-                            pending.tool_name, pending.message
-                        )
-                    } else {
-                        permission_mode.to_string()
-                    };
-                    vec![
-                        OutputBlock::kv("cwd", cwd.display().to_string()),
-                        OutputBlock::kv("mode", mode_summary),
-                    ]
-                },
-            ),
+            OutputBlock::section("Working status", {
+                let mode_summary = if let Some(pending) = pending_approval {
+                    format!(
+                        "{permission_mode} | pending approval: {} ({})",
+                        pending.tool_name, pending.message
+                    )
+                } else {
+                    permission_mode.to_string()
+                };
+                vec![
+                    OutputBlock::kv("cwd", cwd.display().to_string()),
+                    OutputBlock::kv("mode", mode_summary),
+                ]
+            }),
             OutputBlock::text("Diagnostics:"),
             OutputBlock::section("Runtime", runtime_items),
             OutputBlock::section("Observability", obs_items),

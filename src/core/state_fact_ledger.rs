@@ -1624,7 +1624,8 @@ pub fn build_step_fact_ledgers_with_mode(
         }
     }
 
-    if blind_review && step.completed
+    if blind_review
+        && step.completed
         && step
             .acceptance
             .iter()

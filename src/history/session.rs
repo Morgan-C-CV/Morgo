@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::bootstrap::model_profiles::ModelLevel;
+use crate::bootstrap::{InteractionSurface, SessionMode};
 use crate::core::events::SessionMilestone;
 use crate::core::message::Message;
 use crate::plan::types::PlanState;

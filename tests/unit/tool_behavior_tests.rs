@@ -285,9 +285,7 @@ async fn read_tool_result_shape_stays_locatable_truncation_aware_and_failure_exp
         "successful read should include stable file location context; text={full_text:?}"
     );
     assert!(
-        full_text.contains("line")
-            || full_text.contains("offset=")
-            || full_text.contains("range="),
+        full_text.contains("line") || full_text.contains("offset=") || full_text.contains("range="),
         "successful read should include line/range/offset-style locator, not just bare contents; text={full_text:?}"
     );
     assert!(
@@ -1014,7 +1012,9 @@ async fn registry_denies_unsafe_bash_in_plan_mode() {
 
     assert_eq!(
         denied,
-        ToolResult::Denied("bash command denied [plan_mode]: command is not allowed in plan mode".into())
+        ToolResult::Denied(
+            "bash command denied [plan_mode]: command is not allowed in plan mode".into()
+        )
     );
 }
 
@@ -1098,7 +1098,11 @@ async fn bash_tool_pending_approval_and_denied_copy_stay_distinguishable() {
         approval.summary
     );
     assert!(
-        approval.detail.as_deref().unwrap_or_default().contains("command"),
+        approval
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("command"),
         "approval detail should preserve command-context reasoning; detail={:?}",
         approval.detail
     );

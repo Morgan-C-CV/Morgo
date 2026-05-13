@@ -57,9 +57,8 @@ impl Command for HelpCommand {
             "Available commands:".to_string(),
             "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category] [sensitive] [model_invocation=disabled] [immediate]".to_string(),
         ];
-        let (coding_commands, advanced_commands): (Vec<_>, Vec<_>) = metadata
-            .into_iter()
-            .partition(is_coding_command);
+        let (coding_commands, advanced_commands): (Vec<_>, Vec<_>) =
+            metadata.into_iter().partition(is_coding_command);
 
         append_command_section(&mut lines, "Coding commands:", &coding_commands);
         append_command_section(&mut lines, "Advanced commands:", &advanced_commands);
@@ -93,18 +92,14 @@ impl Command for HelpCommand {
 
 fn is_coding_command(command: &CommandMetadata) -> bool {
     match command.name.as_str() {
-        "help" | "permissions" | "resume" | "tasks" | "plan" | "status" | "session"
-        | "model" | "compact" => true,
+        "help" | "permissions" | "resume" | "tasks" | "plan" | "status" | "session" | "model"
+        | "compact" => true,
         "plugins" | "swarm" | "LisM" | "UM" | "skills" | "computer" => false,
         _ => command.source == CommandSource::Coding,
     }
 }
 
-fn append_command_section(
-    lines: &mut Vec<String>,
-    title: &str,
-    commands: &[CommandMetadata],
-) {
+fn append_command_section(lines: &mut Vec<String>, title: &str, commands: &[CommandMetadata]) {
     if commands.is_empty() {
         return;
     }

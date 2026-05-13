@@ -182,7 +182,11 @@ impl Tool for BashTool {
 
         match classify_bash_command(&input.command) {
             ClassifierDecision::Deny { code, warning } => {
-                return bash_deny(code, &warning, crate::tool::definition::PermissionDecisionReason::Safety);
+                return bash_deny(
+                    code,
+                    &warning,
+                    crate::tool::definition::PermissionDecisionReason::Safety,
+                );
             }
             ClassifierDecision::Ask { code, warning } => {
                 return bash_ask(

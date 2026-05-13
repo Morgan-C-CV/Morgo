@@ -15,8 +15,8 @@ use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
 use rust_agent::interaction::cli::renderer::{
-    build_tui_loading_screen, build_tui_screen, render_document_output,
-    render_document_tui_output, render_turn_document, render_turn_output,
+    build_tui_loading_screen, build_tui_screen, render_document_output, render_document_tui_output,
+    render_turn_document, render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
@@ -481,8 +481,7 @@ fn cli_renderer_approval_panel_keeps_reason_and_actions_structurally_separate_fr
         .iter()
         .find_map(|block| match block {
             rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
-                if panel.kind
-                    == rust_agent::interaction::cli::renderer::PanelKind::Approval =>
+                if panel.kind == rust_agent::interaction::cli::renderer::PanelKind::Approval =>
             {
                 Some(panel)
             }
@@ -516,8 +515,7 @@ fn cli_renderer_approval_panel_keeps_reason_and_actions_structurally_separate_fr
 
     let rendered = render_turn_output(&turn);
     assert!(
-        rendered.contains("== Approval required ==")
-            && rendered.contains("[panel:approval]"),
+        rendered.contains("== Approval required ==") && rendered.contains("[panel:approval]"),
         "approval panel should remain structurally distinct from plain assistant prose; rendered={rendered:?}"
     );
     assert!(
@@ -546,8 +544,7 @@ fn cli_renderer_bash_result_panel_surfaces_command_exit_code_and_output_sections
         .iter()
         .find_map(|block| match block {
             rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
-                if panel.kind
-                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+                if panel.kind == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
             {
                 Some(panel)
             }
@@ -562,7 +559,10 @@ fn cli_renderer_bash_result_panel_surfaces_command_exit_code_and_output_sections
         bash_panel.lines
     );
     assert!(
-        bash_panel.lines.iter().any(|line| line.starts_with("Command: ")),
+        bash_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Command: ")),
         "bash result panel should surface the command on its own labeled line; lines={:?}",
         bash_panel.lines
     );
@@ -575,10 +575,10 @@ fn cli_renderer_bash_result_panel_surfaces_command_exit_code_and_output_sections
         bash_panel.lines
     );
     assert!(
-        bash_panel
-            .lines
-            .iter()
-            .any(|line| line == "stdout:" || line == "stderr:" || line.starts_with("stdout: ") || line.starts_with("stderr: ")),
+        bash_panel.lines.iter().any(|line| line == "stdout:"
+            || line == "stderr:"
+            || line.starts_with("stdout: ")
+            || line.starts_with("stderr: ")),
         "bash result panel should surface stdout/stderr as structured output sections; lines={:?}",
         bash_panel.lines
     );
@@ -612,8 +612,7 @@ fn cli_renderer_read_result_panel_surfaces_path_offset_returned_chars_and_trunca
         .iter()
         .find_map(|block| match block {
             rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
-                if panel.kind
-                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+                if panel.kind == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
             {
                 Some(panel)
             }
@@ -628,12 +627,18 @@ fn cli_renderer_read_result_panel_surfaces_path_offset_returned_chars_and_trunca
         read_panel.lines
     );
     assert!(
-        read_panel.lines.iter().any(|line| line.starts_with("Path: ")),
+        read_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Path: ")),
         "read result panel should surface the path on its own labeled line; lines={:?}",
         read_panel.lines
     );
     assert!(
-        read_panel.lines.iter().any(|line| line.starts_with("Offset: ")),
+        read_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Offset: ")),
         "read result panel should surface the offset on its own labeled line; lines={:?}",
         read_panel.lines
     );
@@ -675,8 +680,7 @@ fn cli_renderer_edit_result_panel_surfaces_path_replacements_replace_all_and_tex
         .iter()
         .find_map(|block| match block {
             rust_agent::interaction::cli::renderer::RenderBlock::Panel(panel)
-                if panel.kind
-                    == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
+                if panel.kind == rust_agent::interaction::cli::renderer::PanelKind::ToolResult =>
             {
                 Some(panel)
             }
@@ -691,7 +695,10 @@ fn cli_renderer_edit_result_panel_surfaces_path_replacements_replace_all_and_tex
         edit_panel.lines
     );
     assert!(
-        edit_panel.lines.iter().any(|line| line.starts_with("Path: ")),
+        edit_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Path: ")),
         "edit result panel should surface the path on its own labeled line; lines={:?}",
         edit_panel.lines
     );
@@ -712,12 +719,18 @@ fn cli_renderer_edit_result_panel_surfaces_path_replacements_replace_all_and_tex
         edit_panel.lines
     );
     assert!(
-        edit_panel.lines.iter().any(|line| line.starts_with("Old text: ")),
+        edit_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("Old text: ")),
         "edit result panel should surface old_text on its own labeled line; lines={:?}",
         edit_panel.lines
     );
     assert!(
-        edit_panel.lines.iter().any(|line| line.starts_with("New text: ")),
+        edit_panel
+            .lines
+            .iter()
+            .any(|line| line.starts_with("New text: ")),
         "edit result panel should surface new_text on its own labeled line; lines={:?}",
         edit_panel.lines
     );
@@ -1033,9 +1046,7 @@ fn cli_renderer_tui_screen_filters_assistant_delta_runtime_noise() {
     let turn = CliTurnOutput {
         primary_text: "final answer".into(),
         events: vec![
-            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
-                text: "版".into(),
-            }),
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text: "版".into() }),
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
                 text: "实现".into(),
             }),
@@ -1090,7 +1101,12 @@ fn cli_renderer_builds_tui_loading_screen_with_visible_running_state() {
             .iter()
             .any(|line| line.contains("Request: compare the current tui implementation"))
     );
-    assert_eq!(screen.prompt.first().map(String::as_str), Some("> waiting for response: compare the current tui implementation with docs and fix loading state"));
+    assert_eq!(
+        screen.prompt.first().map(String::as_str),
+        Some(
+            "> waiting for response: compare the current tui implementation with docs and fix loading state"
+        )
+    );
 }
 
 #[test]
@@ -1343,7 +1359,9 @@ async fn cli_help_default_sections_defer_legacy_capabilities_after_coding_comman
         .expect("advanced section anchor present");
 
     for legacy in ["/plugins", "/swarm", "/LisM", "/UM"] {
-        let idx = text.find(legacy).unwrap_or_else(|| panic!("expected {legacy} in help text"));
+        let idx = text
+            .find(legacy)
+            .unwrap_or_else(|| panic!("expected {legacy} in help text"));
         assert!(
             idx > advanced_anchor,
             "{legacy} should be deferred into an advanced/legacy section instead of the default coding section; text={text}"
@@ -1406,8 +1424,7 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         primary_text: String::new(),
         events: vec![],
     }));
-    let loading_screen =
-        build_tui_loading_screen("run the verification command after approval", 1);
+    let loading_screen = build_tui_loading_screen("run the verification command after approval", 1);
 
     assert_eq!(
         screen.main.first().map(String::as_str),
@@ -1429,10 +1446,19 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         screen.main
     );
 
-    assert_eq!(screen.panels.len(), 2, "screen should keep approval and task update distinct, while suppressing low-signal read results: panels={:?}", screen.panels);
+    assert_eq!(
+        screen.panels.len(),
+        2,
+        "screen should keep approval and task update distinct, while suppressing low-signal read results: panels={:?}",
+        screen.panels
+    );
     assert_eq!(screen.panels[0].title, "Approval required");
     assert_eq!(screen.panels[1].title, "Task update");
-    assert!(screen.footer.is_empty(), "footer should stay empty in the streamlined TUI; footer={:?}", screen.footer);
+    assert!(
+        screen.footer.is_empty(),
+        "footer should stay empty in the streamlined TUI; footer={:?}",
+        screen.footer
+    );
     assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
 
     assert!(rendered.contains("[Approval required]"), "{rendered}");
@@ -1497,7 +1523,11 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(screen.footer.is_empty(), "streamlined TUI should not render footer/status metadata; footer={:?}", screen.footer);
+    assert!(
+        screen.footer.is_empty(),
+        "streamlined TUI should not render footer/status metadata; footer={:?}",
+        screen.footer
+    );
 
     assert!(
         !main_text.contains("cwd:")
@@ -1519,7 +1549,9 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
             && !panel_titles.contains("Mode:")
             && !panel_titles.contains("permission:")
             && !panel_titles.contains("Permission:")
-            && !panel_titles.to_ascii_lowercase().contains("pending approval"),
+            && !panel_titles
+                .to_ascii_lowercase()
+                .contains("pending approval"),
         "footer/status metadata should not leak into panel titles; panel_titles={:?}",
         screen.panels
     );
@@ -1530,9 +1562,8 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
 fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
     let loading_screen =
         build_tui_loading_screen("run verification after reviewing the current diff", 0);
-    let loading_rendered = rust_agent::interaction::cli::renderer::render_tui_screen_output(
-        &loading_screen,
-    );
+    let loading_rendered =
+        rust_agent::interaction::cli::renderer::render_tui_screen_output(&loading_screen);
 
     let approval_turn = CliTurnOutput {
         primary_text: String::new(),
@@ -1570,9 +1601,7 @@ fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
             worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
             orchestration_group_id: Some("group-role-1".into()),
             phase: Some(rust_agent::task::types::WorkerPhase::Verify),
-            validation_state: Some(
-                rust_agent::task::types::ValidationState::PendingVerification,
-            ),
+            validation_state: Some(rust_agent::task::types::ValidationState::PendingVerification),
             step_id: None,
             output_file: "/tmp/task-role-1.log".into(),
             usage: None,
@@ -1635,9 +1664,7 @@ fn cli_tui_panel_order_prioritizes_approval_over_tool_results_and_tasks() {
         worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
         orchestration_group_id: Some("group-panel-order".into()),
         phase: Some(rust_agent::task::types::WorkerPhase::Verify),
-        validation_state: Some(
-            rust_agent::task::types::ValidationState::PendingVerification,
-        ),
+        validation_state: Some(rust_agent::task::types::ValidationState::PendingVerification),
         step_id: None,
         output_file: "/tmp/task-panel-order-1.log".into(),
         usage: None,
@@ -1701,18 +1728,12 @@ fn cli_tui_panel_order_prioritizes_approval_over_tool_results_and_tasks() {
 
     assert_eq!(
         titles_a,
-        vec![
-            "Approval required".to_string(),
-            "Task update".to_string(),
-        ],
+        vec!["Approval required".to_string(), "Task update".to_string(),],
         "panel priority should keep approval above task panels regardless of event order; titles_a={titles_a:?}"
     );
     assert_eq!(
         titles_b,
-        vec![
-            "Approval required".to_string(),
-            "Task update".to_string(),
-        ],
+        vec!["Approval required".to_string(), "Task update".to_string(),],
         "panel priority should stay stable even when the input event order changes; titles_b={titles_b:?}"
     );
     assert!(screen_a.footer.is_empty() && screen_b.footer.is_empty());

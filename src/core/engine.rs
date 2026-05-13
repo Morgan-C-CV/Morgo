@@ -49,9 +49,12 @@ impl QueryEngine {
 
     pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {
         let user_input = input.clone();
-        let mut result =
-            run_query_loop_with_params(&self.context, input, query_params_for_input(&user_input))
-                .await;
+        let mut result = run_query_loop_with_params(
+            &self.context,
+            input,
+            self.query_params_for_input(&user_input),
+        )
+        .await;
         result.events = self.persist_turn(user_input, result.events.clone());
         result
     }
@@ -209,6 +212,19 @@ impl QueryEngine {
 
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
         Message::assistant(event.format_notification())
+    }
+
+    fn query_params_for_input(&self, input: &Message) -> QueryParams {
+        let mut params = query_params_for_input(input);
+        params.messages = self
+            .context
+            .app_state
+            .canonical_session_history()
+            .entries
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect();
+        params
     }
 }
 
