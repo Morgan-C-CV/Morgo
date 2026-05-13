@@ -5,8 +5,28 @@ use crate::command::types::{
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
+use crate::task::types::{TaskRecord, TaskStatus};
 
 pub struct TasksCommand;
+
+fn push_user_facing_task_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    tasks: &[TaskRecord],
+    task_manager: &crate::task::manager::TaskManager,
+) {
+    if tasks.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(title.to_string());
+    for task in tasks {
+        lines.push(format!("- [{}] {}", task.id, task.description));
+        lines.push(format!("  status: {:?}", task.status));
+        lines.push(format!("  next: {}", task_manager.task_hint(task)));
+    }
+}
 
 #[async_trait]
 impl Command for TasksCommand {
@@ -85,6 +105,21 @@ impl Command for TasksCommand {
                     )
                     .or_insert(0) += 1;
             }
+            let running_tasks = tasks
+                .iter()
+                .filter(|task| matches!(task.status, TaskStatus::Running | TaskStatus::Pending))
+                .cloned()
+                .collect::<Vec<_>>();
+            let failed_tasks = tasks
+                .iter()
+                .filter(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Killed))
+                .cloned()
+                .collect::<Vec<_>>();
+            let completed_tasks = tasks
+                .iter()
+                .filter(|task| matches!(task.status, TaskStatus::Completed))
+                .cloned()
+                .collect::<Vec<_>>();
 
             let mut lines = vec![
                 "Agent Tasks:".to_string(),
@@ -131,6 +166,24 @@ impl Command for TasksCommand {
                 verification_waiting_groups,
                 fan_in_ready_groups
             ));
+            push_user_facing_task_section(
+                &mut lines,
+                "Running tasks:",
+                &running_tasks,
+                task_manager,
+            );
+            push_user_facing_task_section(
+                &mut lines,
+                "Failed tasks:",
+                &failed_tasks,
+                task_manager,
+            );
+            push_user_facing_task_section(
+                &mut lines,
+                "Completed tasks:",
+                &completed_tasks,
+                task_manager,
+            );
 
             if !groups.is_empty() {
                 lines.push(String::new());

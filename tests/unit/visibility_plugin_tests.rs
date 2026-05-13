@@ -1730,6 +1730,76 @@ async fn tasks_command_groups_orchestration_tasks_and_hints() {
     assert!(!rendered.contains("[panel:"));
 }
 
+#[tokio::test]
+async fn cli_tasks_summary_distinguishes_running_failed_and_completed_with_output_hints() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let running = manager.create("stream logs", "test-session", InteractionSurface::Cli);
+    manager.start(&running.id);
+
+    let failed = manager.create("run failing verification", "test-session", InteractionSurface::Cli);
+    manager.append_output(&failed.id, "verification failed\n");
+    manager.fail(&failed.id, &dispatcher);
+
+    let completed = manager.create("finish repair", "test-session", InteractionSurface::Cli);
+    manager.append_output(&completed.id, "repair succeeded\n");
+    manager.complete(&completed.id, &dispatcher);
+
+    let app_state = test_app_state(None, Some(manager), None, None);
+    let result = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
+        .await
+        .expect("tasks command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+
+    assert!(
+        text.contains("Running tasks:")
+            || text.contains("Active tasks:")
+            || text.contains("In progress:"),
+        "/tasks should foreground running work with a dedicated user-facing state section instead of only internal field dumps; text={text}"
+    );
+    assert!(
+        text.contains("Failed tasks:") || text.contains("Needs attention:"),
+        "/tasks should give failed work a distinct section or equivalent user-facing grouping; text={text}"
+    );
+    assert!(
+        text.contains("Completed tasks:") || text.contains("Finished tasks:"),
+        "/tasks should give completed work a distinct section or equivalent user-facing grouping; text={text}"
+    );
+    assert!(
+        text.contains("inspect task output for task-1")
+            || text.contains("inspect task output for task-2")
+            || text.to_ascii_lowercase().contains("task output"),
+        "/tasks should tell the user where to inspect output for completed or failed tasks; text={text}"
+    );
+
+    let running_anchor = text
+        .find("Running tasks:")
+        .or_else(|| text.find("Active tasks:"))
+        .or_else(|| text.find("In progress:"))
+        .expect("running section should be present");
+    let failed_anchor = text
+        .find("Failed tasks:")
+        .or_else(|| text.find("Needs attention:"))
+        .expect("failed section should be present");
+    let completed_anchor = text
+        .find("Completed tasks:")
+        .or_else(|| text.find("Finished tasks:"))
+        .expect("completed section should be present");
+
+    assert!(
+        running_anchor < failed_anchor || running_anchor < completed_anchor,
+        "/tasks should present current running work before terminal-task details; text={text}"
+    );
+}
+
 #[test]
 fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     let root = unique_temp_path("rust-agent-plugin-loader");
