@@ -18,7 +18,9 @@ use rust_agent::interaction::cli::renderer::{
     build_tui_loading_screen, build_tui_screen, render_document_output, render_document_tui_output,
     render_turn_document, render_turn_output,
 };
-use rust_agent::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
+use rust_agent::interaction::cli::repl::{
+    CliDisplayEvent, CliRuntimeEvent, CliTurnOutput, handle_normalized_input_streaming,
+};
 use rust_agent::interaction::dispatcher::NotificationDispatcher;
 use rust_agent::interaction::envelope::NormalizedInput;
 use rust_agent::interaction::notification::{Notification, NotificationTarget, NotificationType};
@@ -3037,6 +3039,93 @@ async fn telegram_runtime_entry_routes_authorized_input_into_shared_runtime_and_
         history.entries[1].message,
         rust_agent::core::message::Message::assistant("telegram runtime reply")
     );
+}
+
+#[tokio::test]
+async fn telegram_surface_streaming_callback_receives_incremental_updates() {
+    let command_registry =
+        Arc::new(CommandRegistry::new().register(Arc::new(TelegramPromptCommand)));
+    let router = rust_agent::interaction::router::CommandRouter::new(
+        command_registry.clone(),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let gateway = TelegramGateway {
+        allowed_bindings: vec![SessionBinding {
+            actor_id: "actor-1".into(),
+            session_id: "telegram-runtime-session".into(),
+            telegram_user_id: Some("user-1".into()),
+            bot_id: Some("bot-1".into()),
+            delivery_target: Some(TelegramDeliveryTarget {
+                chat_id: "chat-1".into(),
+                thread_id: Some("thread-1".into()),
+            }),
+        }],
+        surface_authorizer: DefaultSurfaceAuthorizer::default(),
+    };
+    let app_state = telegram_test_app_state(
+        command_registry,
+        gateway,
+        session_store,
+        "telegram-runtime-session",
+    );
+    let mut engine =
+        rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
+            app_state: app_state.clone(),
+            tool_registry: ToolRegistry::new(),
+            api_client: ModelProviderClient::with_scripted_turns(vec![vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("tele".into()),
+                StreamEvent::TextDelta("gram".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]]),
+            compactor: ReactiveCompactor,
+            hook_registry: rust_agent::hook::registry::HookRegistry::default(),
+            agent_id: None,
+            system_prompt: "test system".into(),
+            tools_prompt: "test tools".into(),
+            context_prompt: "test context".into(),
+        });
+    let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let update_sink = Arc::clone(&updates);
+
+    let output = handle_normalized_input_streaming(
+        &router,
+        &mut engine,
+        &app_state,
+        NormalizedInput::from_telegram_raw(
+            "telegram-runtime-session",
+            "actor-1",
+            true,
+            "/telegram-prompt run",
+        ),
+        move |turn| {
+            update_sink
+                .lock()
+                .expect("updates mutex should not be poisoned")
+                .push(turn.clone());
+        },
+    )
+    .await
+    .expect("telegram streaming callback path should succeed");
+
+    let updates = updates
+        .lock()
+        .expect("updates mutex should not be poisoned")
+        .clone();
+    assert!(updates.len() >= 3, "expected incremental telegram updates");
+    assert!(matches!(
+        updates.first().and_then(|turn| turn.events.first()),
+        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "tele"
+    ));
+    assert!(matches!(
+        updates.get(1).and_then(|turn| turn.events.get(1)),
+        Some(CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text })) if text == "gram"
+    ));
+    assert!(updates.iter().any(|turn| turn.primary_text == "telegram"));
+    assert_eq!(output.primary_text, "telegram");
 }
 
 #[tokio::test]
