@@ -1,4 +1,4 @@
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -420,6 +420,20 @@ fn render_command_suggestion_line(command: &CommandMetadata, selected: bool) -> 
 
 fn colorize_ansi(text: &str, code: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+fn normalize_tui_newlines(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
+#[cfg(test)]
+mod tui_output_tests {
+    use super::normalize_tui_newlines;
+
+    #[test]
+    fn tui_newlines_are_crlf_normalized() {
+        assert_eq!(normalize_tui_newlines("a\nb\nc"), "a\r\nb\r\nc");
+    }
 }
 
 fn preview_chars(value: &str, max_chars: usize) -> &str {
@@ -1150,16 +1164,15 @@ impl RuntimeBootstrap {
 
     fn print_cli_turn_output(&self, output: &CliTurnOutput) {
         let document = render_turn_document(output);
-        let rendered = if self.cli.tui {
-            format!(
+        if self.cli.tui {
+            self.write_tui_frame(format!(
                 "{}{}",
                 tui_clear_screen_prefix(),
                 render_document_tui_output(&document)
-            )
+            ));
         } else {
-            render_document_output(&document)
-        };
-        println!("{rendered}");
+            println!("{}", render_document_output(&document));
+        }
     }
 
     fn print_tui_welcome(&self) {
@@ -1167,12 +1180,11 @@ impl RuntimeBootstrap {
             primary_text: String::new(),
             events: vec![],
         });
-        let rendered = format!(
+        self.write_tui_frame(format!(
             "{}{}",
             tui_clear_screen_prefix(),
             render_document_tui_output(&document)
-        );
-        println!("{rendered}");
+        ));
     }
 
     fn print_tui_message(&self, message: &str) {
@@ -1181,21 +1193,19 @@ impl RuntimeBootstrap {
             events: vec![],
         }));
         screen.footer = vec![message.to_string()];
-        let rendered = format!(
+        self.write_tui_frame(format!(
             "{}{}",
             tui_clear_screen_prefix(),
             render_tui_screen_output(&screen)
-        );
-        println!("{rendered}");
+        ));
     }
 
     fn print_tui_loading_frame(&self, request: &str, frame_index: usize) {
-        let rendered = format!(
+        self.write_tui_frame(format!(
             "{}{}",
             tui_clear_screen_prefix(),
             render_tui_screen_output(&build_tui_loading_screen(request, frame_index))
-        );
-        println!("{rendered}");
+        ));
     }
 
     async fn handle_tui_input_with_loading(
@@ -1355,12 +1365,19 @@ impl RuntimeBootstrap {
             ];
         }
 
-        let rendered = format!(
+        self.write_tui_frame(format!(
             "{}{}",
             tui_clear_screen_prefix(),
             render_tui_screen_output(&screen)
-        );
-        println!("{rendered}");
+        ));
+    }
+
+    fn write_tui_frame(&self, rendered: String) {
+        let normalized = normalize_tui_newlines(&rendered);
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(normalized.as_bytes());
+        let _ = stdout.write_all(b"\r\n");
+        let _ = stdout.flush();
     }
 
     fn should_exit_tui_input(&self, input: &str) -> bool {
