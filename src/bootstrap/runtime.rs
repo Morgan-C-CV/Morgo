@@ -5,10 +5,11 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use base64::Engine as _;
 use clap::Parser;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind, poll, read,
+    MouseButton, MouseEventKind, poll, read,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -28,10 +29,8 @@ use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, Sessi
 use crate::command::registry::CommandRegistry;
 use crate::command::types::{CommandMetadata, CommandSource};
 use crate::core::boss::BossCoordinator;
-use crate::core::boss::save_plan;
 use crate::core::boss_runtime::BossRuntimeHost;
 use crate::core::boss_state::BossLisMPolicy;
-use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus};
 use crate::core::context::{QueryContext, WorkerLisMPolicy};
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
@@ -45,9 +44,8 @@ use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    RenderBlock, RenderDocument, build_tui_loading_screen, build_tui_screen,
-    render_document_output, render_document_tui_output, render_output, render_tui_screen_output,
-    render_turn_document,
+    RenderBlock, RenderDocument, build_tui_screen, render_document_output,
+    render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{
     CliTurnOutput, handle_cli_input, handle_cli_input_streaming, handle_normalized_input,
@@ -322,19 +320,87 @@ struct TuiWheelAccelState {
     direction: i8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TuiDocumentPosition {
+    line: usize,
+    unit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TuiSelectionMode {
+    #[default]
+    Char,
+    Word,
+    Line,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TuiSelectionState {
+    anchor: Option<TuiDocumentPosition>,
+    focus: Option<TuiDocumentPosition>,
+    mode: TuiSelectionMode,
+    dragging: bool,
+}
+
+impl TuiSelectionState {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TuiClickState {
+    last_down: Option<(u16, u16, Instant)>,
+    count: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiSourceCell {
+    ch: char,
+    start_col: usize,
+    end_col: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiCell {
+    ch: char,
+    start_col: usize,
+    end_col: usize,
+    style: String,
+    source_unit_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiRenderedLine {
+    source_text: String,
+    source_cells: Vec<TuiSourceCell>,
+    rendered_cells: Vec<TuiCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TuiRenderedContent {
+    lines: Vec<TuiRenderedLine>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TuiLayoutMetrics {
+    content_height: usize,
+    status_row: usize,
+    model_row: usize,
+    input_row: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum TuiTurnStatus {
     Idle,
     Working(Duration),
     Worked(Duration),
-    Selection,
     ExitHint(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiExitGesture {
     Esc,
-    CmdC,
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -1257,12 +1323,12 @@ fn default_command_priority(command: &CommandMetadata) -> i32 {
 fn autocomplete_slash_command(
     input: &str,
     suggestions: &[TuiSuggestion],
-    selected_suggestion: usize,
+    selected_suggestion: Option<usize>,
 ) -> Option<String> {
     if !input.starts_with('/') {
         return None;
     }
-    let selected = suggestions.get(selected_suggestion)?;
+    let selected = suggestions.get(selected_suggestion?)?;
     let current = input.trim_end();
     let replacement = selected.replacement.trim_end();
     if replacement == current || !replacement.starts_with(current) {
@@ -1275,13 +1341,13 @@ fn autocomplete_slash_command(
 fn apply_selected_suggestion(
     input: &str,
     suggestions: &[TuiSuggestion],
-    selected_suggestion: usize,
+    selected_suggestion: Option<usize>,
 ) -> Option<String> {
     if !input.starts_with('/') {
         return None;
     }
     suggestions
-        .get(selected_suggestion)
+        .get(selected_suggestion?)
         .map(|suggestion| suggestion.replacement.clone())
 }
 
@@ -1461,10 +1527,6 @@ fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> Tu
     }
 }
 
-fn display_width_for_chars(chars: &[char]) -> usize {
-    chars.iter().map(|ch| tui_char_display_width(*ch)).sum()
-}
-
 fn move_tui_cursor_vertically(
     input: &str,
     cursor_index: usize,
@@ -1515,9 +1577,6 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
             let right = available.saturating_sub(left);
             format!("{}{}{}", "─".repeat(left), label, "─".repeat(right))
         }
-        TuiTurnStatus::Selection => {
-            "• Selection mode (drag to select and copy • esc to return)".to_string()
-        }
         TuiTurnStatus::ExitHint(gesture) => {
             format!("• Press {gesture} again to exit")
         }
@@ -1525,22 +1584,9 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
     colorize_ansi(&base, "2;37")
 }
 
-fn set_tui_mouse_capture(enabled: bool) -> anyhow::Result<()> {
-    let mut stdout = io::stdout();
-    if enabled {
-        execute!(stdout, EnableMouseCapture)?;
-    } else {
-        execute!(stdout, DisableMouseCapture)?;
-    }
-    Ok(())
-}
-
 fn tui_exit_gesture_for_key(key: &crossterm::event::KeyEvent) -> Option<TuiExitGesture> {
     match key.code {
         KeyCode::Esc => Some(TuiExitGesture::Esc),
-        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::SUPER) => {
-            Some(TuiExitGesture::CmdC)
-        }
         _ => None,
     }
 }
@@ -1548,7 +1594,6 @@ fn tui_exit_gesture_for_key(key: &crossterm::event::KeyEvent) -> Option<TuiExitG
 fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
     match gesture {
         TuiExitGesture::Esc => "Esc",
-        TuiExitGesture::CmdC => "Cmd+C",
     }
 }
 
@@ -1660,33 +1705,497 @@ fn tui_context_document(
     }
 }
 
+fn tui_content_screen(
+    app_state: &AppState,
+    document: &crate::interaction::cli::renderer::RenderDocument,
+) -> crate::interaction::cli::renderer::TuiScreen {
+    let context_document = tui_context_document(app_state, document);
+    let mut screen = build_tui_screen(&context_document);
+    screen.prompt.clear();
+    screen
+}
+
+fn tui_terminal_dimensions() -> (usize, usize) {
+    let (cols, rows) = size().unwrap_or((100, 32));
+    (usize::from(cols.max(1)), usize::from(rows.max(3)))
+}
+
+fn tui_layout_metrics(
+    terminal_rows: usize,
+    input: &str,
+    suggestions: &[TuiSuggestion],
+) -> TuiLayoutMetrics {
+    const INPUT_BOX_HEIGHT: usize = 4;
+    let suggestion_count = if input.starts_with('/') {
+        suggestions.len().max(1)
+    } else {
+        0
+    };
+    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_count;
+    let height = terminal_rows.max(3);
+    let content_height = height.saturating_sub(bottom_reserved_height);
+    TuiLayoutMetrics {
+        content_height,
+        status_row: content_height.saturating_add(1).min(height),
+        model_row: content_height.saturating_add(2).min(height),
+        input_row: content_height.saturating_add(3).min(height),
+    }
+}
+
+fn strip_ansi_text(text: &str) -> String {
+    let mut stripped = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+            while let Some(next) = chars.next() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        stripped.push(ch);
+    }
+    stripped
+}
+
+fn tui_selection_source_line(raw_line: &str) -> String {
+    raw_line
+        .strip_prefix(TUI_USER_MESSAGE_MARKER)
+        .map(str::to_string)
+        .unwrap_or_else(|| strip_ansi_text(raw_line))
+}
+
+fn tui_source_cells(text: &str) -> Vec<TuiSourceCell> {
+    let mut cells = Vec::new();
+    let mut display_col = 0usize;
+    for ch in text.chars() {
+        let width = tui_char_display_width(ch);
+        cells.push(TuiSourceCell {
+            ch,
+            start_col: display_col,
+            end_col: display_col + width,
+        });
+        display_col += width;
+    }
+    cells
+}
+
+fn parse_tui_styled_cells(line: &str, source_cell_count: usize) -> Vec<TuiCell> {
+    let mut cells = Vec::new();
+    let mut chars = line.chars().peekable();
+    let mut active_style = String::new();
+    let mut display_col = 0usize;
+    let mut source_index = 0usize;
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+            let mut sequence = String::from("\u{1b}[");
+            let mut terminator = None;
+            while let Some(next) = chars.next() {
+                sequence.push(next);
+                if ('@'..='~').contains(&next) {
+                    terminator = Some(next);
+                    break;
+                }
+            }
+            if terminator == Some('m') {
+                if sequence == "\u{1b}[m" || sequence == "\u{1b}[0m" {
+                    active_style.clear();
+                } else {
+                    active_style.push_str(&sequence);
+                }
+            }
+            continue;
+        }
+
+        let width = tui_char_display_width(ch);
+        let source_unit_index = if source_index < source_cell_count {
+            let current = Some(source_index);
+            source_index += 1;
+            current
+        } else {
+            None
+        };
+        cells.push(TuiCell {
+            ch,
+            start_col: display_col,
+            end_col: display_col + width,
+            style: active_style.clone(),
+            source_unit_index,
+        });
+        display_col += width;
+    }
+
+    cells
+}
+
+fn build_tui_rendered_line(raw_line: &str, width: usize) -> TuiRenderedLine {
+    let source_text = tui_selection_source_line(raw_line);
+    let source_cells = tui_source_cells(&source_text);
+    let styled_line = render_tui_content_line(raw_line, width);
+    let rendered_cells = parse_tui_styled_cells(&styled_line, source_cells.len());
+    TuiRenderedLine {
+        source_text,
+        source_cells,
+        rendered_cells,
+    }
+}
+
+fn build_tui_rendered_content(
+    screen: &crate::interaction::cli::renderer::TuiScreen,
+    width: usize,
+) -> TuiRenderedContent {
+    let content = render_tui_screen_output(screen);
+    if content.is_empty() {
+        return TuiRenderedContent::default();
+    }
+    TuiRenderedContent {
+        lines: content
+            .lines()
+            .map(|line| build_tui_rendered_line(line, width))
+            .collect(),
+    }
+}
+
+fn clamp_tui_document_position(
+    content: &TuiRenderedContent,
+    position: TuiDocumentPosition,
+) -> Option<TuiDocumentPosition> {
+    let line = content.lines.get(position.line)?;
+    if line.source_cells.is_empty() {
+        return None;
+    }
+    Some(TuiDocumentPosition {
+        line: position.line,
+        unit: position.unit.min(line.source_cells.len().saturating_sub(1)),
+    })
+}
+
+fn tui_selection_bounds(
+    content: &TuiRenderedContent,
+    selection: &TuiSelectionState,
+) -> Option<(TuiDocumentPosition, TuiDocumentPosition)> {
+    let anchor = clamp_tui_document_position(content, selection.anchor?)?;
+    let focus = clamp_tui_document_position(content, selection.focus?)?;
+    if anchor == focus && selection.mode == TuiSelectionMode::Char {
+        return None;
+    }
+    Some(if anchor <= focus {
+        (anchor, focus)
+    } else {
+        (focus, anchor)
+    })
+}
+
+fn tui_has_selection(content: &TuiRenderedContent, selection: &TuiSelectionState) -> bool {
+    tui_selection_bounds(content, selection).is_some()
+}
+
+fn tui_cell_selected(
+    bounds: Option<(TuiDocumentPosition, TuiDocumentPosition)>,
+    source_line_index: usize,
+    source_unit_index: Option<usize>,
+) -> bool {
+    let Some((start, end)) = bounds else {
+        return false;
+    };
+    let Some(unit) = source_unit_index else {
+        return false;
+    };
+    if source_line_index < start.line || source_line_index > end.line {
+        return false;
+    }
+    if start.line == end.line {
+        unit >= start.unit && unit <= end.unit
+    } else if source_line_index == start.line {
+        unit >= start.unit
+    } else if source_line_index == end.line {
+        unit <= end.unit
+    } else {
+        true
+    }
+}
+
+fn render_tui_rendered_line(
+    line: &TuiRenderedLine,
+    source_line_index: usize,
+    selection: &TuiSelectionState,
+    content: &TuiRenderedContent,
+) -> String {
+    let bounds = tui_selection_bounds(content, selection);
+    let mut rendered = String::new();
+    let mut active_style = String::new();
+
+    for cell in &line.rendered_cells {
+        if cell.style != active_style {
+            rendered.push_str("\x1b[0m");
+            if !cell.style.is_empty() {
+                rendered.push_str(&cell.style);
+            }
+            active_style = cell.style.clone();
+        }
+
+        let selected = tui_cell_selected(bounds, source_line_index, cell.source_unit_index);
+        if selected {
+            rendered.push_str("\x1b[7m");
+        }
+        rendered.push(cell.ch);
+        if selected {
+            rendered.push_str("\x1b[27m");
+        }
+    }
+
+    if !active_style.is_empty() {
+        rendered.push_str("\x1b[0m");
+    }
+    rendered
+}
+
+fn tui_document_position_for_column(
+    content: &TuiRenderedContent,
+    line_index: usize,
+    column: usize,
+) -> Option<TuiDocumentPosition> {
+    let line = content.lines.get(line_index)?;
+    if line.source_cells.is_empty() {
+        return None;
+    }
+    let unit = line
+        .source_cells
+        .iter()
+        .position(|cell| column < cell.end_col)
+        .unwrap_or_else(|| line.source_cells.len().saturating_sub(1));
+    Some(TuiDocumentPosition {
+        line: line_index,
+        unit,
+    })
+}
+
+fn begin_selection(
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+    line_index: usize,
+    column: usize,
+) {
+    if let Some(position) = tui_document_position_for_column(content, line_index, column) {
+        selection.anchor = Some(position);
+        selection.focus = Some(position);
+        selection.mode = TuiSelectionMode::Char;
+        selection.dragging = true;
+    } else {
+        selection.clear();
+    }
+}
+
+fn update_selection_drag(
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+    line_index: usize,
+    column: usize,
+) {
+    if !selection.dragging {
+        return;
+    }
+    if let Some(position) = tui_document_position_for_column(content, line_index, column) {
+        selection.focus = Some(position);
+    }
+}
+
+fn tui_is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn select_word_at(
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+    line_index: usize,
+    column: usize,
+) {
+    let Some(position) = tui_document_position_for_column(content, line_index, column) else {
+        selection.clear();
+        return;
+    };
+    let line = &content.lines[position.line];
+    let mut start = position.unit;
+    let mut end = position.unit;
+    let center = line.source_cells[position.unit].ch;
+
+    if tui_is_word_char(center) {
+        while start > 0 && tui_is_word_char(line.source_cells[start - 1].ch) {
+            start -= 1;
+        }
+        while end + 1 < line.source_cells.len() && tui_is_word_char(line.source_cells[end + 1].ch) {
+            end += 1;
+        }
+    }
+
+    selection.anchor = Some(TuiDocumentPosition {
+        line: position.line,
+        unit: start,
+    });
+    selection.focus = Some(TuiDocumentPosition {
+        line: position.line,
+        unit: end,
+    });
+    selection.mode = TuiSelectionMode::Word;
+    selection.dragging = true;
+}
+
+fn select_line_at(
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+    line_index: usize,
+) {
+    let Some(line) = content.lines.get(line_index) else {
+        selection.clear();
+        return;
+    };
+    if line.source_cells.is_empty() {
+        selection.clear();
+        return;
+    }
+    selection.anchor = Some(TuiDocumentPosition {
+        line: line_index,
+        unit: 0,
+    });
+    selection.focus = Some(TuiDocumentPosition {
+        line: line_index,
+        unit: line.source_cells.len().saturating_sub(1),
+    });
+    selection.mode = TuiSelectionMode::Line;
+    selection.dragging = true;
+}
+
+fn shift_selection_for_scroll(
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+    delta_lines: isize,
+) {
+    if !selection.dragging || delta_lines == 0 {
+        return;
+    }
+    let Some(focus) = selection.focus else {
+        return;
+    };
+    if content.lines.is_empty() {
+        selection.clear();
+        return;
+    }
+
+    let max_line = content.lines.len().saturating_sub(1) as isize;
+    let next_line = (focus.line as isize + delta_lines).clamp(0, max_line) as usize;
+    let Some(line) = content.lines.get(next_line) else {
+        return;
+    };
+    if line.source_cells.is_empty() {
+        return;
+    }
+    selection.focus = Some(TuiDocumentPosition {
+        line: next_line,
+        unit: focus.unit.min(line.source_cells.len().saturating_sub(1)),
+    });
+}
+
+fn selected_text(content: &TuiRenderedContent, selection: &TuiSelectionState) -> Option<String> {
+    let (start, end) = tui_selection_bounds(content, selection)?;
+    let mut lines = Vec::new();
+    for line_index in start.line..=end.line {
+        let line = content.lines.get(line_index)?;
+        if line.source_cells.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let start_unit = if line_index == start.line {
+            start.unit
+        } else {
+            0
+        };
+        let end_unit = if line_index == end.line {
+            end.unit
+        } else {
+            line.source_cells.len().saturating_sub(1)
+        };
+        let selected_line = line.source_cells[start_unit..=end_unit]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect::<String>();
+        lines.push(selected_line);
+    }
+    Some(lines.join("\n"))
+}
+
+fn osc52_copy_sequence(text: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\u{1b}]52;c;{encoded}\u{7}")
+}
+
+fn set_clipboard(text: &str) -> anyhow::Result<()> {
+    let sequence = osc52_copy_sequence(text);
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(sequence.as_bytes())?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn copy_selected_text(
+    content: &TuiRenderedContent,
+    selection: &TuiSelectionState,
+) -> anyhow::Result<bool> {
+    let Some(text) = selected_text(content, selection) else {
+        return Ok(false);
+    };
+    if text.is_empty() {
+        return Ok(false);
+    }
+    set_clipboard(&text)?;
+    Ok(true)
+}
+
+fn current_tui_scroll_top(
+    follow_content_tail: bool,
+    content_scroll_top: usize,
+    max_scroll_top: usize,
+) -> usize {
+    if follow_content_tail {
+        max_scroll_top
+    } else {
+        content_scroll_top.min(max_scroll_top)
+    }
+}
+
+fn apply_tui_scroll(
+    follow_content_tail: &mut bool,
+    content_scroll_top: &mut usize,
+    max_scroll_top: usize,
+    delta: isize,
+    selection: &mut TuiSelectionState,
+    content: &TuiRenderedContent,
+) {
+    let current = current_tui_scroll_top(*follow_content_tail, *content_scroll_top, max_scroll_top);
+    let (next, sticky) = tui_jump_by(current, delta, max_scroll_top);
+    shift_selection_for_scroll(selection, content, next as isize - current as isize);
+    *follow_content_tail = sticky;
+    *content_scroll_top = if sticky { usize::MAX } else { next };
+}
+
 fn render_fixed_tui_layout(
     app_state: &AppState,
     screen: &crate::interaction::cli::renderer::TuiScreen,
     input: &str,
     suggestions: &[TuiSuggestion],
-    selected_suggestion: usize,
+    selected_suggestion: Option<usize>,
     content_scroll_top: usize,
     turn_status: TuiTurnStatus,
     cursor_index: usize,
+    selection: &TuiSelectionState,
 ) -> String {
     let mut content_screen = screen.clone();
     content_screen.prompt.clear();
 
-    let content = render_tui_screen_output(&content_screen);
-    let content_lines = if content.is_empty() {
-        Vec::new()
-    } else {
-        content
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-    };
-
-    const INPUT_BOX_HEIGHT: usize = 4;
-    let (cols, rows) = size().unwrap_or((100, 32));
-    let width = usize::from(cols.max(1));
-    let height = usize::from(rows.max(3));
+    let (width, height) = tui_terminal_dimensions();
+    let metrics = tui_layout_metrics(height, input, suggestions);
+    let rendered_content = build_tui_rendered_content(&content_screen, width);
     let suggestion_lines = if input.starts_with('/') {
         if suggestions.is_empty() {
             vec!["No matching commands".to_string()]
@@ -1695,34 +2204,31 @@ fn render_fixed_tui_layout(
                 .iter()
                 .enumerate()
                 .map(|(index, command)| {
-                    render_command_suggestion_line(command, index == selected_suggestion)
+                    render_command_suggestion_line(command, Some(index) == selected_suggestion)
                 })
                 .collect::<Vec<_>>()
         }
     } else {
         Vec::new()
     };
-    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_lines.len();
-    let content_height = height.saturating_sub(bottom_reserved_height);
-    let max_scroll_top = max_tui_content_scroll_offset(content_lines.len(), content_height);
+    let max_scroll_top =
+        max_tui_content_scroll_offset(rendered_content.lines.len(), metrics.content_height);
     let clamped_scroll_top = content_scroll_top.min(max_scroll_top);
-    let visible_lines = content_lines
+    let visible_lines = rendered_content
+        .lines
         .iter()
         .skip(clamped_scroll_top)
-        .take(content_height)
-        .cloned()
+        .take(metrics.content_height)
         .collect::<Vec<_>>();
 
     let viewport = tui_input_viewport(input, cursor_index, width);
     let status_line = status_line_for_tui(turn_status, width);
     let model_cwd_line = format_tui_model_and_cwd(app_state);
     let content_width = width;
-    let status_row = content_height.saturating_add(1).min(height);
-    let model_row = content_height.saturating_add(2).min(height);
-    let input_row = content_height.saturating_add(3).min(height);
-    let cursor_row = input_row
+    let cursor_row = metrics
+        .input_row
         .saturating_add(viewport.cursor_row_offset)
-        .min(input_row.saturating_add(INPUT_BOX_HEIGHT.saturating_sub(1)));
+        .min(metrics.input_row.saturating_add(3));
     let cursor_col = viewport.cursor_column.min(width).max(1);
 
     let mut frame = String::from("\x1b[?25l");
@@ -1732,17 +2238,28 @@ fn render_fixed_tui_layout(
         frame.push_str(&format!(
             "\x1b[{};1H\x1b[2K{}",
             row_index + 1,
-            render_tui_content_line(line, width)
+            render_tui_rendered_line(
+                line,
+                clamped_scroll_top + row_index,
+                selection,
+                &rendered_content
+            )
         ));
     }
-    for row_index in visible_lines.len() + 1..=content_height {
+    for row_index in visible_lines.len() + 1..=metrics.content_height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
     }
 
-    frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", status_row, status_line));
-    frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", model_row, model_cwd_line));
-    for row_offset in 0..INPUT_BOX_HEIGHT {
-        let row = input_row.saturating_add(row_offset).min(height);
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.status_row, status_line
+    ));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.model_row, model_cwd_line
+    ));
+    for row_offset in 0..4 {
+        let row = metrics.input_row.saturating_add(row_offset).min(height);
         let line = viewport
             .visible_lines
             .get(row_offset)
@@ -1761,14 +2278,16 @@ fn render_fixed_tui_layout(
         ));
     }
     for (index, line) in suggestion_lines.iter().enumerate() {
-        let row = input_row
-            .saturating_add(INPUT_BOX_HEIGHT)
+        let row = metrics
+            .input_row
+            .saturating_add(4)
             .saturating_add(index)
             .min(height);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row, line));
     }
-    let suggestion_end_row = input_row
-        .saturating_add(INPUT_BOX_HEIGHT)
+    let suggestion_end_row = metrics
+        .input_row
+        .saturating_add(4)
         .saturating_add(suggestion_lines.len())
         .saturating_sub(1);
     for row in suggestion_end_row.saturating_add(1)..=height {
@@ -1820,14 +2339,7 @@ fn tui_content_height_for_layout(
     input: &str,
     suggestions: &[TuiSuggestion],
 ) -> usize {
-    const INPUT_BOX_HEIGHT: usize = 4;
-    let suggestion_count = if input.starts_with('/') {
-        suggestions.len().max(1)
-    } else {
-        0
-    };
-    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_count;
-    terminal_rows.max(3).saturating_sub(bottom_reserved_height)
+    tui_layout_metrics(terminal_rows, input, suggestions).content_height
 }
 
 fn tui_visible_content_height(input: &str, suggestions: &[TuiSuggestion]) -> usize {
@@ -1920,9 +2432,12 @@ fn normalize_tui_newlines(text: &str) -> String {
 #[cfg(test)]
 mod tui_output_tests {
     use super::{
-        TuiExitGesture, TuiTurnStatus, backspace_input_char, delete_input_char,
+        TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState, TuiTurnStatus,
+        backspace_input_char, begin_selection, build_tui_rendered_content, delete_input_char,
         heuristic_tui_suggestions, insert_input_char, normalize_tui_newlines,
-        render_command_suggestion_line, render_fixed_tui_layout, status_line_for_tui,
+        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
+        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
+        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -2009,10 +2524,11 @@ mod tui_output_tests {
             &screen,
             "/h",
             &suggestions,
-            0,
+            Some(0),
             0,
             TuiTurnStatus::Idle,
             2,
+            &TuiSelectionState::default(),
         ));
         let input_pos = rendered
             .find("> /h")
@@ -2039,10 +2555,11 @@ mod tui_output_tests {
             &screen,
             "",
             &[],
-            0,
+            None,
             5,
             TuiTurnStatus::Idle,
             0,
+            &TuiSelectionState::default(),
         ));
 
         assert!(rendered.contains("line-6"));
@@ -2064,10 +2581,11 @@ mod tui_output_tests {
             &screen,
             "",
             &[],
-            0,
+            None,
             0,
             TuiTurnStatus::Worked(Duration::from_secs(157)),
             0,
+            &TuiSelectionState::default(),
         ));
 
         let status_pos = rendered.find("Worked for 2m 37s").expect("worked status");
@@ -2081,14 +2599,6 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_selection_mode_status_line_explains_copy_flow() {
-        let rendered = strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::Selection, 80));
-        assert!(rendered.contains("Selection mode"));
-        assert!(rendered.contains("drag to select and copy"));
-        assert!(rendered.contains("esc to return"));
-    }
-
-    #[test]
     fn tui_exit_hint_status_line_explains_double_press_exit() {
         let rendered =
             strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::ExitHint("Esc"), 80));
@@ -2096,12 +2606,12 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_exit_gesture_detects_esc_and_cmd_c() {
+    fn tui_exit_gesture_detects_only_esc() {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let cmd_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER);
 
         assert_eq!(tui_exit_gesture_for_key(&esc), Some(TuiExitGesture::Esc));
-        assert_eq!(tui_exit_gesture_for_key(&cmd_c), Some(TuiExitGesture::CmdC));
+        assert_eq!(tui_exit_gesture_for_key(&cmd_c), None);
     }
 
     #[test]
@@ -2168,10 +2678,11 @@ mod tui_output_tests {
             &screen,
             "",
             &[],
-            0,
+            None,
             0,
             TuiTurnStatus::Idle,
             0,
+            &TuiSelectionState::default(),
         ));
 
         assert!(rendered.contains("> older user message"));
@@ -2179,21 +2690,111 @@ mod tui_output_tests {
         assert!(rendered.contains("older assistant reply"));
     }
 
+    #[test]
+    fn tui_word_and_line_selection_extract_expected_text() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["say hello world".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let content = build_tui_rendered_content(&screen, 80);
+        let mut selection = TuiSelectionState::default();
+
+        select_word_at(&mut selection, &content, 0, 5);
+        assert_eq!(selected_text(&content, &selection).as_deref(), Some("hello"));
+
+        select_line_at(&mut selection, &content, 0);
+        assert_eq!(
+            selected_text(&content, &selection).as_deref(),
+            Some("say hello world")
+        );
+    }
+
+    #[test]
+    fn tui_selected_text_preserves_cjk_visual_cells() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["ab中文cd".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let content = build_tui_rendered_content(&screen, 80);
+        let selection = TuiSelectionState {
+            anchor: Some(TuiDocumentPosition { line: 0, unit: 1 }),
+            focus: Some(TuiDocumentPosition { line: 0, unit: 4 }),
+            mode: TuiSelectionMode::Char,
+            dragging: false,
+        };
+
+        assert_eq!(selected_text(&content, &selection).as_deref(), Some("b中文c"));
+    }
+
+    #[test]
+    fn tui_selection_overlay_tracks_content_when_scrolled() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["line-1".into(), "line-2".into(), "line-3".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let selection = TuiSelectionState {
+            anchor: Some(TuiDocumentPosition { line: 1, unit: 0 }),
+            focus: Some(TuiDocumentPosition { line: 1, unit: 5 }),
+            mode: TuiSelectionMode::Char,
+            dragging: false,
+        };
+        let content = build_tui_rendered_content(&screen, 80);
+        let selected_line = render_tui_rendered_line(&content.lines[1], 1, &selection, &content);
+        let unselected_line = render_tui_rendered_line(&content.lines[0], 0, &selection, &content);
+
+        assert!(selected_line.contains("\u{1b}[7ml"));
+        assert!(strip_ansi_for_test(&selected_line).contains("line-2"));
+        assert!(!unselected_line.contains("\u{1b}[7m"));
+    }
+
+    #[test]
+    fn tui_shift_selection_for_scroll_moves_drag_focus() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["line-1".into(), "line-2".into(), "line-3".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let content = build_tui_rendered_content(&screen, 80);
+        let mut selection = TuiSelectionState::default();
+        begin_selection(&mut selection, &content, 0, 0);
+        selection.focus = Some(TuiDocumentPosition { line: 0, unit: 2 });
+        shift_selection_for_scroll(&mut selection, &content, 1);
+
+        assert_eq!(selection.focus, Some(TuiDocumentPosition { line: 1, unit: 2 }));
+    }
+
+    #[test]
+    fn tui_cmd_c_uses_osc52_for_selected_text() {
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["copy me".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let content = build_tui_rendered_content(&screen, 80);
+        let selection = TuiSelectionState {
+            anchor: Some(TuiDocumentPosition { line: 0, unit: 0 }),
+            focus: Some(TuiDocumentPosition { line: 0, unit: 6 }),
+            mode: TuiSelectionMode::Char,
+            dragging: false,
+        };
+
+        assert_eq!(selected_text(&content, &selection).as_deref(), Some("copy me"));
+        assert_eq!(
+            osc52_copy_sequence("copy me"),
+            "\u{1b}]52;c;Y29weSBtZQ==\u{7}"
+        );
+    }
+
     fn strip_ansi_for_test(text: &str) -> String {
-        let mut stripped = String::new();
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
-                while let Some(next) = chars.next() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-                continue;
-            }
-            stripped.push(ch);
-        }
-        stripped
+        strip_ansi_text(text)
     }
 
     fn test_app_state() -> AppState {
@@ -2260,7 +2861,8 @@ mod tui_output_tests {
             .iter()
             .position(|item| item.label == "use")
             .expect("use suggestion present");
-        let completed = super::autocomplete_slash_command("/model", &suggestions, use_index)
+        let completed =
+            super::autocomplete_slash_command("/model", &suggestions, Some(use_index))
             .expect("enter should autocomplete to use stage");
         assert_eq!(completed, "/model use ");
     }
@@ -3095,18 +3697,6 @@ impl RuntimeBootstrap {
         }
     }
 
-    fn print_tui_welcome(&self) {
-        let document = render_turn_document(&CliTurnOutput {
-            primary_text: String::new(),
-            events: vec![],
-        });
-        self.write_tui_frame(format!(
-            "{}{}",
-            tui_clear_screen_prefix(),
-            render_document_tui_output(&document)
-        ));
-    }
-
     fn print_tui_message(&self, message: &str) {
         let mut screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
             primary_text: String::new(),
@@ -3117,14 +3707,6 @@ impl RuntimeBootstrap {
             "{}{}",
             tui_clear_screen_prefix(),
             render_tui_screen_output(&screen)
-        ));
-    }
-
-    fn print_tui_loading_frame(&self, request: &str, frame_index: usize) {
-        self.write_tui_frame(format!(
-            "{}{}",
-            tui_clear_screen_prefix(),
-            render_tui_screen_output(&build_tui_loading_screen(request, frame_index))
         ));
     }
 
@@ -3152,7 +3734,7 @@ impl RuntimeBootstrap {
         });
         let mut input = String::new();
         let mut cursor_index = 0usize;
-        let mut selected_suggestion = 0usize;
+        let mut selected_suggestion = None;
         let mut content_scroll_top = usize::MAX;
         let mut follow_content_tail = true;
         let mut wheel_accel = TuiWheelAccelState {
@@ -3163,9 +3745,11 @@ impl RuntimeBootstrap {
         let wheel_uses_xterm_decay = tui_detect_xterm_js();
         let mut active_turn_started_at: Option<Instant> = None;
         let mut last_turn_duration: Option<Duration> = None;
-        let mut selection_mode = false;
+        let mut selection = TuiSelectionState::default();
+        let mut click_state = TuiClickState::default();
         let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
         const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
+        const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
         loop {
             if pending_exit_gesture
@@ -3175,12 +3759,21 @@ impl RuntimeBootstrap {
                 pending_exit_gesture = None;
             }
             let suggestions = tui_command_suggestions(app_state, &input);
-            if selected_suggestion >= suggestions.len() {
-                selected_suggestion = 0;
+            selected_suggestion = if input.starts_with('/') && !suggestions.is_empty() {
+                Some(selected_suggestion.unwrap_or(0).min(suggestions.len().saturating_sub(1)))
+            } else {
+                None
+            };
+            let (terminal_width, terminal_height) = tui_terminal_dimensions();
+            let content_screen = tui_content_screen(app_state, &current_document);
+            let layout_metrics = tui_layout_metrics(terminal_height, &input, &suggestions);
+            let rendered_content = build_tui_rendered_content(&content_screen, terminal_width);
+            let max_scroll_top =
+                max_tui_content_scroll_offset(rendered_content.lines.len(), layout_metrics.content_height);
+            if !follow_content_tail {
+                content_scroll_top = content_scroll_top.min(max_scroll_top);
             }
-            let turn_status = if selection_mode {
-                TuiTurnStatus::Selection
-            } else if let Some((gesture, _)) = pending_exit_gesture {
+            let turn_status = if let Some((gesture, _)) = pending_exit_gesture {
                 TuiTurnStatus::ExitHint(tui_exit_gesture_label(gesture))
             } else if let Some(started_at) = active_turn_started_at {
                 TuiTurnStatus::Working(started_at.elapsed())
@@ -3202,6 +3795,7 @@ impl RuntimeBootstrap {
                 },
                 turn_status,
                 cursor_index,
+                &selection,
             );
 
             let refresh_interval = if active_turn_started_at.is_some() {
@@ -3218,15 +3812,27 @@ impl RuntimeBootstrap {
                         continue;
                     }
 
-                    if selection_mode {
-                        if key.code == KeyCode::Esc {
-                            set_tui_mouse_capture(true)?;
-                            selection_mode = false;
-                        }
+                    if matches!(key.code, KeyCode::Char('c' | 'C'))
+                        && key.modifiers.contains(KeyModifiers::SUPER)
+                    {
+                        let _ = copy_selected_text(&rendered_content, &selection);
+                        pending_exit_gesture = None;
                         continue;
                     }
 
                     if let Some(gesture) = tui_exit_gesture_for_key(&key) {
+                        if !suggestions.is_empty() && selected_suggestion.is_some() {
+                            selected_suggestion = None;
+                            pending_exit_gesture = None;
+                            continue;
+                        }
+                        if !input.is_empty() {
+                            input.clear();
+                            cursor_index = 0;
+                            selected_suggestion = None;
+                            pending_exit_gesture = None;
+                            continue;
+                        }
                         let should_exit = pending_exit_gesture
                             .map(|(pending, started_at)| {
                                 pending == gesture
@@ -3245,23 +3851,13 @@ impl RuntimeBootstrap {
                     pending_exit_gesture = None;
 
                     match key.code {
-                        KeyCode::Char('s' | 'S')
-                            if key
-                                .modifiers
-                                .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
-                        {
-                            if active_turn_started_at.is_none() {
-                                set_tui_mouse_capture(false)?;
-                                selection_mode = true;
-                            }
-                        }
                         KeyCode::Enter => {
                             if key
                                 .modifiers
                                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
                             {
                                 insert_input_char(&mut input, &mut cursor_index, '\n');
-                                selected_suggestion = 0;
+                                selected_suggestion = Some(0);
                                 continue;
                             }
                             if input.trim().is_empty() {
@@ -3280,21 +3876,22 @@ impl RuntimeBootstrap {
                             let line = input.trim().to_string();
                             input.clear();
                             cursor_index = 0;
-                            selected_suggestion = 0;
+                            selected_suggestion = None;
                             follow_content_tail = true;
                             content_scroll_top = usize::MAX;
                             active_turn_started_at = Some(Instant::now());
-                            last_turn_duration = None;
+                            selection.clear();
 
                             self.print_tui_interactive_frame(
                                 app_state,
                                 &current_document,
                                 "",
                                 &[],
-                                0,
+                                None,
                                 0,
                                 TuiTurnStatus::Working(Duration::ZERO),
                                 0,
+                                &selection,
                             );
 
                             if self.should_exit_tui_input(&line) {
@@ -3331,7 +3928,7 @@ impl RuntimeBootstrap {
                                                 &current_document,
                                                 "",
                                                 &[],
-                                                0,
+                                                None,
                                                 0,
                                                 TuiTurnStatus::Working(
                                                     active_turn_started_at
@@ -3339,6 +3936,7 @@ impl RuntimeBootstrap {
                                                         .unwrap_or_default(),
                                                 ),
                                                 0,
+                                                &selection,
                                             );
                                         }
                                     },
@@ -3358,12 +3956,12 @@ impl RuntimeBootstrap {
                         }
                         KeyCode::Backspace => {
                             if backspace_input_char(&mut input, &mut cursor_index) {
-                                selected_suggestion = 0;
+                                selected_suggestion = Some(0);
                             }
                         }
                         KeyCode::Delete => {
                             if delete_input_char(&mut input, cursor_index) {
-                                selected_suggestion = 0;
+                                selected_suggestion = Some(0);
                             }
                         }
                         KeyCode::Tab => {
@@ -3388,147 +3986,171 @@ impl RuntimeBootstrap {
                         }
                         KeyCode::Up => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                let max_scroll_top = max_tui_scroll_top_for_document(
-                                    &current_document,
-                                    &input,
-                                    &suggestions,
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    -1,
+                                    &mut selection,
+                                    &rendered_content,
                                 );
-                                content_scroll_top = if follow_content_tail {
-                                    max_scroll_top
-                                } else {
-                                    content_scroll_top
-                                }
-                                .saturating_sub(1);
-                                follow_content_tail = false;
                             } else if !suggestions.is_empty() {
-                                selected_suggestion = (selected_suggestion + suggestions.len() - 1)
-                                    % suggestions.len();
+                                selected_suggestion = Some(match selected_suggestion {
+                                    Some(index) => (index + suggestions.len() - 1) % suggestions.len(),
+                                    None => suggestions.len().saturating_sub(1),
+                                });
                             } else if let Some(next_cursor) = move_tui_cursor_vertically(
                                 &input,
                                 cursor_index,
-                                usize::from(size().unwrap_or((100, 32)).0.max(1)),
+                                terminal_width,
                                 -1,
                             ) {
                                 cursor_index = next_cursor;
                             } else {
-                                let max_scroll_top = max_tui_scroll_top_for_document(
-                                    &current_document,
-                                    &input,
-                                    &suggestions,
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    -1,
+                                    &mut selection,
+                                    &rendered_content,
                                 );
-                                content_scroll_top = if follow_content_tail {
-                                    max_scroll_top
-                                } else {
-                                    content_scroll_top
-                                }
-                                .saturating_sub(1);
-                                follow_content_tail = false;
                             }
                         }
                         KeyCode::Down => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                let max_scroll_top = max_tui_scroll_top_for_document(
-                                    &current_document,
-                                    &input,
-                                    &suggestions,
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    1,
+                                    &mut selection,
+                                    &rendered_content,
                                 );
-                                let next_scroll_top = if follow_content_tail {
-                                    max_scroll_top
-                                } else {
-                                    content_scroll_top
-                                }
-                                .saturating_add(1)
-                                .min(max_scroll_top);
-                                follow_content_tail = next_scroll_top >= max_scroll_top;
-                                content_scroll_top = if follow_content_tail {
-                                    usize::MAX
-                                } else {
-                                    next_scroll_top
-                                };
                             } else if !suggestions.is_empty() {
-                                selected_suggestion = (selected_suggestion + 1) % suggestions.len();
+                                selected_suggestion = Some(match selected_suggestion {
+                                    Some(index) => (index + 1) % suggestions.len(),
+                                    None => 0,
+                                });
                             } else if let Some(next_cursor) = move_tui_cursor_vertically(
                                 &input,
                                 cursor_index,
-                                usize::from(size().unwrap_or((100, 32)).0.max(1)),
+                                terminal_width,
                                 1,
                             ) {
                                 cursor_index = next_cursor;
                             } else {
-                                let max_scroll_top = max_tui_scroll_top_for_document(
-                                    &current_document,
-                                    &input,
-                                    &suggestions,
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    1,
+                                    &mut selection,
+                                    &rendered_content,
                                 );
-                                let next_scroll_top = if follow_content_tail {
-                                    max_scroll_top
-                                } else {
-                                    content_scroll_top
-                                }
-                                .saturating_add(1)
-                                .min(max_scroll_top);
-                                follow_content_tail = next_scroll_top >= max_scroll_top;
-                                content_scroll_top = if follow_content_tail {
-                                    usize::MAX
-                                } else {
-                                    next_scroll_top
-                                };
                             }
                         }
                         KeyCode::PageUp => {
-                            let page =
-                                (tui_visible_content_height(&input, &suggestions) / 2).max(1);
-                            let max_scroll_top = max_tui_scroll_top_for_document(
-                                &current_document,
-                                &input,
-                                &suggestions,
+                            let page = (layout_metrics.content_height / 2).max(1);
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                -(page as isize),
+                                &mut selection,
+                                &rendered_content,
                             );
-                            let current_scroll_top = if follow_content_tail {
-                                max_scroll_top
-                            } else {
-                                content_scroll_top
-                            };
-                            let (next_scroll_top, sticky) =
-                                tui_jump_by(current_scroll_top, -(page as isize), max_scroll_top);
-                            follow_content_tail = sticky;
-                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
                         KeyCode::PageDown => {
-                            let page =
-                                (tui_visible_content_height(&input, &suggestions) / 2).max(1);
-                            let max_scroll_top = max_tui_scroll_top_for_document(
-                                &current_document,
-                                &input,
-                                &suggestions,
+                            let page = (layout_metrics.content_height / 2).max(1);
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                page as isize,
+                                &mut selection,
+                                &rendered_content,
                             );
-                            let current_scroll_top = if follow_content_tail {
-                                max_scroll_top
-                            } else {
-                                content_scroll_top
-                            };
-                            let (next_scroll_top, sticky) =
-                                tui_jump_by(current_scroll_top, page as isize, max_scroll_top);
-                            follow_content_tail = sticky;
-                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
                         }
                         KeyCode::Char(ch) => {
                             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                                 insert_input_char(&mut input, &mut cursor_index, ch);
-                                selected_suggestion = 0;
+                                selected_suggestion = Some(0);
                             }
                         }
                         _ => {}
                     }
                 }
                 Event::Mouse(mouse) => {
-                    let max_scroll_top =
-                        max_tui_scroll_top_for_document(&current_document, &input, &suggestions);
-                    let current_scroll_top = if follow_content_tail {
-                        max_scroll_top
-                    } else {
-                        content_scroll_top
+                    pending_exit_gesture = None;
+                    let current_scroll_top =
+                        current_tui_scroll_top(follow_content_tail, content_scroll_top, max_scroll_top);
+                    let content_line_at_row = |row: u16| -> Option<usize> {
+                        let row = usize::from(row);
+                        if row >= layout_metrics.content_height {
+                            return None;
+                        }
+                        let line_index = current_scroll_top.saturating_add(row);
+                        (line_index < rendered_content.lines.len()).then_some(line_index)
                     };
                     match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let Some(line_index) = content_line_at_row(mouse.row) else {
+                                continue;
+                            };
+                            let now = Instant::now();
+                            click_state.count = if let Some((col, row, last_at)) = click_state.last_down {
+                                if col == mouse.column
+                                    && row == mouse.row
+                                    && now.duration_since(last_at) <= TUI_MULTI_CLICK_WINDOW
+                                {
+                                    (click_state.count + 1).min(3)
+                                } else {
+                                    1
+                                }
+                            } else {
+                                1
+                            };
+                            click_state.last_down = Some((mouse.column, mouse.row, now));
+                            match click_state.count {
+                                2 => {
+                                    select_word_at(
+                                        &mut selection,
+                                        &rendered_content,
+                                        line_index,
+                                        usize::from(mouse.column),
+                                    );
+                                }
+                                3 => {
+                                    select_line_at(&mut selection, &rendered_content, line_index);
+                                }
+                                _ => {
+                                    begin_selection(
+                                        &mut selection,
+                                        &rendered_content,
+                                        line_index,
+                                        usize::from(mouse.column),
+                                    );
+                                }
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            let Some(line_index) = content_line_at_row(mouse.row) else {
+                                continue;
+                            };
+                            update_selection_drag(
+                                &mut selection,
+                                &rendered_content,
+                                line_index,
+                                usize::from(mouse.column),
+                            );
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            selection.dragging = false;
+                            if !tui_has_selection(&rendered_content, &selection) {
+                                selection.clear();
+                            }
+                        }
                         MouseEventKind::ScrollUp => {
                             let step = tui_compute_wheel_step(
                                 &mut wheel_accel,
@@ -3536,10 +4158,14 @@ impl RuntimeBootstrap {
                                 Instant::now(),
                                 wheel_uses_xterm_decay,
                             );
-                            let (next_scroll_top, sticky) =
-                                tui_jump_by(current_scroll_top, -(step as isize), max_scroll_top);
-                            follow_content_tail = sticky;
-                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                -(step as isize),
+                                &mut selection,
+                                &rendered_content,
+                            );
                         }
                         MouseEventKind::ScrollDown => {
                             let step = tui_compute_wheel_step(
@@ -3548,10 +4174,14 @@ impl RuntimeBootstrap {
                                 Instant::now(),
                                 wheel_uses_xterm_decay,
                             );
-                            let (next_scroll_top, sticky) =
-                                tui_jump_by(current_scroll_top, step as isize, max_scroll_top);
-                            follow_content_tail = sticky;
-                            content_scroll_top = if sticky { usize::MAX } else { next_scroll_top };
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                step as isize,
+                                &mut selection,
+                                &rendered_content,
+                            );
                         }
                         _ => {}
                     }
@@ -3570,13 +4200,13 @@ impl RuntimeBootstrap {
         document: &crate::interaction::cli::renderer::RenderDocument,
         input: &str,
         suggestions: &[TuiSuggestion],
-        selected_suggestion: usize,
+        selected_suggestion: Option<usize>,
         content_scroll_top: usize,
         turn_status: TuiTurnStatus,
         cursor_index: usize,
+        selection: &TuiSelectionState,
     ) {
-        let context_document = tui_context_document(app_state, document);
-        let mut screen = build_tui_screen(&context_document);
+        let mut screen = tui_content_screen(app_state, document);
         screen.prompt = vec![
             format!(
                 "{} {}",
@@ -3595,6 +4225,7 @@ impl RuntimeBootstrap {
             content_scroll_top,
             turn_status,
             cursor_index,
+            selection,
         ));
     }
 
