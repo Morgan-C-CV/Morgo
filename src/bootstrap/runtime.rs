@@ -1025,19 +1025,7 @@ impl RuntimeBootstrap {
         line: String,
     ) -> anyhow::Result<CliTurnOutput> {
         self.print_tui_loading_frame(&line, 0);
-        let turn_future = handle_cli_input(router, engine, app_state, line.clone());
-        tokio::pin!(turn_future);
-        let mut frame_index = 1usize;
-
-        loop {
-            tokio::select! {
-                result = &mut turn_future => return result,
-                _ = tokio::time::sleep(Duration::from_millis(120)) => {
-                    self.print_tui_loading_frame(&line, frame_index);
-                    frame_index = frame_index.wrapping_add(1);
-                }
-            }
-        }
+        handle_cli_input(router, engine, app_state, line).await
     }
 
     fn should_exit_tui_input(&self, input: &str) -> bool {
