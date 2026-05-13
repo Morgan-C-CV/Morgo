@@ -1092,7 +1092,7 @@ async fn report_payload_prefers_canonical_history_when_runtime_mirror_is_stale()
             },
         ],
     };
-    let mut app_state = (*app_state_with_history(
+    let app_state = (*app_state_with_history(
         "history-session-stale",
         task_manager.clone(),
         store.clone(),
