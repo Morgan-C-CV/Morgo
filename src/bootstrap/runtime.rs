@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
 use crossterm::execute;
 
@@ -285,6 +285,13 @@ struct TuiSuggestion {
     label: String,
     detail: String,
     accent_color: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiInputViewport {
+    visible_input: String,
+    start_char: usize,
+    cursor_column: usize,
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -975,6 +982,64 @@ fn apply_selected_suggestion(
         .map(|suggestion| suggestion.replacement.clone())
 }
 
+fn insert_input_char(input: &mut String, cursor_index: &mut usize, ch: char) {
+    let byte_index = char_to_byte_index(input, *cursor_index);
+    input.insert(byte_index, ch);
+    *cursor_index += 1;
+}
+
+fn backspace_input_char(input: &mut String, cursor_index: &mut usize) -> bool {
+    if *cursor_index == 0 {
+        return false;
+    }
+    let remove_index = *cursor_index - 1;
+    let start = char_to_byte_index(input, remove_index);
+    let end = char_to_byte_index(input, *cursor_index);
+    input.replace_range(start..end, "");
+    *cursor_index = remove_index;
+    true
+}
+
+fn delete_input_char(input: &mut String, cursor_index: usize) -> bool {
+    let char_len = input.chars().count();
+    if cursor_index >= char_len {
+        return false;
+    }
+    let start = char_to_byte_index(input, cursor_index);
+    let end = char_to_byte_index(input, cursor_index + 1);
+    input.replace_range(start..end, "");
+    true
+}
+
+fn char_to_byte_index(value: &str, char_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_index)
+        .map(|(byte_index, _)| byte_index)
+        .unwrap_or(value.len())
+}
+
+fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> TuiInputViewport {
+    const PROMPT_VISIBLE_WIDTH: usize = 2;
+    const CURSOR_BASE_COLUMN: usize = 3;
+    let visible_width = total_cols.saturating_sub(PROMPT_VISIBLE_WIDTH).max(1);
+    let chars = input.chars().collect::<Vec<_>>();
+    let char_len = chars.len();
+    let clamped_cursor = cursor_index.min(char_len);
+    let start_char = clamped_cursor.saturating_sub(visible_width.saturating_sub(1));
+    let visible_input = chars
+        .iter()
+        .skip(start_char)
+        .take(visible_width)
+        .collect::<String>();
+
+    TuiInputViewport {
+        visible_input,
+        start_char,
+        cursor_column: CURSOR_BASE_COLUMN + (clamped_cursor - start_char),
+    }
+}
+
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
     let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
     let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
@@ -990,6 +1055,66 @@ fn colorize_ansi(text: &str, code: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+fn render_fixed_tui_layout(
+    screen: &crate::interaction::cli::renderer::TuiScreen,
+    input: &str,
+    cursor_index: usize,
+) -> String {
+    let mut content_screen = screen.clone();
+    content_screen.prompt.clear();
+
+    let content = render_tui_screen_output(&content_screen);
+    let content_lines = if content.is_empty() {
+        Vec::new()
+    } else {
+        content.lines().map(|line| line.to_string()).collect::<Vec<_>>()
+    };
+
+    let (cols, rows) = size().unwrap_or((100, 32));
+    let width = usize::from(cols.max(1));
+    let height = usize::from(rows.max(3));
+    let input_box_height = 2usize;
+    let content_height = height.saturating_sub(input_box_height);
+    let visible_lines = if content_lines.len() > content_height {
+        content_lines[content_lines.len() - content_height..].to_vec()
+    } else {
+        content_lines
+    };
+
+    let viewport = tui_input_viewport(input, cursor_index, width);
+    let title_text = " INPUT ";
+    let title_padding = " ".repeat(width.saturating_sub(title_text.chars().count()));
+    let input_padding =
+        " ".repeat(width.saturating_sub(2 + viewport.visible_input.chars().count()));
+    let input_row = height;
+    let cursor_col = viewport.cursor_column.min(width).max(1);
+
+    let mut frame = String::from("\x1b[?25l");
+    frame.push_str(tui_clear_screen_prefix());
+
+    for (row_index, line) in visible_lines.iter().enumerate() {
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row_index + 1, line));
+    }
+    for row_index in visible_lines.len() + 1..=content_height {
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
+    }
+
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K\x1b[48;5;238;2;37m{}{}\x1b[0m",
+        height.saturating_sub(1).max(1),
+        title_text,
+        title_padding
+    ));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
+        input_row,
+        viewport.visible_input,
+        input_padding
+    ));
+    frame.push_str(&format!("\x1b[{};{}H\x1b[?25h", input_row, cursor_col));
+    frame
+}
+
 fn normalize_tui_newlines(text: &str) -> String {
     text.replace('\n', "\r\n")
 }
@@ -997,7 +1122,8 @@ fn normalize_tui_newlines(text: &str) -> String {
 #[cfg(test)]
 mod tui_output_tests {
     use super::{
-        heuristic_tui_suggestions, normalize_tui_newlines, render_command_suggestion_line,
+        backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
+        normalize_tui_newlines, render_command_suggestion_line, tui_input_viewport,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -1015,6 +1141,30 @@ mod tui_output_tests {
     #[test]
     fn tui_newlines_are_crlf_normalized() {
         assert_eq!(normalize_tui_newlines("a\nb\nc"), "a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn tui_input_editing_supports_mid_string_insertion_and_deletion() {
+        let mut input = "helo".to_string();
+        let mut cursor_index = 3;
+        insert_input_char(&mut input, &mut cursor_index, 'l');
+        assert_eq!(input, "hello");
+        assert_eq!(cursor_index, 4);
+
+        assert!(backspace_input_char(&mut input, &mut cursor_index));
+        assert_eq!(input, "helo");
+        assert_eq!(cursor_index, 3);
+
+        assert!(delete_input_char(&mut input, 2));
+        assert_eq!(input, "heo");
+    }
+
+    #[test]
+    fn tui_input_viewport_keeps_cursor_visible_in_scrolled_input_box() {
+        let viewport = tui_input_viewport("abcdefghij", 10, 8);
+        assert_eq!(viewport.visible_input, "fghij");
+        assert_eq!(viewport.start_char, 5);
+        assert_eq!(viewport.cursor_column, 8);
     }
 
     fn test_app_state() -> AppState {
@@ -1969,6 +2119,7 @@ impl RuntimeBootstrap {
             events: vec![],
         });
         let mut input = String::new();
+        let mut cursor_index = 0usize;
         let mut selected_suggestion = 0usize;
 
         loop {
@@ -1981,6 +2132,7 @@ impl RuntimeBootstrap {
                 &input,
                 &suggestions,
                 selected_suggestion,
+                cursor_index,
             );
 
             let Event::Key(key) = read()? else {
@@ -1998,6 +2150,7 @@ impl RuntimeBootstrap {
                 }
                 KeyCode::Esc => {
                     input.clear();
+                    cursor_index = 0;
                     selected_suggestion = 0;
                 }
                 KeyCode::Enter => {
@@ -2010,11 +2163,13 @@ impl RuntimeBootstrap {
                         selected_suggestion,
                     ) {
                         input = completed;
+                        cursor_index = input.chars().count();
                         continue;
                     }
 
                     let line = input.trim().to_string();
                     input.clear();
+                    cursor_index = 0;
                     selected_suggestion = 0;
 
                     if self.should_exit_tui_input(&line) {
@@ -2028,15 +2183,27 @@ impl RuntimeBootstrap {
                             let next_document = render_turn_document(snapshot);
                             if next_document != current_document {
                                 current_document = next_document;
-                                self.print_tui_interactive_frame(&current_document, "", &[], 0);
+                                self.print_tui_interactive_frame(
+                                    &current_document,
+                                    "",
+                                    &[],
+                                    0,
+                                    0,
+                                );
                             }
                         })
                         .await?;
                     current_document = render_turn_document(&output);
                 }
                 KeyCode::Backspace => {
-                    input.pop();
-                    selected_suggestion = 0;
+                    if backspace_input_char(&mut input, &mut cursor_index) {
+                        selected_suggestion = 0;
+                    }
+                }
+                KeyCode::Delete => {
+                    if delete_input_char(&mut input, cursor_index) {
+                        selected_suggestion = 0;
+                    }
                 }
                 KeyCode::Tab => {
                     if let Some(completed) = apply_selected_suggestion(
@@ -2045,7 +2212,20 @@ impl RuntimeBootstrap {
                         selected_suggestion,
                     ) {
                         input = completed;
+                        cursor_index = input.chars().count();
                     }
+                }
+                KeyCode::Left => {
+                    cursor_index = cursor_index.saturating_sub(1);
+                }
+                KeyCode::Right => {
+                    cursor_index = (cursor_index + 1).min(input.chars().count());
+                }
+                KeyCode::Home => {
+                    cursor_index = 0;
+                }
+                KeyCode::End => {
+                    cursor_index = input.chars().count();
                 }
                 KeyCode::Up => {
                     if !suggestions.is_empty() {
@@ -2060,7 +2240,7 @@ impl RuntimeBootstrap {
                 }
                 KeyCode::Char(ch) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        input.push(ch);
+                        insert_input_char(&mut input, &mut cursor_index, ch);
                         selected_suggestion = 0;
                     }
                 }
@@ -2077,6 +2257,7 @@ impl RuntimeBootstrap {
         input: &str,
         suggestions: &[TuiSuggestion],
         selected_suggestion: usize,
+        cursor_index: usize,
     ) {
         let mut screen = build_tui_screen(document);
         screen.prompt = vec![format!(
@@ -2109,11 +2290,7 @@ impl RuntimeBootstrap {
             ];
         }
 
-        self.write_tui_frame(format!(
-            "{}{}",
-            tui_clear_screen_prefix(),
-            render_tui_screen_output(&screen)
-        ));
+        self.write_tui_frame(render_fixed_tui_layout(&screen, input, cursor_index));
     }
 
     fn write_tui_frame(&self, rendered: String) {
