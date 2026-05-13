@@ -1433,6 +1433,113 @@ fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
 }
 
 #[test]
+fn cli_tui_panel_order_prioritizes_approval_over_tool_results_and_tasks() {
+    let task_event = CliDisplayEvent::TaskEvent(TaskEvent {
+        owner: TaskOwner {
+            session_id: "session-panel-order".into(),
+            surface: InteractionSurface::Cli,
+        },
+        target_task_id: Some("task-panel-order-1".into()),
+        task_id: "task-panel-order-1".into(),
+        task_type: rust_agent::task::types::TaskType::LocalAgent,
+        status: TaskStatus::Running,
+        summary: "verify panel priority".into(),
+        result: "Task running".into(),
+        next_action: "wait for verify worker".into(),
+        worker_role: Some(rust_agent::state::app_state::WorkerRole::Verify),
+        orchestration_group_id: Some("group-panel-order".into()),
+        phase: Some(rust_agent::task::types::WorkerPhase::Verify),
+        validation_state: Some(
+            rust_agent::task::types::ValidationState::PendingVerification,
+        ),
+        step_id: None,
+        output_file: "/tmp/task-panel-order-1.log".into(),
+        usage: None,
+    });
+    let tool_result_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+        tool_name: "Read".into(),
+        content: "path=/tmp/sample.txt\noffset=0\nreturned_chars=12\nhello world".into(),
+        summary: Some("Read succeeded".into()),
+        detail: Some("path=/tmp/sample.txt\noffset=0\nreturned_chars=12\nhello world".into()),
+    });
+    let approval_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+        tool_name: "Bash".into(),
+        message: "approval needed before running the verification command".into(),
+        code: Some("bash_warning".into()),
+        summary: Some("Bash pending approval".into()),
+        detail: Some(
+            "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                .into(),
+        ),
+        approval_kind: Some("tool_permission".into()),
+        escalation_reasons: vec!["privileged_system".into()],
+    });
+    let notice_event = CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+        kind: "validation".into(),
+        message: "verify before shipping".into(),
+        code: None,
+        runtime_kind: None,
+        service_failure_code: None,
+        provider_kind: None,
+        status_code: None,
+        retryable: None,
+        surface_visible: None,
+    });
+
+    let turn_a = CliTurnOutput {
+        primary_text: "assistant summary".into(),
+        events: vec![
+            notice_event.clone(),
+            task_event.clone(),
+            tool_result_event.clone(),
+            approval_event.clone(),
+        ],
+    };
+    let turn_b = CliTurnOutput {
+        primary_text: "assistant summary".into(),
+        events: vec![approval_event, tool_result_event, task_event, notice_event],
+    };
+
+    let screen_a = build_tui_screen(&render_turn_document(&turn_a));
+    let screen_b = build_tui_screen(&render_turn_document(&turn_b));
+    let titles_a = screen_a
+        .panels
+        .iter()
+        .map(|panel| panel.title.clone())
+        .collect::<Vec<_>>();
+    let titles_b = screen_b
+        .panels
+        .iter()
+        .map(|panel| panel.title.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        titles_a,
+        vec![
+            "Approval required".to_string(),
+            "Tool result".to_string(),
+            "Task update".to_string(),
+            "Notice: validation".to_string(),
+        ],
+        "panel priority should keep approval above tool results, and tool results above task/notice regardless of event order; titles_a={titles_a:?}"
+    );
+    assert_eq!(
+        titles_b,
+        vec![
+            "Approval required".to_string(),
+            "Tool result".to_string(),
+            "Task update".to_string(),
+            "Notice: validation".to_string(),
+        ],
+        "panel priority should stay stable even when the input event order changes; titles_b={titles_b:?}"
+    );
+    assert_eq!(
+        screen_a.footer, screen_b.footer,
+        "footer should remain an independent region and not participate in panel ordering"
+    );
+}
+
+#[test]
 fn remote_channel_matrix_matches_final_contract() {
     assert_eq!(
         REMOTE_CHANNEL_MATRIX,

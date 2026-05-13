@@ -98,9 +98,9 @@ pub fn build_tui_loading_screen(request: &str, frame_index: usize) -> TuiScreen 
 
 pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     let mut main = Vec::new();
-    let mut panels = Vec::new();
+    let mut panel_entries = Vec::new();
 
-    for block in &document.blocks {
+    for (index, block) in document.blocks.iter().enumerate() {
         match block {
             RenderBlock::PrimaryText(text) => {
                 if !text.is_empty() {
@@ -109,18 +109,32 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
             }
             RenderBlock::RawRuntime(text) => {
                 if let Some(lines) = raw_runtime_lines_for_tui(text) {
-                    panels.push(TuiPanelSection {
-                        title: "Runtime".into(),
-                        lines,
-                    });
+                    panel_entries.push((
+                        panel_priority(None),
+                        index,
+                        TuiPanelSection {
+                            title: "Runtime".into(),
+                            lines,
+                        },
+                    ));
                 }
             }
-            RenderBlock::Panel(panel) => panels.push(TuiPanelSection {
-                title: panel.title.clone(),
-                lines: panel.lines.clone(),
-            }),
+            RenderBlock::Panel(panel) => panel_entries.push((
+                panel_priority(Some(panel.kind)),
+                index,
+                TuiPanelSection {
+                    title: panel.title.clone(),
+                    lines: panel.lines.clone(),
+                },
+            )),
         }
     }
+
+    panel_entries.sort_by_key(|(priority, index, _)| (*priority, *index));
+    let panels = panel_entries
+        .into_iter()
+        .map(|(_, _, panel)| panel)
+        .collect::<Vec<_>>();
 
     if main.is_empty() && panels.is_empty() {
         main = vec![
@@ -138,6 +152,16 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
             "  > enter a request and press return".into(),
         ],
         footer: build_tui_footer(document),
+    }
+}
+
+fn panel_priority(kind: Option<PanelKind>) -> u8 {
+    match kind {
+        Some(PanelKind::Approval) => 0,
+        Some(PanelKind::ToolResult) => 1,
+        Some(PanelKind::TaskSummary) => 2,
+        Some(PanelKind::Notice) => 3,
+        None => 4,
     }
 }
 
