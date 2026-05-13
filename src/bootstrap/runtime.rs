@@ -1850,11 +1850,12 @@ mod tui_output_tests {
     use super::{
         backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
         normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
-        tui_input_viewport, TuiTurnStatus,
+        tui_context_document, tui_input_viewport, TuiTurnStatus,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
     use crate::cost::tracker::CostTracker;
+    use crate::core::message::Message;
     use crate::interaction::dispatcher::NotificationDispatcher;
     use crate::interaction::telegram::gateway::TelegramGateway;
     use crate::security::audit::AuditLog;
@@ -2003,6 +2004,40 @@ mod tui_output_tests {
 
         assert!(status_pos < model_pos);
         assert!(model_pos < input_pos);
+    }
+
+    #[test]
+    fn tui_context_document_uses_full_session_history_for_transcript() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("older user message"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("older assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+        let current_turn = crate::interaction::cli::renderer::RenderDocument {
+            blocks: vec![crate::interaction::cli::renderer::RenderBlock::PrimaryText(
+                "latest only".into(),
+            )],
+        };
+
+        let context_document = tui_context_document(&app_state, &current_turn);
+        let rendered =
+            crate::interaction::cli::renderer::render_document_tui_output(&context_document);
+
+        assert!(rendered.contains("older user message"));
+        assert!(rendered.contains("older assistant reply"));
+        assert!(!rendered.contains("latest only"));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
