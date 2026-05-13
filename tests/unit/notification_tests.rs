@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rust_agent::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+use rust_agent::command::builtin::{help::HelpCommand, register_builtin_commands};
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
@@ -1162,6 +1163,103 @@ fn cli_startup_hint_prioritizes_coding_path_over_legacy_capabilities() {
         "startup hint should not foreground legacy or non-V1 capability surfaces; main={:?}",
         screen.main
     );
+}
+
+#[tokio::test]
+async fn cli_help_prioritizes_coding_workflow_over_legacy_surfaces() {
+    let registry = Arc::new(register_builtin_commands(CommandRegistry::new()));
+    let app_state = AppState {
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        client_type: ClientType::Cli,
+        session_source: SessionSource::LocalCli,
+        runtime_role: RuntimeRole::Coordinator,
+        worker_role: None,
+        permission_context: ToolPermissionContext::new(PermissionMode::Default),
+        command_registry: Some(registry),
+        runtime_tool_registry: Some(Arc::new(RwLock::new(ToolRegistry::new()))),
+        skill_registry: None,
+        mcp_runtime: None,
+        plugin_load_result: None,
+        cost_tracker: CostTracker::default(),
+        service_observability_tracker:
+            rust_agent::service::observability::ServiceObservabilityTracker::default(),
+        notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+        audit_log: Arc::new(std::sync::Mutex::new(AuditLog::default())),
+        startup_trace: Vec::new(),
+        active_model_runtime: None,
+        active_model_profile_name: None,
+        active_model_profile_source:
+            rust_agent::state::app_state::ActiveModelProfileSource::BootstrapDefault,
+        active_model_provider_summary: rust_agent::state::app_state::ActiveModelProviderSummary {
+            provider_id: "default-provider".into(),
+            protocol: "Anthropic".into(),
+            compatibility_profile: "Anthropic".into(),
+            base_url_host: "localhost".into(),
+            model: "default-model".into(),
+            auth_status: "env:OPENAI_API_KEY(unset)".into(),
+        },
+        active_session_id: "session-help-contract".into(),
+        session_store: None,
+        session: None,
+        history: None,
+        restored_session: None,
+        last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
+        subagent_limiter: None,
+        boss_coordinator: None,
+        remote_actor_store: None,
+    };
+
+    let result = HelpCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
+        .await
+        .expect("help command should render");
+
+    let CommandResult::Message(text) = result else {
+        panic!("expected help message");
+    };
+
+    assert!(
+        text.contains("Coding workflow:")
+            || text.contains("Coding path:")
+            || text.contains("Start a coding task:")
+            || text.contains("Ask RustAgent to inspect"),
+        "/help should foreground a coding workflow instead of dropping users into a generic command dump; text={text}"
+    );
+    assert!(
+        (text.contains("inspect") || text.contains("read"))
+            && (text.contains("edit") || text.contains("change"))
+            && (text.contains("run") || text.contains("verify")),
+        "/help should explain the inspect/edit/run coding loop; text={text}"
+    );
+    assert!(
+        text.contains("/permissions") || text.to_ascii_lowercase().contains("approval"),
+        "/help should foreground approval or permission guidance for coding work; text={text}"
+    );
+    assert!(
+        text.contains("/resume"),
+        "/help should foreground resume support as part of the coding workflow; text={text}"
+    );
+
+    let legacy_positions = ["/LisM", "/UM", "/swarm", "/plugins"]
+        .into_iter()
+        .filter_map(|needle| text.find(needle).map(|idx| (needle, idx)))
+        .collect::<Vec<_>>();
+    if let Some(coding_anchor) = text
+        .find("Coding workflow:")
+        .or_else(|| text.find("Coding path:"))
+        .or_else(|| text.find("Start a coding task:"))
+        .or_else(|| text.find("Ask RustAgent to inspect"))
+    {
+        assert!(
+            legacy_positions.iter().all(|(_, idx)| *idx > coding_anchor),
+            "/help should not foreground legacy/non-V1 surfaces ahead of the coding workflow; legacy_positions={legacy_positions:?} text={text}"
+        );
+    }
 }
 
 #[test]

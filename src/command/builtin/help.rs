@@ -47,6 +47,12 @@ impl Command for HelpCommand {
         });
 
         let mut lines = vec![
+            "RustAgent is optimized for coding tasks.".to_string(),
+            "Ask RustAgent to inspect code, edit files, or run verification commands."
+                .to_string(),
+            "Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."
+                .to_string(),
+            String::new(),
             "Available commands:".to_string(),
             "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category] [sensitive] [model_invocation=disabled] [immediate]".to_string(),
         ];
@@ -122,7 +128,7 @@ impl Command for HelpCommand {
             }
         }
 
-        if lines.len() == 2 {
+        if lines.len() == 6 {
             lines.push(String::new());
             lines.push("No commands are currently visible.".to_string());
         }
