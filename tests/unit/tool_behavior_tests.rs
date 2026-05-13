@@ -12,6 +12,7 @@ use rust_agent::tool::builtin::file_read::FileReadTool;
 use rust_agent::tool::builtin::file_write::FileWriteTool;
 use rust_agent::tool::builtin::glob::GlobTool;
 use rust_agent::tool::builtin::grep::GrepTool;
+use rust_agent::tool::builtin::notebook_edit::NotebookEditTool;
 use rust_agent::tool::builtin::task_create::TaskCreateTool;
 use rust_agent::tool::builtin::task_stop::TaskStopTool;
 use rust_agent::tool::builtin::task_update::TaskUpdateTool;
@@ -1342,4 +1343,41 @@ fn open_world_remains_independent_assembly_gate_under_always_load() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
     assert!(!restricted_names.contains(&"OpenWorldAlwaysLoaded"));
+}
+
+#[test]
+fn v1_default_coding_model_surface_stays_local_and_core() {
+    let registry = ToolRegistry::new()
+        .register(Arc::new(AskUserQuestionTool))
+        .register(Arc::new(BashTool))
+        .register(Arc::new(FileEditTool))
+        .register(Arc::new(FileReadTool))
+        .register(Arc::new(FileWriteTool))
+        .register(Arc::new(GlobTool))
+        .register(Arc::new(GrepTool))
+        .register(Arc::new(NotebookEditTool))
+        .register(Arc::new(WebFetchTool))
+        .register(Arc::new(WebSearchTool));
+
+    let context = ToolAssemblyContext::coordinator(InteractionSurface::Cli, SessionMode::Headless);
+    let assembled = registry.assemble(context);
+    let visible_model_tool_names = assembled
+        .visible_model_tools(&context.permission_context(PermissionMode::Default))
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    for required in ["Read", "Edit", "Write", "Bash", "Grep", "Glob"] {
+        assert!(
+            visible_model_tool_names.iter().any(|name| name == required),
+            "V1 default coding surface is missing required local tool {required}; visible={visible_model_tool_names:?}"
+        );
+    }
+
+    for excluded in ["WebSearch", "WebFetch", "AskUserQuestion", "NotebookEdit"] {
+        assert!(
+            !visible_model_tool_names.iter().any(|name| name == excluded),
+            "V1 default coding surface leaked non-core tool {excluded}; visible={visible_model_tool_names:?}"
+        );
+    }
 }
