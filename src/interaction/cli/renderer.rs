@@ -2,6 +2,7 @@ use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use serde_json::Value;
+use std::path::PathBuf;
 
 const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
@@ -442,6 +443,10 @@ fn tool_result_activity_block(
         return None;
     }
 
+    if matches!(tool_name, "Edit" | "FileEdit") {
+        return render_edit_activity_block(content, detail);
+    }
+
     let headline = match tool_name {
         "Bash" => summary
             .strip_suffix(" succeeded")
@@ -467,6 +472,132 @@ fn summarize_bash_activity_detail(content: &str) -> Vec<String> {
         .filter(|line| !line.starts_with("Command:"))
         .collect::<Vec<_>>();
     compact_tool_detail_lines(lines)
+}
+
+fn render_edit_activity_block(content: &str, detail: Option<&str>) -> Option<(String, Vec<String>)> {
+    let detail_source = detail.unwrap_or(content);
+    let fields = parse_key_value_lines(detail_source);
+    let path = fields.get("path")?;
+    let old_text = decode_tool_preview_text(fields.get("old_text").map(String::as_str).unwrap_or(""));
+    let new_text = decode_tool_preview_text(fields.get("new_text").map(String::as_str).unwrap_or(""));
+
+    let old_count = count_nonempty_lines(&old_text);
+    let new_count = count_nonempty_lines(&new_text);
+    let display_path = display_activity_path(path);
+    let headline = format!(
+        "{} {} ({} {})",
+        style_activity_action("EDITED"),
+        display_path,
+        style_activity_added_count(new_count),
+        style_activity_removed_count(old_count),
+    );
+
+    let detail_lines = render_edit_diff_lines(path, &old_text, &new_text);
+    Some((headline, detail_lines))
+}
+
+fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<String> {
+    let file_text = std::fs::read_to_string(path).ok();
+    let new_lines = split_preserve_empty(new_text);
+    let old_lines = split_preserve_empty(old_text);
+    let start_line = file_text
+        .as_deref()
+        .and_then(|text| locate_line_number(text, new_text))
+        .unwrap_or(1);
+
+    let width = (start_line + old_lines.len().max(new_lines.len()) + 1)
+        .to_string()
+        .len()
+        .max(3);
+    let mut rendered = Vec::new();
+
+    for (idx, line) in old_lines.iter().enumerate() {
+        rendered.push(style_removed_diff_line(start_line + idx, width, line));
+    }
+    for (idx, line) in new_lines.iter().enumerate() {
+        rendered.push(style_added_diff_line(start_line + idx, width, line));
+    }
+
+    if rendered.is_empty() {
+        rendered.push(style_added_diff_line(start_line, width, &truncate_for_tui(new_text, 96)));
+    }
+
+    rendered
+}
+
+fn parse_key_value_lines(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut fields = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            fields.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    fields
+}
+
+fn decode_tool_preview_text(value: &str) -> String {
+    value.replace("\\n", "\n")
+}
+
+fn split_preserve_empty(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.lines().map(|line| line.to_string()).collect()
+}
+
+fn locate_line_number(file_text: &str, snippet: &str) -> Option<usize> {
+    if snippet.trim().is_empty() {
+        return None;
+    }
+
+    let byte_index = file_text.find(snippet)?;
+    Some(file_text[..byte_index].bytes().filter(|byte| *byte == b'\n').count() + 1)
+}
+
+fn count_nonempty_lines(text: &str) -> usize {
+    let count = text.lines().count();
+    if count == 0 { usize::from(!text.is_empty()) } else { count }
+}
+
+fn display_activity_path(path: &str) -> String {
+    current_dir_relative_path(path)
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn current_dir_relative_path(path: &str) -> Option<String> {
+    let current_dir = std::env::current_dir().ok()?;
+    let absolute = PathBuf::from(path);
+    absolute
+        .strip_prefix(current_dir)
+        .ok()
+        .map(|relative| relative.display().to_string())
+}
+
+fn style_activity_added_count(count: usize) -> String {
+    format!("\x1b[32m+{count}\x1b[0m")
+}
+
+fn style_activity_removed_count(count: usize) -> String {
+    format!("\x1b[31m-{count}\x1b[0m")
+}
+
+fn style_added_diff_line(line_number: usize, width: usize, line: &str) -> String {
+    format!(
+        "\x1b[48;5;120m{:>width$} + {}\x1b[0m",
+        line_number,
+        truncate_for_tui(line, 96),
+        width = width
+    )
+}
+
+fn style_removed_diff_line(line_number: usize, width: usize, line: &str) -> String {
+    format!(
+        "\x1b[48;5;224m{:>width$} - {}\x1b[0m",
+        line_number,
+        truncate_for_tui(line, 96),
+        width = width
+    )
 }
 
 fn is_low_signal_tool_detail(line: &str) -> bool {
@@ -825,6 +956,44 @@ mod tests {
         assert!(rendered.contains("READ renderer.rs"));
         assert!(rendered.contains("SEARCH delta|tool use in reference"));
         assert_eq!(rendered.matches("READ renderer.rs").count(), 1);
+    }
+
+    #[test]
+    fn tui_renders_edit_activity_as_colored_diff_preview() {
+        let path = std::env::temp_dir().join("renderer_edit_activity_preview.rs");
+        std::fs::write(
+            &path,
+            "fn before() {\n    println!(\"old\");\n}\nfn after() {}\n",
+        )
+        .expect("write temp preview file");
+        let path_text = path.display().to_string();
+
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Edit".into(),
+                content: format!(
+                    "path={path_text}\nreplacements=1\nreplace_all=false\nold_text=    println!(\"todo\");\nnew_text=    println!(\"old\");"
+                ),
+                summary: Some("Edit succeeded".into()),
+                detail: Some(format!(
+                    "path={path_text}\nreplacements=1\nreplace_all=false\nold_text=    println!(\"todo\");\nnew_text=    println!(\"old\");"
+                )),
+            })],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("[Activity]"));
+        assert!(plain.contains("EDITED"));
+        assert!(plain.contains("(+1 -1)"));
+        assert!(plain.contains("renderer_edit_activity_preview.rs"));
+        assert!(plain.contains("+     println!(\"old\");") || plain.contains("+ println!(\"old\");"));
+        assert!(plain.contains("-     println!(\"todo\");") || plain.contains("- println!(\"todo\");"));
+        assert!(rendered.contains("\x1b[48;5;120m"));
+        assert!(rendered.contains("\x1b[48;5;224m"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
