@@ -1898,6 +1898,147 @@ async fn cli_resume_restores_cwd_mode_and_pending_approval_consistently() {
     );
 }
 
+#[tokio::test]
+async fn v1_release_gate_minimal_coding_cli_surface_stays_green() {
+    let registry = Arc::new(
+        CommandRegistry::new()
+            .register(Arc::new(HelpCommand))
+            .register(Arc::new(PermissionsCommand))
+            .register(Arc::new(ResumeCommand))
+            .register(Arc::new(StatusCommand))
+            .register(Arc::new(TasksCommand))
+            .register(Arc::new(DoctorCommand)),
+    );
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+    let root = unique_temp_path("rust-agent-v1-release-gate");
+    let mut app_state = test_app_state(Some(registry), Some(manager.clone()), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("release-gate-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: Some("2026-05-13T11:00:00Z".into()),
+        prompt_seed: None,
+    });
+    app_state.active_session_id = "release-gate-session".into();
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "cargo test --manifest-path RustAgent/Agent/Cargo.toml".into(),
+            message: "approval needed before running cargo test".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+    let history = rust_agent::history::session::SessionHistory {
+        entries: vec![rust_agent::history::session::SessionHistoryEntry {
+            message: Message::user("inspect the verification failure and rerun tests"),
+            timestamp: Some("2026-05-13T10:59:00Z".into()),
+            tool_refs: vec!["Read".into(), "Bash".into()],
+            milestone: None,
+        }],
+    };
+    app_state.history = Some(history.clone());
+    app_state.restored_session = Some(RestoredSession {
+        snapshot: app_state.session.clone().expect("session snapshot should exist"),
+        history: history.clone(),
+        transcript: Transcript::from(history),
+    });
+
+    let running = manager.create("stream logs", "release-gate-session", InteractionSurface::Cli);
+    manager.start(&running.id);
+    let completed = manager.create(
+        "finish repair",
+        "release-gate-session",
+        InteractionSurface::Cli,
+    );
+    manager.append_output(&completed.id, "repair succeeded\n");
+    manager.complete(&completed.id, &dispatcher);
+
+    let help_text = HelpCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/help"),
+            &app_state,
+        )
+        .await
+        .expect("help command should render")
+        .to_plain_text()
+        .expect("help command should produce plain text");
+    let status_text = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status command should render")
+        .to_plain_text()
+        .expect("status command should produce plain text");
+    let doctor_text = DoctorCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/doctor"),
+            &app_state,
+        )
+        .await
+        .expect("doctor command should render")
+        .to_plain_text()
+        .expect("doctor command should produce plain text");
+    let resume_text = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render")
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+    let tasks_text = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
+        .await
+        .expect("tasks command should render")
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+
+    assert!(
+        help_text.contains("RustAgent is optimized for coding tasks.")
+            && help_text.contains("Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."),
+        "release gate expects /help to stay coding-first; text={help_text}"
+    );
+    assert!(
+        status_text.contains("Working status:")
+            && status_text.contains("Diagnostics:")
+            && status_text.to_ascii_lowercase().contains("pending approval"),
+        "release gate expects /status to keep working-state and diagnostics layering; text={status_text}"
+    );
+    assert!(
+        doctor_text.contains("Coding blockers:")
+            && doctor_text.contains("Secondary diagnostics:"),
+        "release gate expects /doctor to foreground coding blockers before secondary diagnostics; text={doctor_text}"
+    );
+    assert!(
+        resume_text.contains("Resume summary:")
+            && resume_text.contains("last task:")
+            && resume_text.to_ascii_lowercase().contains("pending approval"),
+        "release gate expects /resume to summarize the restore target before raw resume instructions; text={resume_text}"
+    );
+    assert!(
+        tasks_text.contains("Running tasks:")
+            && tasks_text.contains("Completed tasks:")
+            && tasks_text.to_ascii_lowercase().contains("task output"),
+        "release gate expects /tasks to distinguish active vs terminal tasks with output hints; text={tasks_text}"
+    );
+}
+
 #[test]
 fn plugin_loader_loads_inline_and_file_prompts_and_collects_diagnostics() {
     let root = unique_temp_path("rust-agent-plugin-loader");
