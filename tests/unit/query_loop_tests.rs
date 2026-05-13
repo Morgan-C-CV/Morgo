@@ -70,7 +70,7 @@ struct DeniedFixtureTool;
 struct EchoFixtureTool;
 struct SlowFixtureTool;
 struct CancellableFixtureTool {
-    started: Arc<Notify>,
+    started: Arc<AtomicBool>,
     dropped: Arc<Notify>,
     completed: Arc<AtomicBool>,
 }
@@ -286,7 +286,7 @@ impl Tool for CancellableFixtureTool {
         _call: &ToolCall,
         _permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
-        self.started.notify_waiters();
+        self.started.store(true, Ordering::SeqCst);
         let _guard = DropSignalGuard(Some(self.dropped.clone()));
         tokio::time::sleep(Duration::from_secs(1)).await;
         self.completed.store(true, Ordering::SeqCst);
@@ -1090,7 +1090,7 @@ async fn submit_turn_aggregates_the_same_streamed_event_sequence() {
 
 #[tokio::test]
 async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
-    let started = Arc::new(Notify::new());
+    let started = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(Notify::new());
     let completed = Arc::new(AtomicBool::new(false));
     let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
@@ -1139,9 +1139,13 @@ async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
         EngineEvent::ToolCallStarted { ref tool_name, .. } if tool_name == "CancellableFixture"
     ));
 
-    timeout(Duration::from_millis(50), started.notified())
-        .await
-        .expect("tool should have started");
+    timeout(Duration::from_millis(50), async {
+        while !started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("tool should have started");
 
     drop(receiver);
 
@@ -1153,7 +1157,7 @@ async fn engine_stream_turn_receiver_drop_cancels_background_turn() {
 
 #[tokio::test]
 async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
-    let started = Arc::new(Notify::new());
+    let started = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(Notify::new());
     let completed = Arc::new(AtomicBool::new(false));
     let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
@@ -1193,9 +1197,13 @@ async fn engine_stream_turn_parent_cancellation_emits_aborted_terminal() {
         EngineEvent::ToolCallStarted { ref tool_name, .. } if tool_name == "CancellableFixture"
     ));
 
-    timeout(Duration::from_millis(50), started.notified())
-        .await
-        .expect("tool should have started");
+    timeout(Duration::from_millis(50), async {
+        while !started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("tool should have started");
 
     engine.context.app_state.cancellation_token.cancel();
 

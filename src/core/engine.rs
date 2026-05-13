@@ -13,7 +13,6 @@ use crate::state::app_state::SessionPersistFailure;
 use crate::task::types::TaskEvent;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 
 const STREAM_TURN_BUFFER: usize = 64;
 
