@@ -293,6 +293,7 @@ fn render_task_panel(task_event: &TaskView) -> RenderPanel {
 
 fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -> RenderPanel {
     let mut lines = vec![format!("Tool: {tool_name}")];
+    let mut run = None;
     let mut reason = None;
     let mut action = None;
 
@@ -302,24 +303,40 @@ fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -
             .map(str::trim)
             .filter(|line| !line.is_empty())
         {
-            if raw_line.starts_with("Reason:") {
-                reason = Some(raw_line.to_string());
-            } else if raw_line.starts_with("Choose ") || raw_line.starts_with("Action:") {
+            if let Some(value) = approval_detail_value(raw_line, &["Run", "Command"]) {
+                run = Some(format!("Run: {value}"));
+            } else if let Some(value) = approval_detail_value(raw_line, &["Reason"]) {
+                reason = Some(format!("Reason: {value}"));
+            } else if let Some(value) = approval_detail_value(raw_line, &["Action", "NextStep"]) {
+                action = Some(format!("Action: {value}"));
+            } else if raw_line.starts_with("Choose ") {
                 action = Some(format!(
                     "Action: {}",
-                    raw_line
-                        .trim_start_matches("Action:")
-                        .trim_start_matches("Choose ")
-                        .trim()
+                    raw_line.trim_start_matches("Choose ").trim()
                 ));
             }
         }
     }
 
+    if let Some(run) = run {
+        lines.push(run);
+    }
     lines.push(reason.unwrap_or_else(|| format!("Reason: {message}")));
-    lines.push(action.unwrap_or_else(|| "Action: approve or deny".into()));
+    lines.push(action.unwrap_or_else(|| "Action: choose an approval option below".into()));
 
     render_panel(PanelKind::Approval, "Approval required", lines)
+}
+
+fn approval_detail_value<'a>(line: &'a str, keys: &[&str]) -> Option<&'a str> {
+    let (raw_key, value) = line.split_once(':')?;
+    let normalized_key = raw_key
+        .trim()
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .collect::<String>();
+    keys.iter()
+        .any(|key| normalized_key.eq_ignore_ascii_case(key))
+        .then_some(value.trim())
 }
 
 fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
@@ -1096,6 +1113,32 @@ mod tests {
         assert!(rendered.contains("Final answer"));
         assert!(!rendered.contains("tool Read result:"));
         assert!(!rendered.contains("tool Grep result:"));
+    }
+
+    #[test]
+    fn tui_approval_panel_prefers_run_reason_and_action_fields() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                tool_name: "Bash".into(),
+                message: "raw fallback".into(),
+                code: Some("policy_escalation".into()),
+                summary: Some("Bash pending approval".into()),
+                detail: Some(
+                    "Run: find . -type f | head\nReason: This command uses a pipe.\nAction: choose an approval option below".into(),
+                ),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["shell_operator.pipe".into()],
+            })],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("[Approval required]"));
+        assert!(rendered.contains("Tool: Bash"));
+        assert!(rendered.contains("Run: find . -type f | head"));
+        assert!(rendered.contains("Reason: This command uses a pipe."));
+        assert!(rendered.contains("Action: choose an approval option below"));
+        assert!(!rendered.contains("Reason: raw fallback"));
     }
 
     #[test]

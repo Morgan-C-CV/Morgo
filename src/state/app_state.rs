@@ -24,7 +24,10 @@ use crate::history::session::{
     SessionRestoreRequest, SessionSnapshot, SessionStore, SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
-use crate::security::approval_protocol::{ApprovalDecision, ApprovalSurface};
+use crate::security::approval_protocol::{
+    ApprovalDecision, ApprovalResponse, ApprovalSurface, approval_always_allow_notice,
+    approval_always_allow_rule,
+};
 use crate::security::audit::{AuditEvent, AuditLog};
 use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
@@ -422,13 +425,25 @@ impl AppState {
     }
 
     pub async fn resolve_pending_approval(&self, approved: bool) -> anyhow::Result<CommandResult> {
+        let response = if approved {
+            ApprovalResponse::ApproveOnce
+        } else {
+            ApprovalResponse::Deny
+        };
+        self.resolve_pending_approval_response(response).await
+    }
+
+    pub async fn resolve_pending_approval_response(
+        &self,
+        response: ApprovalResponse,
+    ) -> anyhow::Result<CommandResult> {
         let Some(pending) = self.permission_context.pending_approval() else {
             return Ok(CommandResult::Denied(
                 "no pending approval in this session".into(),
             ));
         };
 
-        let decision = ApprovalDecision::from_bool(approved);
+        let decision = response.decision();
         let surface = ApprovalSurface::from_interaction_surface(self.surface);
 
         let emit_audit = |decision: ApprovalDecision| {
@@ -446,14 +461,33 @@ impl AppState {
             );
         };
 
-        if !approved {
+        if matches!(response, ApprovalResponse::Deny) {
             self.permission_context.set_pending_approval(None);
             emit_audit(decision);
             return Ok(CommandResult::Message(format!(
-                "Denied approval for {}. The command was not executed. Update the command to a safer alternative, or approve it if you want it to run.",
+                "Denied approval for {}. The command was not executed. Tell me what to run instead, or ask me to make it safer.",
                 pending.tool_name
             )));
         }
+
+        let allow_rule = if matches!(response, ApprovalResponse::ApproveAlways) {
+            approval_always_allow_rule(&pending)
+        } else {
+            None
+        };
+        let allow_notice = if matches!(response, ApprovalResponse::ApproveAlways) {
+            let added = allow_rule
+                .as_deref()
+                .map(|rule| self.permission_context.add_always_allow_rule(rule))
+                .unwrap_or(false);
+            Some(approval_always_allow_notice(
+                &pending,
+                allow_rule.as_deref(),
+                added,
+            ))
+        } else {
+            None
+        };
 
         match pending.tool_name.as_str() {
             "EnterPlanMode" => {
@@ -463,7 +497,7 @@ impl AppState {
                 );
                 self.permission_context.set_pending_approval(None);
                 emit_audit(decision);
-                Ok(CommandResult::Message(message))
+                Ok(CommandResult::Message(prepend_notice(allow_notice, message)))
             }
             "ExitPlanMode" => {
                 let message = crate::state::plan_mode::apply_exit_plan_mode(
@@ -472,7 +506,7 @@ impl AppState {
                 )?;
                 self.permission_context.set_pending_approval(None);
                 emit_audit(decision);
-                Ok(CommandResult::Message(message))
+                Ok(CommandResult::Message(prepend_notice(allow_notice, message)))
             }
             tool_name => {
                 let registry_result = self.runtime_tool_registry.as_ref().ok_or_else(|| {
@@ -489,21 +523,38 @@ impl AppState {
                     )
                     .await?;
                 match result {
-                    ToolResult::Text(text) => Ok(CommandResult::Message(text)),
+                    ToolResult::Text(text) => {
+                        Ok(CommandResult::Message(prepend_notice(allow_notice, text)))
+                    }
                     ToolResult::Denied(reason) => Ok(CommandResult::Denied(reason)),
                     ToolResult::PendingApproval { message, .. } => Ok(CommandResult::Message(
-                        format!("approval still required: {message}"),
+                        prepend_notice(allow_notice, format!("approval still required: {message}")),
                     )),
                     ToolResult::Interrupted(reason) => {
-                        Ok(CommandResult::Message(format!("Interrupted: {reason}")))
+                        Ok(CommandResult::Message(prepend_notice(
+                            allow_notice,
+                            format!("Interrupted: {reason}"),
+                        )))
                     }
-                    ToolResult::Progress(progress) => Ok(CommandResult::Message(progress)),
+                    ToolResult::Progress(progress) => Ok(CommandResult::Message(prepend_notice(
+                        allow_notice,
+                        progress,
+                    ))),
                     ToolResult::ResultTooLarge(reason) => Ok(CommandResult::Message(format!(
-                        "Result too large: {reason}"
+                        "{}",
+                        prepend_notice(allow_notice, format!("Result too large: {reason}"))
                     ))),
                 }
             }
         }
+    }
+}
+
+fn prepend_notice(notice: Option<String>, body: String) -> String {
+    match notice {
+        Some(notice) if body.trim().is_empty() => notice,
+        Some(notice) => format!("{notice}\n{body}"),
+        None => body,
     }
 }
 

@@ -1291,6 +1291,204 @@ async fn engine_stream_turn_parent_cancellation_aborts_worker_mailbox_wait() {
 }
 
 #[tokio::test]
+async fn engine_rejects_second_turn_while_owner_is_busy() {
+    let registry = ToolRegistry::new().register(Arc::new(SlowFixtureTool));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("planning".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "SlowFixture".into(),
+                    input: "{}".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+
+    let mut receiver = engine.stream_turn(Message::user("run slow tool")).await;
+    assert!(engine.has_active_turn());
+
+    let first = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+    assert!(matches!(first, EngineEvent::AssistantDelta(text) if text == "planning"));
+
+    let busy = engine.submit_turn(Message::user("second turn")).await;
+    assert_eq!(busy.state, QueryLoopState::Failed);
+    assert_eq!(busy.terminal, Terminal::OwnerBusy);
+    assert!(matches!(
+        busy.events.as_slice(),
+        [EngineEvent::RuntimeEvent(runtime), EngineEvent::Terminal(Terminal::OwnerBusy)]
+            if runtime.kind == rust_agent::core::events::RuntimeEventKind::OwnerBusy
+                && runtime.detail == Terminal::OwnerBusy.as_str()
+    ));
+
+    let terminal = timeout(Duration::from_millis(250), async {
+        while let Some(event) = receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("first turn should finish normally");
+    assert_eq!(terminal, Terminal::Completed);
+
+    timeout(Duration::from_millis(100), async {
+        while engine.has_active_turn() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("owner slot should be released after first turn completion");
+}
+
+#[tokio::test]
+async fn owner_busy_turn_does_not_persist_history() {
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let session_id = SessionId("owner-busy-history".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/owner-busy-history".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    session_store
+        .save(snapshot.clone(), SessionHistory::default())
+        .expect("seed session history");
+
+    let registry = ToolRegistry::new().register(Arc::new(SlowFixtureTool));
+    let mut context = test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("planning".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "SlowFixture".into(),
+                    input: "{}".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    );
+    context.app_state.active_session_id = session_id.0.clone();
+    context.app_state.session_store = Some(session_store.clone());
+    context.app_state.session = Some(snapshot);
+    context.app_state.history = Some(SessionHistory::default());
+
+    let mut engine = QueryEngine::new(context);
+    let mut receiver = engine.stream_turn(Message::user("run slow tool")).await;
+
+    let _ = timeout(Duration::from_millis(50), receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+
+    let (_, history_before_busy) = session_store
+        .load(&rust_agent::history::session::SessionRestoreRequest {
+            resume: Some(session_id.0.clone()),
+            continue_session: false,
+        })
+        .expect("persisted history should exist before busy rejection");
+
+    let busy = engine.submit_turn(Message::user("should be rejected")).await;
+    assert_eq!(busy.terminal, Terminal::OwnerBusy);
+
+    let (_, persisted_history) = session_store
+        .load(&rust_agent::history::session::SessionRestoreRequest {
+            resume: Some(session_id.0.clone()),
+            continue_session: false,
+        })
+        .expect("persisted history should exist");
+    assert_eq!(persisted_history, history_before_busy);
+
+    let _ = timeout(Duration::from_millis(250), async {
+        while let Some(event) = receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("first turn should finish normally");
+}
+
+#[tokio::test]
+async fn interrupt_active_turn_cancels_inflight_turn_and_releases_owner_slot() {
+    let registry = ToolRegistry::new().register(Arc::new(CancellableFixtureTool {
+        started: Arc::new(AtomicBool::new(false)),
+        dropped: Arc::new(AtomicBool::new(false)),
+        completed: Arc::new(AtomicBool::new(false)),
+    }));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![vec![
+            StreamEvent::MessageStart,
+            StreamEvent::TextDelta("planning".into()),
+            StreamEvent::ToolUse {
+                tool_name: "CancellableFixture".into(),
+                input: "{}".into(),
+            },
+            StreamEvent::MessageStop {
+                stop_reason: StopReason::ToolUse,
+            },
+        ]],
+        registry,
+    ));
+
+    let mut receiver = engine.stream_turn(Message::user("cancel current turn")).await;
+    assert!(engine.has_active_turn());
+    assert!(engine.interrupt_active_turn());
+
+    let terminal = timeout(Duration::from_millis(250), async {
+        while let Some(event) = receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("interrupt should end the in-flight turn");
+    assert_eq!(terminal, Terminal::AbortedStreaming);
+
+    timeout(Duration::from_millis(100), async {
+        while engine.has_active_turn() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("owner slot should be released after interrupt");
+    assert!(!engine.interrupt_active_turn());
+}
+
+#[tokio::test]
 async fn cli_streaming_callback_receives_multiple_delta_updates_before_completion() {
     let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
@@ -1332,6 +1530,72 @@ async fn cli_streaming_callback_receives_multiple_delta_updates_before_completio
     ));
     assert!(updates.iter().any(|turn| turn.primary_text == "ab"));
     assert_eq!(output.primary_text, "ab");
+}
+
+#[tokio::test]
+async fn cli_streaming_surfaces_owner_busy_as_typed_runtime_and_terminal() {
+    let registry = ToolRegistry::new().register(Arc::new(SlowFixtureTool));
+    let mut engine = QueryEngine::new(test_context_with_turns(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("planning".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "SlowFixture".into(),
+                    input: "{}".into(),
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ],
+        registry,
+    ));
+    let router = CommandRouter::new(
+        Arc::new(CommandRegistry::new()),
+        Box::new(DefaultSurfaceAuthorizer::default()),
+    );
+    let app_state = engine.context.app_state.clone();
+    let mut first_receiver = engine.stream_turn(Message::user("run slow tool")).await;
+
+    let _ = timeout(Duration::from_millis(50), first_receiver.recv())
+        .await
+        .expect("expected an early delta event")
+        .expect("receiver should stay open");
+
+    let output = handle_cli_input_streaming(&router, &mut engine, &app_state, "second", |_| {})
+        .await
+        .expect("owner-busy turn should surface as a normal CLI result");
+
+    assert!(output.primary_text.is_empty());
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice { runtime_kind, .. })
+            if runtime_kind.as_deref() == Some("OwnerBusy")
+    )));
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { kind, .. })
+            if kind == "owner_busy"
+    )));
+
+    let _ = timeout(Duration::from_millis(250), async {
+        while let Some(event) = first_receiver.recv().await {
+            if let EngineEvent::Terminal(terminal) = event {
+                return terminal;
+            }
+        }
+        panic!("stream ended without a terminal event");
+    })
+    .await
+    .expect("first turn should finish normally");
 }
 
 #[test]

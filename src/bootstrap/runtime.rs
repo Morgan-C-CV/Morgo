@@ -72,6 +72,7 @@ use crate::plugins::types::{
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
 };
 use crate::security::audit::AuditLog;
+use crate::security::approval_protocol::approval_always_allow_detail;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
 use crate::security::workspace_capability::WorkspaceCapabilityConfig;
@@ -309,6 +310,7 @@ struct TuiSuggestion {
     label: String,
     detail: String,
     accent_color: &'static str,
+    submit_on_enter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +458,7 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
                         CommandSource::Mcp => "34",
                         CommandSource::Plugin => "33",
                     },
+                    submit_on_enter: false,
                 })
                 .collect::<Vec<_>>()
         })
@@ -485,6 +488,43 @@ fn runtime_only_tui_suggestions(query: &str) -> Vec<TuiSuggestion> {
             .collect(),
         query,
     )
+}
+
+fn tui_input_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
+    pending_approval_tui_suggestions(app_state, input)
+        .unwrap_or_else(|| tui_command_suggestions(app_state, input))
+}
+
+fn pending_approval_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<TuiSuggestion>> {
+    let pending = app_state.permission_context.pending_approval()?;
+    let query = input.trim();
+    Some(filter_suggestions(
+        vec![
+            TuiSuggestion {
+                replacement: "approve once".into(),
+                label: "approve once".into(),
+                detail: "Run this request now, but keep asking next time.".into(),
+                accent_color: "32",
+                submit_on_enter: true,
+            },
+            TuiSuggestion {
+                replacement: "approve and don't ask again".into(),
+                label: "approve and don't ask again".into(),
+                detail: approval_always_allow_detail(&pending),
+                accent_color: "33",
+                submit_on_enter: true,
+            },
+            TuiSuggestion {
+                replacement: "No, and tell what to do".into(),
+                label: "No, and tell what to do".into(),
+                detail: "Deny this run, stop here, and wait for a safer command or new instructions."
+                    .into(),
+                accent_color: "31",
+                submit_on_enter: true,
+            },
+        ],
+        query,
+    ))
 }
 
 fn heuristic_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<TuiSuggestion>> {
@@ -1160,6 +1200,7 @@ fn heuristic_suggestion(
         label: label.into(),
         detail: detail.into(),
         accent_color,
+        submit_on_enter: false,
     }
 }
 
@@ -1347,6 +1388,9 @@ fn autocomplete_slash_command(
         return None;
     }
     let selected = suggestions.get(selected_suggestion?)?;
+    if selected.submit_on_enter {
+        return None;
+    }
     let current = input.trim_end();
     let replacement = selected.replacement.trim_end();
     if replacement == current || !replacement.starts_with(current) {
@@ -1357,15 +1401,21 @@ fn autocomplete_slash_command(
 }
 
 fn apply_selected_suggestion(
-    input: &str,
     suggestions: &[TuiSuggestion],
     selected_suggestion: Option<usize>,
 ) -> Option<String> {
-    if !input.starts_with('/') {
-        return None;
-    }
     suggestions
         .get(selected_suggestion?)
+        .map(|suggestion| suggestion.replacement.clone())
+}
+
+fn selected_submission_suggestion(
+    suggestions: &[TuiSuggestion],
+    selected_suggestion: Option<usize>,
+) -> Option<String> {
+    suggestions
+        .get(selected_suggestion?)
+        .filter(|suggestion| suggestion.submit_on_enter)
         .map(|suggestion| suggestion.replacement.clone())
 }
 
@@ -1760,6 +1810,8 @@ fn tui_layout_metrics(
     const INPUT_BOX_HEIGHT: usize = 4;
     let suggestion_count = if input.starts_with('/') {
         suggestions.len().max(1)
+    } else if !suggestions.is_empty() {
+        suggestions.len()
     } else {
         0
     };
@@ -2253,6 +2305,14 @@ fn render_fixed_tui_layout(
                 })
                 .collect::<Vec<_>>()
         }
+    } else if !suggestions.is_empty() {
+        suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                render_command_suggestion_line(command, Some(index) == selected_suggestion)
+            })
+            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -3889,8 +3949,8 @@ impl RuntimeBootstrap {
             {
                 pending_exit_gesture = None;
             }
-            let suggestions = tui_command_suggestions(app_state, &input);
-            selected_suggestion = if input.starts_with('/') && !suggestions.is_empty() {
+            let suggestions = tui_input_suggestions(app_state, &input);
+            selected_suggestion = if !suggestions.is_empty() {
                 Some(selected_suggestion.unwrap_or(0).min(suggestions.len().saturating_sub(1)))
             } else {
                 None
@@ -3950,7 +4010,7 @@ impl RuntimeBootstrap {
                     }
 
                     if let Some(gesture) = tui_exit_gesture_for_key(&key) {
-                        if !suggestions.is_empty() && selected_suggestion.is_some() {
+                        if input.starts_with('/') && !suggestions.is_empty() && selected_suggestion.is_some() {
                             selected_suggestion = None;
                             pending_exit_gesture = None;
                             continue;
@@ -3988,6 +4048,23 @@ impl RuntimeBootstrap {
                                 insert_input_char(&mut input, &mut cursor_index, '\n');
                                 selected_suggestion = Some(0);
                                 continue;
+                            }
+                            if input.trim().is_empty() {
+                                if let Some(submission) = selected_submission_suggestion(
+                                    &suggestions,
+                                    selected_suggestion,
+                                ) {
+                                    input = submission;
+                                    cursor_index = input.chars().count();
+                                } else {
+                                    continue;
+                                }
+                            }
+                            if let Some(submission) =
+                                selected_submission_suggestion(&suggestions, selected_suggestion)
+                            {
+                                input = submission;
+                                cursor_index = input.chars().count();
                             }
                             if input.trim().is_empty() {
                                 continue;
@@ -4095,7 +4172,7 @@ impl RuntimeBootstrap {
                         }
                         KeyCode::Tab => {
                             if let Some(completed) =
-                                apply_selected_suggestion(&input, &suggestions, selected_suggestion)
+                                apply_selected_suggestion(&suggestions, selected_suggestion)
                             {
                                 input = completed;
                                 cursor_index = input.chars().count();
@@ -5622,9 +5699,10 @@ mod tests {
     use super::{
         BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS, preview_chars,
         resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
-        terminal_tail_stalled,
+        terminal_tail_stalled, tui_input_suggestions,
     };
     use anyhow::anyhow;
+    use crate::state::permission_context::PendingApproval;
 
     #[test]
     fn preview_chars_respects_utf8_boundaries() {
@@ -5734,6 +5812,59 @@ mod tests {
         assert!(
             exit_command.detail.contains("quit"),
             "exit suggestion detail should mention bare quit support"
+        );
+    }
+
+    #[test]
+    fn pending_approval_tui_suggestions_show_approval_actions_without_slash_input() {
+        let app_state = test_app_state();
+        app_state
+            .permission_context
+            .set_pending_approval(Some(PendingApproval {
+                tool_name: "Bash".into(),
+                tool_input: r#"{"command":"find . -type f | head"}"#.into(),
+                message: "approval required".into(),
+                code: Some("policy_escalation".into()),
+                summary: Some("Bash pending approval".into()),
+                detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["shell_operator.pipe".into()],
+            }));
+
+        let suggestions = tui_input_suggestions(&app_state, "");
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "approve once",
+                "approve and don't ask again",
+                "No, and tell what to do"
+            ]
+        );
+        assert!(suggestions[1].detail.contains("find *"));
+        assert!(suggestions.iter().all(|suggestion| suggestion.submit_on_enter));
+    }
+
+    #[test]
+    fn approval_suggestion_submission_works_without_slash_prefix() {
+        let suggestions = vec![super::TuiSuggestion {
+            replacement: "approve once".into(),
+            label: "approve once".into(),
+            detail: "Run once".into(),
+            accent_color: "32",
+            submit_on_enter: true,
+        }];
+
+        assert_eq!(
+            super::apply_selected_suggestion(&suggestions, Some(0)),
+            Some("approve once".into())
+        );
+        assert_eq!(
+            super::selected_submission_suggestion(&suggestions, Some(0)),
+            Some("approve once".into())
         );
     }
 

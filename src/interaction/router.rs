@@ -3,6 +3,7 @@ use crate::command::registry::CommandRegistry;
 use crate::command::types::{CommandAvailability, CommandMetadata, CommandResult, CommandType};
 use crate::core::message::Message;
 use crate::interaction::envelope::NormalizedInput;
+use crate::security::approval_protocol::{ApprovalResponse, parse_approval_response};
 use crate::security::authorizer::{AuthDecision, SurfaceAuthorizer};
 use crate::state::app_state::AppState;
 
@@ -50,7 +51,7 @@ pub enum UnknownCommandPolicy {
 pub enum RouteDecision {
     ExecuteCommand(RoutedCommand),
     EnterQuery { prompt: String, source: QuerySource },
-    ApprovalResponse { approved: bool },
+    ApprovalResponse { response: ApprovalResponse },
     RejectUnknownCommand { command_name: String },
     Deny(String),
 }
@@ -96,12 +97,8 @@ impl CommandRouter {
             AuthDecision::Allow => {}
         }
 
-        let lowered = input.raw.trim().to_ascii_lowercase();
-        if matches!(lowered.as_str(), "approve" | "yes" | "y") {
-            return RouteDecision::ApprovalResponse { approved: true };
-        }
-        if matches!(lowered.as_str(), "deny" | "no" | "n") {
-            return RouteDecision::ApprovalResponse { approved: false };
+        if let Some(response) = parse_approval_response(&input.raw) {
+            return RouteDecision::ApprovalResponse { response };
         }
 
         match input.command_name.as_deref() {
@@ -144,8 +141,10 @@ impl CommandRouter {
                     (_, result) => Ok(RouteExecution::CommandResult(result)),
                 }
             }
-            RouteDecision::ApprovalResponse { approved } => Ok(RouteExecution::CommandResult(
-                app_state.resolve_pending_approval(approved).await?,
+            RouteDecision::ApprovalResponse { response } => Ok(RouteExecution::CommandResult(
+                app_state
+                    .resolve_pending_approval_response(response)
+                    .await?,
             )),
             RouteDecision::EnterQuery { prompt, source } => {
                 Ok(RouteExecution::EnterQuery { prompt, source })

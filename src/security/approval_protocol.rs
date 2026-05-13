@@ -29,6 +29,23 @@ impl ApprovalDecision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalResponse {
+    ApproveOnce,
+    ApproveAlways,
+    Deny,
+}
+
+impl ApprovalResponse {
+    pub fn decision(self) -> ApprovalDecision {
+        match self {
+            Self::ApproveOnce | Self::ApproveAlways => ApprovalDecision::Approved,
+            Self::Deny => ApprovalDecision::Denied,
+        }
+    }
+}
+
 // ── Approval resolution record ────────────────────────────────────────────────
 
 /// Structured record of a completed approval resolution.
@@ -161,10 +178,70 @@ impl PendingApprovalStatus {
 /// Normalize a raw user input string to an approval decision.
 /// Returns `None` if the input is not a recognized approval response.
 pub fn parse_approval_input(raw: &str) -> Option<ApprovalDecision> {
+    parse_approval_response(raw).map(ApprovalResponse::decision)
+}
+
+pub fn parse_approval_response(raw: &str) -> Option<ApprovalResponse> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "yes" | "y" | "approve" => Some(ApprovalDecision::Approved),
-        "no" | "n" | "deny" => Some(ApprovalDecision::Denied),
+        "yes" | "y" | "approve" | "approve once" => Some(ApprovalResponse::ApproveOnce),
+        "approve and don't ask again"
+        | "approve and dont ask again"
+        | "approve and don't ask"
+        | "approve and dont ask" => Some(ApprovalResponse::ApproveAlways),
+        "no" | "n" | "deny" | "no, and tell what to do" | "tell what to do" => {
+            Some(ApprovalResponse::Deny)
+        }
         _ => None,
+    }
+}
+
+pub fn approval_always_allow_rule(pending: &PendingApproval) -> Option<String> {
+    match pending.tool_name.as_str() {
+        "Bash" => crate::tool::builtin::bash::always_allow_rule_for_tool_input(&pending.tool_input),
+        _ => Some(pending.tool_name.clone()),
+    }
+}
+
+pub fn approval_always_allow_detail(pending: &PendingApproval) -> String {
+    match approval_always_allow_rule(pending) {
+        Some(rule) if pending.tool_name == "Bash" => {
+            format!("Allow similar future Bash commands matching `{rule}` without asking.")
+        }
+        Some(_) => format!(
+            "Allow future {} requests in this session without asking again.",
+            pending.tool_name
+        ),
+        None if pending.tool_name == "Bash" => {
+            "Run this command now and keep asking next time, because a reusable Bash allow rule could not be derived."
+                .into()
+        }
+        None => format!("Remember this approval for future {} requests in this session.", pending.tool_name),
+    }
+}
+
+pub fn approval_always_allow_notice(
+    pending: &PendingApproval,
+    rule: Option<&str>,
+    added: bool,
+) -> String {
+    match (pending.tool_name.as_str(), rule) {
+        ("Bash", Some(rule)) if added => {
+            format!("Saved an allow rule for similar future Bash commands: {rule}")
+        }
+        ("Bash", Some(rule)) => {
+            format!("A matching Bash allow rule is already active: {rule}")
+        }
+        ("Bash", None) => {
+            "Ran the command once, but could not derive a reusable Bash allow rule.".into()
+        }
+        (_, _) if added => format!(
+            "Future {} requests in this session will run without asking first.",
+            pending.tool_name
+        ),
+        _ => format!(
+            "{} approvals are already configured to run without asking in this session.",
+            pending.tool_name
+        ),
     }
 }
 

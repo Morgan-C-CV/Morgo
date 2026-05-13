@@ -11,10 +11,37 @@ use crate::core::query_loop::{
 use crate::history::session::SessionHistoryEntry;
 use crate::state::app_state::SessionPersistFailure;
 use crate::task::types::TaskEvent;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const STREAM_TURN_BUFFER: usize = 64;
+
+#[derive(Debug, Clone)]
+struct ActiveTurnRegistration {
+    turn_id: u64,
+    cancellation_token: CancellationToken,
+    finished: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Default)]
+struct QueryEngineOwnerState {
+    next_turn_id: u64,
+    active_turn: Option<ActiveTurnRegistration>,
+}
+
+impl QueryEngineOwnerState {
+    fn reap_finished_turn(&mut self) {
+        if self
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.finished.load(Ordering::SeqCst))
+        {
+            self.active_turn = None;
+        }
+    }
+}
 
 fn record_runtime_observability(context: &QueryContext, runtime: &RuntimeEventEnvelope) {
     if let Some(service_failure) = runtime.service_failure.as_ref() {
@@ -190,14 +217,23 @@ struct StreamingTurnHandle {
     completion: oneshot::Receiver<QueryLoopResult>,
 }
 
+enum StartTurnOutcome {
+    Started(StreamingTurnHandle),
+    Rejected(QueryLoopResult),
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryEngine {
     pub context: QueryContext,
+    owner: Arc<Mutex<QueryEngineOwnerState>>,
 }
 
 impl QueryEngine {
     pub fn new(context: QueryContext) -> Self {
-        Self { context }
+        Self {
+            context,
+            owner: Arc::new(Mutex::new(QueryEngineOwnerState::default())),
+        }
     }
 
     pub async fn submit_message(&mut self, input: Message) -> Vec<Message> {
@@ -209,15 +245,20 @@ impl QueryEngine {
     }
 
     pub async fn stream_turn(&mut self, input: Message) -> mpsc::Receiver<EngineEvent> {
-        self.start_turn(input).receiver
+        match self.start_turn(input) {
+            StartTurnOutcome::Started(handle) => handle.receiver,
+            StartTurnOutcome::Rejected(result) => receiver_from_result_events(&result),
+        }
     }
 
     pub async fn submit_turn(&mut self, input: Message) -> QueryLoopResult {
-        let fallback_input = input.clone();
         let StreamingTurnHandle {
             mut receiver,
             completion,
-        } = self.start_turn(input);
+        } = match self.start_turn(input.clone()) {
+            StartTurnOutcome::Started(handle) => handle,
+            StartTurnOutcome::Rejected(result) => return result,
+        };
         let mut events = Vec::new();
         while let Some(event) = receiver.recv().await {
             events.push(event);
@@ -233,10 +274,27 @@ impl QueryEngine {
                     message: "streaming turn task terminated unexpectedly".into(),
                     code: None,
                 },
-                messages: vec![fallback_input],
+                messages: vec![input],
                 transition: None,
                 events,
             },
+        }
+    }
+
+    pub fn has_active_turn(&self) -> bool {
+        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        owner.reap_finished_turn();
+        owner.active_turn.is_some()
+    }
+
+    pub fn interrupt_active_turn(&self) -> bool {
+        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        owner.reap_finished_turn();
+        if let Some(active_turn) = owner.active_turn.as_ref() {
+            active_turn.cancellation_token.cancel();
+            true
+        } else {
+            false
         }
     }
 
@@ -293,10 +351,14 @@ impl QueryEngine {
         params
     }
 
-    fn start_turn(&mut self, input: Message) -> StreamingTurnHandle {
+    fn start_turn(&mut self, input: Message) -> StartTurnOutcome {
         let params = self.query_params_for_input(&input);
         let mut context = self.context.clone();
         let turn_cancellation = self.context.app_state.cancellation_token.child_token();
+        let active_turn = match self.claim_active_turn(turn_cancellation.clone()) {
+            Ok(active_turn) => active_turn,
+            Err(result) => return StartTurnOutcome::Rejected(result),
+        };
         context.app_state.cancellation_token = turn_cancellation.clone();
         context.app_state.permission_context = context
             .app_state
@@ -331,46 +393,137 @@ impl QueryEngine {
             }
         });
 
-        tokio::spawn(async move {
-            let stream_state = Arc::new(Mutex::new(StreamingTurnState::new(
-                context.clone(),
-                bridge_tx,
-            )));
-            {
+        let stream_state = Arc::new(Mutex::new(StreamingTurnState::new(context.clone(), bridge_tx)));
+        {
+            let mut state = stream_state
+                .lock()
+                .expect("streaming turn state should not be poisoned");
+            state.persist_user_input(&background_input);
+        }
+        let sink: QueryLoopEventSink = {
+            let stream_state = Arc::clone(&stream_state);
+            Arc::new(move |event| {
                 let mut state = stream_state
                     .lock()
                     .expect("streaming turn state should not be poisoned");
-                state.persist_user_input(&background_input);
-            }
-            let sink: QueryLoopEventSink = {
-                let stream_state = Arc::clone(&stream_state);
-                Arc::new(move |event| {
-                    let mut state = stream_state
-                        .lock()
-                        .expect("streaming turn state should not be poisoned");
-                    state.handle_query_event(event);
-                })
-            };
+                state.handle_query_event(event);
+            })
+        };
+        let worker_state = Arc::clone(&stream_state);
+        let worker_input = background_input.clone();
+        let worker_handle = tokio::spawn(async move {
             let mut result = run_query_loop_with_params_and_sink(
                 &context,
-                background_input,
+                worker_input,
                 params,
                 Some(sink),
                 Some(turn_cancellation),
             )
             .await;
-            let mut state = stream_state
+            let mut state = worker_state
                 .lock()
                 .expect("streaming turn state should not be poisoned");
             result.events = std::mem::take(&mut state.emitted_events);
+            result
+        });
+        let owner = Arc::clone(&self.owner);
+        tokio::spawn(async move {
+            let result = match worker_handle.await {
+                Ok(result) => result,
+                Err(_) => {
+                    let events = {
+                        let mut state = stream_state
+                            .lock()
+                            .expect("streaming turn state should not be poisoned");
+                        std::mem::take(&mut state.emitted_events)
+                    };
+                    QueryLoopResult {
+                        state: QueryLoopState::Failed,
+                        terminal: Terminal::ModelError {
+                            message: "streaming turn task terminated unexpectedly".into(),
+                            code: None,
+                        },
+                        messages: vec![background_input],
+                        transition: None,
+                        events,
+                    }
+                }
+            };
+            release_active_turn(&owner, active_turn.turn_id, &active_turn.finished);
             let _ = completion_tx.send(result);
         });
 
-        StreamingTurnHandle {
+        StartTurnOutcome::Started(StreamingTurnHandle {
             receiver: surface_rx,
             completion: completion_rx,
+        })
+    }
+
+    fn claim_active_turn(
+        &self,
+        cancellation_token: CancellationToken,
+    ) -> Result<ActiveTurnRegistration, QueryLoopResult> {
+        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        owner.reap_finished_turn();
+        if owner.active_turn.is_some() {
+            return Err(self.owner_busy_result());
+        }
+
+        owner.next_turn_id += 1;
+        let active_turn = ActiveTurnRegistration {
+            turn_id: owner.next_turn_id,
+            cancellation_token,
+            finished: Arc::new(AtomicBool::new(false)),
+        };
+        owner.active_turn = Some(active_turn.clone());
+        Ok(active_turn)
+    }
+
+    fn owner_busy_result(&self) -> QueryLoopResult {
+        let terminal = Terminal::OwnerBusy;
+        QueryLoopResult {
+            state: QueryLoopState::Failed,
+            terminal: terminal.clone(),
+            messages: self
+                .context
+                .app_state
+                .canonical_session_history_entries()
+                .into_iter()
+                .map(|entry| entry.message)
+                .collect(),
+            transition: None,
+            events: vec![
+                EngineEvent::RuntimeEvent(runtime_event_for_terminal(&terminal)),
+                EngineEvent::Terminal(terminal),
+            ],
         }
     }
+}
+
+fn release_active_turn(
+    owner: &Arc<Mutex<QueryEngineOwnerState>>,
+    turn_id: u64,
+    finished: &Arc<AtomicBool>,
+) {
+    finished.store(true, Ordering::SeqCst);
+    let mut owner = owner.lock().expect("query engine owner should not be poisoned");
+    if owner
+        .active_turn
+        .as_ref()
+        .is_some_and(|active_turn| active_turn.turn_id == turn_id)
+    {
+        owner.active_turn = None;
+    }
+}
+
+fn receiver_from_result_events(result: &QueryLoopResult) -> mpsc::Receiver<EngineEvent> {
+    let (tx, rx) = mpsc::channel(result.events.len().max(1));
+    for event in result.events.iter().cloned() {
+        tx.try_send(event)
+            .expect("owner-busy event receiver should have sufficient capacity");
+    }
+    drop(tx);
+    rx
 }
 
 fn query_params_for_input(input: &Message) -> QueryParams {
@@ -442,6 +595,7 @@ fn runtime_event_for_terminal(
 ) -> RuntimeEventEnvelope {
     let (kind, code) = match terminal {
         crate::core::query_loop::Terminal::Completed => (RuntimeEventKind::NormalTerminal, None),
+        crate::core::query_loop::Terminal::OwnerBusy => (RuntimeEventKind::OwnerBusy, None),
         crate::core::query_loop::Terminal::StopHookPrevented => {
             (RuntimeEventKind::StopHookPrevented, None)
         }

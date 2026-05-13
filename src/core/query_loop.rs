@@ -84,6 +84,7 @@ impl LoopState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
     Completed,
+    OwnerBusy,
     MaxTurns {
         count: usize,
     },
@@ -103,6 +104,7 @@ impl Terminal {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::OwnerBusy => "owner_busy",
             Self::MaxTurns { .. } => "max_turns",
             Self::MaxBudget { .. } => "max_budget",
             Self::StopHookPrevented => "stop_hook_prevented",
@@ -2253,9 +2255,10 @@ fn finalize_turn(
 fn terminal_state(terminal: &Terminal) -> QueryLoopState {
     match terminal {
         Terminal::Completed | Terminal::StopHookPrevented => QueryLoopState::Completed,
-        Terminal::MaxTurns { .. } | Terminal::MaxBudget { .. } | Terminal::ModelError { .. } => {
-            QueryLoopState::Failed
-        }
+        Terminal::OwnerBusy
+        | Terminal::MaxTurns { .. }
+        | Terminal::MaxBudget { .. }
+        | Terminal::ModelError { .. } => QueryLoopState::Failed,
         Terminal::AbortedStreaming | Terminal::AbortedTools => QueryLoopState::Interrupted,
     }
 }

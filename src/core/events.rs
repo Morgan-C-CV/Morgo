@@ -65,6 +65,7 @@ impl ServiceFailureCode {
 pub enum RuntimeEventKind {
     NormalTerminal,
     RetryScheduled,
+    OwnerBusy,
     ModelError,
     StopHookPrevented,
     StopHookBlocking,
