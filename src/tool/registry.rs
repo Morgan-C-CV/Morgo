@@ -151,6 +151,35 @@ fn render_workspace_capabilities(permissions: &ToolPermissionContext, cwd: &Path
     capabilities
 }
 
+const V1_DEFAULT_CODING_LOCAL_CORE_TOOLS: &[&str] =
+    &["Read", "Edit", "Write", "Bash", "Grep", "Glob"];
+const V1_DEFAULT_CODING_DEFERRED_TOOLS: &[&str] =
+    &["WebSearch", "WebFetch", "AskUserQuestion", "NotebookEdit"];
+
+fn is_v1_default_coding_surface(context: ToolAssemblyContext) -> bool {
+    context.runtime_role == RuntimeRole::Coordinator
+        && context.surface == InteractionSurface::Cli
+        && context.session_mode == SessionMode::Headless
+}
+
+fn is_v1_default_coding_local_core_tool(metadata: &ToolMetadata) -> bool {
+    V1_DEFAULT_CODING_LOCAL_CORE_TOOLS.contains(&metadata.name)
+}
+
+fn is_v1_default_coding_deferred_tool(metadata: &ToolMetadata) -> bool {
+    V1_DEFAULT_CODING_DEFERRED_TOOLS.contains(&metadata.name)
+}
+
+fn is_tool_visible_in_v1_default_coding_surface(metadata: &ToolMetadata) -> bool {
+    if is_v1_default_coding_local_core_tool(metadata) {
+        return true;
+    }
+    if is_v1_default_coding_deferred_tool(metadata) {
+        return false;
+    }
+    !metadata.is_open_world
+}
+
 impl std::fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRegistry")
@@ -475,10 +504,13 @@ impl ToolRegistry {
             .iter()
             .filter(|tool| {
                 let metadata = tool.metadata();
-                if metadata.is_open_world && !context.include_open_world_tools {
-                    if should_keep_bash_in_default_headless_coding_surface(&metadata, context) {
-                        return true;
+                if is_v1_default_coding_surface(context) {
+                    if !is_tool_visible_in_v1_default_coding_surface(&metadata) {
+                        return false;
                     }
+                    return is_tool_allowed(&metadata, &permissions);
+                }
+                if metadata.is_open_world && !context.include_open_world_tools {
                     return false;
                 }
                 match context.runtime_role {
@@ -689,16 +721,6 @@ impl ToolRegistry {
             Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
         }
     }
-}
-
-fn should_keep_bash_in_default_headless_coding_surface(
-    metadata: &ToolMetadata,
-    context: ToolAssemblyContext,
-) -> bool {
-    metadata.name == "Bash"
-        && context.runtime_role == RuntimeRole::Coordinator
-        && context.surface == InteractionSurface::Cli
-        && context.session_mode == SessionMode::Headless
 }
 
 fn merge_permission_decisions(

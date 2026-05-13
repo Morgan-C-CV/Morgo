@@ -1257,7 +1257,7 @@ fn real_builtin_metadata_flags_follow_runtime_context() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
     assert!(cli_headless_names.contains(&"Agent"));
-    assert!(cli_headless_names.contains(&"AskUserQuestion"));
+    assert!(!cli_headless_names.contains(&"AskUserQuestion"));
     assert!(cli_headless_names.contains(&"Bash"));
     assert!(cli_headless_names.contains(&"Read"));
     assert!(!cli_headless_names.contains(&"WebFetch"));
