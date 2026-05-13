@@ -609,6 +609,83 @@ async fn bash_tool_executes_safe_command() {
 }
 
 #[tokio::test]
+async fn bash_tool_result_format_stays_stable_across_success_and_failure() {
+    fn line_index_with_prefix(lines: &[&str], prefix: &str) -> usize {
+        lines
+            .iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing line with prefix {prefix}; lines={lines:?}"))
+    }
+
+    let success = BashTool
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "printf 'bash-format-ok'"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("bash success case should execute");
+    let ToolResult::Text(success_text) = success else {
+        panic!("expected text result for bash success case");
+    };
+
+    let failure = BashTool
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "printf 'bash-format-fail' >&2; exit 7"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("bash failure case should still return structured text");
+    let ToolResult::Text(failure_text) = failure else {
+        panic!("expected text result for bash failure case");
+    };
+
+    let success_lines = success_text.lines().collect::<Vec<_>>();
+    let failure_lines = failure_text.lines().collect::<Vec<_>>();
+    for lines in [&success_lines, &failure_lines] {
+        let command_index = line_index_with_prefix(lines, "command: ");
+        let normalized_index = line_index_with_prefix(lines, "normalized_variants: ");
+        let cwd_index = line_index_with_prefix(lines, "cwd: ");
+        let sandbox_index = line_index_with_prefix(lines, "sandbox_policy: ");
+        let exit_code_index = line_index_with_prefix(lines, "exit_code: ");
+        assert!(
+            command_index < normalized_index
+                && normalized_index < cwd_index
+                && cwd_index < sandbox_index
+                && sandbox_index < exit_code_index,
+            "bash result header drifted; lines={lines:?}"
+        );
+    }
+
+    assert!(success_text.contains("command: printf 'bash-format-ok'"));
+    assert!(success_text.contains("exit_code: 0"));
+    assert!(success_text.contains("stdout:\nbash-format-ok"));
+    assert!(
+        !success_text.contains("stderr:\n"),
+        "success shape should not invent stderr output; text={success_text:?}"
+    );
+
+    assert!(failure_text.contains("command: printf 'bash-format-fail' >&2; exit 7"));
+    assert!(failure_text.contains("exit_code: 7"));
+    assert!(failure_text.contains("stderr:\nbash-format-fail"));
+    assert!(
+        !failure_text.contains("stdout:\n"),
+        "failure shape should preserve stderr-only output instead of fabricating stdout; text={failure_text:?}"
+    );
+}
+
+#[tokio::test]
 async fn registry_denies_unsafe_bash_in_plan_mode() {
     let registry = ToolRegistry::new().register(Arc::new(BashTool));
     let denied = registry
