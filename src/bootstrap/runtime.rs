@@ -328,6 +328,13 @@ enum TuiTurnStatus {
     Working(Duration),
     Worked(Duration),
     Selection,
+    ExitHint(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiExitGesture {
+    Esc,
+    CmdC,
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -1514,6 +1521,9 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
         TuiTurnStatus::Selection => {
             "• Selection mode (drag to select and copy • esc to return)".to_string()
         }
+        TuiTurnStatus::ExitHint(gesture) => {
+            format!("• Press {gesture} again to exit")
+        }
     };
     colorize_ansi(&base, "2;37")
 }
@@ -1526,6 +1536,23 @@ fn set_tui_mouse_capture(enabled: bool) -> anyhow::Result<()> {
         execute!(stdout, DisableMouseCapture)?;
     }
     Ok(())
+}
+
+fn tui_exit_gesture_for_key(key: &crossterm::event::KeyEvent) -> Option<TuiExitGesture> {
+    match key.code {
+        KeyCode::Esc => Some(TuiExitGesture::Esc),
+        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::SUPER) => {
+            Some(TuiExitGesture::CmdC)
+        }
+        _ => None,
+    }
+}
+
+fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
+    match gesture {
+        TuiExitGesture::Esc => "Esc",
+        TuiExitGesture::CmdC => "Cmd+C",
+    }
 }
 
 fn format_tui_model_and_cwd(app_state: &AppState) -> String {
@@ -1902,7 +1929,8 @@ mod tui_output_tests {
     use super::{
         backspace_input_char, delete_input_char, heuristic_tui_suggestions, insert_input_char,
         normalize_tui_newlines, render_command_suggestion_line, render_fixed_tui_layout,
-        status_line_for_tui, tui_context_document, tui_input_viewport, TuiTurnStatus,
+        status_line_for_tui, tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
+        TuiExitGesture, TuiTurnStatus,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -1916,6 +1944,7 @@ mod tui_output_tests {
         ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
     };
     use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -2064,6 +2093,22 @@ mod tui_output_tests {
         assert!(rendered.contains("Selection mode"));
         assert!(rendered.contains("drag to select and copy"));
         assert!(rendered.contains("esc to return"));
+    }
+
+    #[test]
+    fn tui_exit_hint_status_line_explains_double_press_exit() {
+        let rendered =
+            strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::ExitHint("Esc"), 80));
+        assert!(rendered.contains("Press Esc again to exit"));
+    }
+
+    #[test]
+    fn tui_exit_gesture_detects_esc_and_cmd_c() {
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let cmd_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER);
+
+        assert_eq!(tui_exit_gesture_for_key(&esc), Some(TuiExitGesture::Esc));
+        assert_eq!(tui_exit_gesture_for_key(&cmd_c), Some(TuiExitGesture::CmdC));
     }
 
     #[test]
@@ -3126,14 +3171,24 @@ impl RuntimeBootstrap {
         let mut active_turn_started_at: Option<Instant> = None;
         let mut last_turn_duration: Option<Duration> = None;
         let mut selection_mode = false;
+        let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
+        const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
 
         loop {
+            if pending_exit_gesture
+                .map(|(_, started_at)| started_at.elapsed() > TUI_EXIT_CONFIRM_WINDOW)
+                .unwrap_or(false)
+            {
+                pending_exit_gesture = None;
+            }
             let suggestions = tui_command_suggestions(app_state, &input);
             if selected_suggestion >= suggestions.len() {
                 selected_suggestion = 0;
             }
             let turn_status = if selection_mode {
                 TuiTurnStatus::Selection
+            } else if let Some((gesture, _)) = pending_exit_gesture {
+                TuiTurnStatus::ExitHint(tui_exit_gesture_label(gesture))
             } else if let Some(started_at) = active_turn_started_at {
                 TuiTurnStatus::Working(started_at.elapsed())
             } else if let Some(duration) = last_turn_duration {
@@ -3178,6 +3233,24 @@ impl RuntimeBootstrap {
                         continue;
                     }
 
+                    if let Some(gesture) = tui_exit_gesture_for_key(&key) {
+                        let should_exit = pending_exit_gesture
+                            .map(|(pending, started_at)| {
+                                pending == gesture
+                                    && started_at.elapsed() <= TUI_EXIT_CONFIRM_WINDOW
+                            })
+                            .unwrap_or(false);
+                        if should_exit {
+                            self.print_tui_message("Exiting TUI session.");
+                            execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
+                            break;
+                        }
+                        pending_exit_gesture = Some((gesture, Instant::now()));
+                        continue;
+                    }
+
+                    pending_exit_gesture = None;
+
                     match key.code {
                 KeyCode::Char('s' | 'S')
                     if key
@@ -3188,16 +3261,6 @@ impl RuntimeBootstrap {
                         set_tui_mouse_capture(false)?;
                         selection_mode = true;
                     }
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.print_tui_message("Exiting TUI session.");
-                    execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
-                    break;
-                }
-                KeyCode::Esc => {
-                    input.clear();
-                    cursor_index = 0;
-                    selected_suggestion = 0;
                 }
                 KeyCode::Enter => {
                     if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
