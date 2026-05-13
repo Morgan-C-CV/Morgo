@@ -4,6 +4,7 @@ use std::sync::Arc;
 use rust_agent::bootstrap::{
     BootstrapPhase, BootstrapState, ClientType, InteractionSurface, SessionMode, SessionSource,
 };
+use rust_agent::command::types::CommandResult;
 use rust_agent::core::context::QueryContext;
 use rust_agent::core::engine::QueryEngine;
 use rust_agent::core::events::EngineEvent;
@@ -698,5 +699,134 @@ async fn cli_smoke_coding_loop_surfaces_bash_pending_approval_without_false_succ
             && !final_message.contains("task completed")
             && !final_message.contains("I finished"),
         "pending-approval smoke should not falsely claim success; final={final_message:?}"
+    );
+}
+
+#[tokio::test]
+async fn cli_smoke_coding_loop_surfaces_bash_denial_with_clear_next_step() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let target = workspace.path().join("smoke_denial_target.txt");
+    let marker = workspace.path().join("should_not_exist_after_denial.txt");
+    std::fs::write(&target, "status = \"todo\"\n").expect("seed denial smoke target");
+
+    let target_display = target.to_string_lossy().to_string();
+    let marker_display = marker.to_string_lossy().to_string();
+    let read_input = serde_json::json!({
+        "file_path": target_display,
+    })
+    .to_string();
+    let bash_input = serde_json::json!({
+        "command": format!(
+            "grep -n 'status = \"todo\"' {} && printf 'approved\\n' > {}",
+            target.display(),
+            marker.display()
+        ),
+        "timeout": 5_000
+    })
+    .to_string();
+
+    let permission_context = ToolPermissionContext::new(PermissionMode::Default)
+        .with_task_manager(Arc::new(TaskManager::default()))
+        .with_active_session_id("cli-smoke-coding-session")
+        .with_active_surface(InteractionSurface::Cli)
+        .with_notification_dispatcher(NotificationDispatcher::new(TelegramGateway::default()))
+        .with_filesystem_policy(allow_write_policy_for(workspace.path()));
+    permission_context.add_always_allow_rule("Edit");
+    permission_context.add_always_ask_rule("Bash");
+
+    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+        vec![
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta("Inspecting the target file before verification.".into()),
+                StreamEvent::ToolUse {
+                    tool_name: "Read".into(),
+                    input: read_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::MessageStart,
+                StreamEvent::TextDelta(
+                    "I need approval before running the verification command.".into(),
+                ),
+                StreamEvent::ToolUse {
+                    tool_name: "Bash".into(),
+                    input: bash_input,
+                },
+                StreamEvent::MessageStop {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+        ],
+        permission_context,
+    ));
+
+    let pending_result = engine
+        .submit_turn(Message::user(
+            "Read the local file and run the local verification command, but ask for approval first if needed.",
+        ))
+        .await;
+
+    assert_eq!(
+        pending_result.state,
+        QueryLoopState::Interrupted,
+        "denial smoke should first stop in pending approval"
+    );
+    assert_eq!(
+        pending_result.terminal,
+        Terminal::AbortedTools,
+        "denial smoke should first stop at the approval barrier"
+    );
+    assert_tool_started(&pending_result.events, "Read");
+    assert_tool_started(&pending_result.events, "Bash");
+    assert!(
+        pending_result.events.iter().any(|event| matches!(
+            event,
+            EngineEvent::PendingApproval { tool_name, .. } if tool_name == "Bash"
+        )),
+        "denial smoke must first reach a real pending approval event"
+    );
+
+    let denial = engine
+        .context
+        .app_state
+        .resolve_pending_approval(false)
+        .await
+        .expect("denial should resolve");
+
+    let CommandResult::Message(denial_message) = denial else {
+        panic!("expected message result after denying pending approval");
+    };
+    assert!(
+        denial_message.contains("Denied")
+            || denial_message.contains("rejected")
+            || denial_message.contains("declined"),
+        "denial smoke should explicitly say the command was denied; message={denial_message:?}"
+    );
+    assert!(
+        denial_message.contains("modify")
+            || denial_message.contains("safer")
+            || denial_message.contains("alternative")
+            || denial_message.contains("instruction")
+            || denial_message.contains("next"),
+        "denial smoke should give a clear next step after rejection; message={denial_message:?}"
+    );
+    assert!(
+        !denial_message.contains("Verification passed")
+            && !denial_message.contains("task completed")
+            && !denial_message.contains("I finished"),
+        "denial smoke should not falsely claim success after rejection; message={denial_message:?}"
+    );
+
+    assert!(
+        !marker.exists(),
+        "denial smoke should not execute the pending Bash command after user rejection: marker={marker_display}"
+    );
+    assert!(
+        engine.context.app_state.permission_context.pending_approval().is_none(),
+        "denial smoke should clear the pending approval after rejection"
     );
 }
