@@ -5,6 +5,8 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::bootstrap::config_root::{
     is_managed_config_root, preferred_home_config_root, resolve_config_root,
@@ -17,6 +19,7 @@ use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
+use crate::command::types::{CommandMetadata, CommandSource};
 use crate::core::boss::BossCoordinator;
 use crate::core::boss::save_plan;
 use crate::core::boss_runtime::BossRuntimeHost;
@@ -228,6 +231,195 @@ pub fn is_tui_exit_input(input: &str) -> bool {
 
 pub fn tui_clear_screen_prefix() -> &'static str {
     "\x1B[2J\x1B[H"
+}
+
+struct TuiRawModeGuard;
+
+impl TuiRawModeGuard {
+    fn activate() -> anyhow::Result<Self> {
+        enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TuiRawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+fn tui_command_suggestions(
+    registry: Option<&CommandRegistry>,
+    input: &str,
+) -> Vec<CommandMetadata> {
+    let Some(registry) = registry else {
+        return Vec::new();
+    };
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+
+    let query = input[1..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    let mut commands = registry.metadata();
+    commands.retain(|command| !command.is_hidden);
+    commands.sort_by(|left, right| {
+        command_match_score(right, &query)
+            .cmp(&command_match_score(left, &query))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    commands
+        .into_iter()
+        .filter(|command| command_match_score(command, &query) > 0)
+        .take(8)
+        .collect()
+}
+
+fn command_match_score(command: &CommandMetadata, query: &str) -> i32 {
+    if query.is_empty() {
+        return default_command_priority(command);
+    }
+
+    let name = command.name.to_ascii_lowercase();
+    if name == query {
+        return 10_000;
+    }
+    if command.aliases.iter().any(|alias| alias.eq_ignore_ascii_case(query)) {
+        return 9_000;
+    }
+    if name.starts_with(query) {
+        return 7_000;
+    }
+    if command
+        .aliases
+        .iter()
+        .any(|alias| alias.to_ascii_lowercase().starts_with(query))
+    {
+        return 6_000;
+    }
+    if name.contains(query) {
+        return 4_000;
+    }
+    if command.category.to_ascii_lowercase().contains(query) {
+        return 2_000;
+    }
+    if command.description.to_ascii_lowercase().contains(query) {
+        return 1_500;
+    }
+    if command
+        .aliases
+        .iter()
+        .any(|alias| alias.to_ascii_lowercase().contains(query))
+    {
+        return 1_000;
+    }
+    0
+}
+
+fn default_command_priority(command: &CommandMetadata) -> i32 {
+    match command.name.as_str() {
+        "help" => 1000,
+        "status" => 950,
+        "model" => 900,
+        "permissions" => 850,
+        "plan" => 800,
+        "resume" => 780,
+        "clear" => 760,
+        "compact" => 740,
+        "context" => 720,
+        "diff" => 700,
+        "tasks" => 680,
+        "config" => 660,
+        _ => match command.source {
+            CommandSource::Builtin => 500,
+            CommandSource::Coding => 450,
+            CommandSource::Skill => 350,
+            CommandSource::Mcp => 300,
+            CommandSource::Plugin => 250,
+        },
+    }
+}
+
+fn autocomplete_slash_command(
+    input: &str,
+    suggestions: &[CommandMetadata],
+    selected_suggestion: usize,
+) -> Option<String> {
+    if !is_single_token_slash_input(input) {
+        return None;
+    }
+    let selected = suggestions.get(selected_suggestion)?;
+    let typed = input[1..].trim();
+    if typed.eq_ignore_ascii_case(&selected.name)
+        || selected
+            .aliases
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(typed))
+    {
+        None
+    } else {
+        Some(format!("/{} ", selected.name))
+    }
+}
+
+fn apply_selected_suggestion(
+    input: &str,
+    suggestions: &[CommandMetadata],
+    selected_suggestion: usize,
+) -> Option<String> {
+    if !input.starts_with('/') {
+        return None;
+    }
+    suggestions
+        .get(selected_suggestion)
+        .map(|command| format!("/{} ", command.name))
+}
+
+fn is_single_token_slash_input(input: &str) -> bool {
+    input.starts_with('/') && !input[1..].chars().any(char::is_whitespace)
+}
+
+fn render_command_suggestion_line(command: &CommandMetadata, selected: bool) -> String {
+    let source_color = match command.source {
+        CommandSource::Builtin => "36",
+        CommandSource::Coding => "32",
+        CommandSource::Skill => "35",
+        CommandSource::Mcp => "34",
+        CommandSource::Plugin => "33",
+    };
+    let command_label = colorize_ansi(&format!("/{}", command.name), source_color);
+    let alias_suffix = if command.aliases.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            colorize_ansi(
+                &format!("({})", command.aliases.join(", ")),
+                "2;37"
+            )
+        )
+    };
+    let body = format!(
+        "{}{} {}",
+        command_label,
+        alias_suffix,
+        colorize_ansi(&command.description, "2;37")
+    );
+
+    if selected {
+        colorize_ansi(&format!("> {body}"), "1;97;44")
+    } else {
+        format!("  {body}")
+    }
+}
+
+fn colorize_ansi(text: &str, code: &str) -> String {
+    format!("\x1b[{code}m{text}\x1b[0m")
 }
 
 fn preview_chars(value: &str, max_chars: usize) -> &str {
@@ -940,24 +1132,13 @@ impl RuntimeBootstrap {
 
         if self.cli.interactive {
             if self.cli.tui {
-                self.print_tui_welcome();
-            }
-            for line in io::stdin().lock().lines() {
-                let line = line?;
-                if self.should_exit_tui_input(&line) {
-                    if self.cli.tui {
-                        self.print_tui_message("Exiting TUI session.");
-                    }
-                    execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
-                    break;
+                self.run_interactive_tui(&router, &engine, &app_state).await?;
+            } else {
+                for line in io::stdin().lock().lines() {
+                    let line = line?;
+                    let output = handle_cli_input(&router, &engine, &app_state, line).await?;
+                    self.print_cli_turn_output(&output);
                 }
-                let output = if self.cli.tui {
-                    self.handle_tui_input_with_loading(&router, &engine, &app_state, line)
-                        .await?
-                } else {
-                    handle_cli_input(&router, &engine, &app_state, line).await?
-                };
-                self.print_cli_turn_output(&output);
             }
             return Ok(());
         }
@@ -1026,6 +1207,157 @@ impl RuntimeBootstrap {
     ) -> anyhow::Result<CliTurnOutput> {
         self.print_tui_loading_frame(&line, 0);
         handle_cli_input(router, engine, app_state, line).await
+    }
+
+    async fn run_interactive_tui(
+        &self,
+        router: &CommandRouter,
+        engine: &QueryEngine,
+        app_state: &AppState,
+    ) -> anyhow::Result<()> {
+        let _raw_mode = TuiRawModeGuard::activate()?;
+        let mut current_document = render_turn_document(&CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![],
+        });
+        let mut input = String::new();
+        let mut selected_suggestion = 0usize;
+
+        loop {
+            let suggestions = tui_command_suggestions(app_state.command_registry.as_deref(), &input);
+            if selected_suggestion >= suggestions.len() {
+                selected_suggestion = 0;
+            }
+            self.print_tui_interactive_frame(
+                &current_document,
+                &input,
+                &suggestions,
+                selected_suggestion,
+            );
+
+            let Event::Key(key) = read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.print_tui_message("Exiting TUI session.");
+                    execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
+                    break;
+                }
+                KeyCode::Esc => {
+                    input.clear();
+                    selected_suggestion = 0;
+                }
+                KeyCode::Enter => {
+                    if input.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(completed) = autocomplete_slash_command(
+                        &input,
+                        &suggestions,
+                        selected_suggestion,
+                    ) {
+                        input = completed;
+                        continue;
+                    }
+
+                    let line = input.trim().to_string();
+                    input.clear();
+                    selected_suggestion = 0;
+
+                    if self.should_exit_tui_input(&line) {
+                        self.print_tui_message("Exiting TUI session.");
+                        execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
+                        break;
+                    }
+
+                    let output = self
+                        .handle_tui_input_with_loading(router, engine, app_state, line)
+                        .await?;
+                    current_document = render_turn_document(&output);
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    selected_suggestion = 0;
+                }
+                KeyCode::Tab => {
+                    if let Some(completed) = apply_selected_suggestion(
+                        &input,
+                        &suggestions,
+                        selected_suggestion,
+                    ) {
+                        input = completed;
+                    }
+                }
+                KeyCode::Up => {
+                    if !suggestions.is_empty() {
+                        selected_suggestion =
+                            (selected_suggestion + suggestions.len() - 1) % suggestions.len();
+                    }
+                }
+                KeyCode::Down => {
+                    if !suggestions.is_empty() {
+                        selected_suggestion = (selected_suggestion + 1) % suggestions.len();
+                    }
+                }
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        input.push(ch);
+                        selected_suggestion = 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_tui_interactive_frame(
+        &self,
+        document: &crate::interaction::cli::renderer::RenderDocument,
+        input: &str,
+        suggestions: &[CommandMetadata],
+        selected_suggestion: usize,
+    ) {
+        let mut screen = build_tui_screen(document);
+        screen.prompt = vec![
+            colorize_ansi("Prompt", "1;36"),
+            format!("  > {}", if input.is_empty() { "" } else { input }),
+        ];
+
+        if input.starts_with('/') {
+            let lines = if suggestions.is_empty() {
+                vec!["No matching commands".into()]
+            } else {
+                suggestions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, command)| {
+                        render_command_suggestion_line(command, index == selected_suggestion)
+                    })
+                    .collect()
+            };
+            screen.panels.push(crate::interaction::cli::renderer::TuiPanelSection {
+                title: "Commands".into(),
+                lines,
+            });
+            screen.footer = vec![
+                "Enter sends | Tab completes | Up/Down selects | Esc clears".into(),
+                "Slash commands are suggested heuristically from local command metadata.".into(),
+            ];
+        }
+
+        let rendered = format!(
+            "{}{}",
+            tui_clear_screen_prefix(),
+            render_tui_screen_output(&screen)
+        );
+        println!("{rendered}");
     }
 
     fn should_exit_tui_input(&self, input: &str) -> bool {

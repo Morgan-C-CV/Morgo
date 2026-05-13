@@ -92,8 +92,8 @@ pub fn build_tui_loading_screen(request: &str, _frame_index: usize) -> TuiScreen
                 format!("Request: {request}"),
             ],
         }],
-        prompt: vec!["Prompt".into(), "  > waiting for response".into()],
-        footer: vec!["Controls: Ctrl+C stops the process.".into()],
+        prompt: vec![],
+        footer: vec![],
     }
 }
 
@@ -148,11 +148,8 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     TuiScreen {
         main,
         panels,
-        prompt: vec![
-            "Prompt".into(),
-            "  > enter a request and press return".into(),
-        ],
-        footer: build_tui_footer(document),
+        prompt: vec![],
+        footer: vec![],
     }
 }
 
@@ -196,11 +193,7 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
             message,
             detail.as_deref(),
         ))),
-        SurfaceItem::RuntimeNotice { kind, message, .. } => Some(RenderBlock::Panel(render_panel(
-            PanelKind::Notice,
-            format!("Notice: {kind}"),
-            vec![message.clone()],
-        ))),
+        SurfaceItem::RuntimeNotice { .. } => None,
         SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::ToolResult { .. }
         | SurfaceItem::AssistantDelta { .. } => None,
@@ -290,7 +283,9 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
             SurfaceItem::ToolCallStarted { tool_name, input } => {
                 if let Some(line) = tool_call_activity_line(tool_name, input) {
                     if is_exploration_tool(tool_name) {
-                        exploration.push(line);
+                        if exploration.last() != Some(&line) {
+                            exploration.push(line);
+                        }
                     } else {
                         lines.push(format!("• {line}"));
                     }
@@ -305,7 +300,13 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                 if let Some((headline, detail_lines)) =
                     tool_result_activity_block(tool_name, content, summary.as_deref(), detail.as_deref())
                 {
-                    lines.push(format!("• {headline}"));
+                    let detail_lines = detail_lines
+                        .into_iter()
+                        .filter(|line| !is_low_signal_tool_detail(line))
+                        .collect::<Vec<_>>();
+                    if !headline.trim().is_empty() {
+                        lines.push(format!("• {headline}"));
+                    }
                     for detail_line in detail_lines {
                         lines.push(format!("  └ {detail_line}"));
                     }
@@ -414,6 +415,19 @@ fn summarize_bash_activity_detail(content: &str) -> Vec<String> {
     compact_tool_detail_lines(lines)
 }
 
+fn is_low_signal_tool_detail(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty()
+        || trimmed == "..."
+        || trimmed.starts_with("Path: ")
+        || trimmed.starts_with("Offset: ")
+        || trimmed.starts_with("Returned chars: ")
+        || trimmed.starts_with("Replacements: ")
+        || trimmed.starts_with("Replace all: ")
+        || trimmed.starts_with("Old text: ")
+        || trimmed.starts_with("New text: ")
+}
+
 fn render_bash_result_lines(content: &str) -> Vec<String> {
     content
         .lines()
@@ -514,21 +528,26 @@ fn render_document_to_tui_text(document: &RenderDocument) -> String {
 }
 
 fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
-    let sections = render_tui_screen_sections(screen);
+    let mut sections = Vec::new();
 
-    if sections.is_empty() {
-        return String::new();
+    if !screen.main.is_empty() {
+        sections.push(screen.main.join("\n"));
     }
 
-    let mut lines = vec!["╔════════════════ CLI TUI ════════════════".to_string()];
-    lines.extend(sections.into_iter().flat_map(|section| {
-        section
-            .lines()
-            .map(|line| format!("║ {line}"))
-            .collect::<Vec<_>>()
-    }));
-    lines.push("╚═════════════════════════════════════════".to_string());
-    lines.join("\n")
+    let boxed_sections = render_tui_boxed_sections(screen);
+    if !boxed_sections.is_empty() {
+        let mut lines = vec!["╔════════════════ CLI TUI ════════════════".to_string()];
+        lines.extend(boxed_sections.into_iter().flat_map(|section| {
+            section
+                .lines()
+                .map(|line| format!("║ {line}"))
+                .collect::<Vec<_>>()
+        }));
+        lines.push("╚═════════════════════════════════════════".to_string());
+        sections.push(lines.join("\n"));
+    }
+
+    sections.join("\n\n")
 }
 
 fn truncate_for_tui(value: &str, max_chars: usize) -> String {
@@ -574,14 +593,8 @@ fn render_panel_to_text(panel: &RenderPanel) -> String {
     lines.join("\n")
 }
 
-fn render_tui_screen_sections(screen: &TuiScreen) -> Vec<String> {
+fn render_tui_boxed_sections(screen: &TuiScreen) -> Vec<String> {
     let mut sections = Vec::new();
-    if !screen.main.is_empty() {
-        sections.push(render_tui_section(
-            "Main",
-            screen.main.iter().map(|line| line.as_str()).collect(),
-        ));
-    }
     for panel in &screen.panels {
         sections.push(render_tui_section(
             &panel.title,
@@ -638,9 +651,12 @@ mod tests {
 
         let rendered = render_turn_tui_output(&turn);
         assert!(rendered.contains("final answer"));
+        assert!(rendered.starts_with("final answer"));
         assert!(!rendered.contains("[delta]"));
         assert!(!rendered.contains("  morg"));
         assert!(!rendered.contains("  o"));
+        assert!(!rendered.contains("[Prompt]"));
+        assert!(!rendered.contains("[Footer]"));
     }
 
     #[test]
@@ -679,7 +695,6 @@ mod tests {
         assert!(rendered.contains("[Activity]"));
         assert!(rendered.contains("• Ran cargo test -- --nocapture"));
         assert!(rendered.contains("Exit code: 0"));
-        assert!(rendered.contains("..."));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
     }
 
@@ -688,6 +703,10 @@ mod tests {
         let turn = CliTurnOutput {
             primary_text: String::new(),
             events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"/tmp/renderer.rs"}"#.into(),
+                }),
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
                     tool_name: "Read".into(),
                     input: r#"{"file_path":"/tmp/renderer.rs"}"#.into(),
@@ -703,5 +722,29 @@ mod tests {
         assert!(rendered.contains("Explored"));
         assert!(rendered.contains("Read renderer.rs"));
         assert!(rendered.contains("Search delta|tool use in reference"));
+        assert_eq!(rendered.matches("Read renderer.rs").count(), 1);
+    }
+
+    #[test]
+    fn tui_filters_runtime_notices() {
+        let turn = CliTurnOutput {
+            primary_text: "answer".into(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
+                kind: "usage".into(),
+                message: "recorded usage".into(),
+                code: None,
+                runtime_kind: None,
+                service_failure_code: None,
+                provider_kind: None,
+                status_code: None,
+                retryable: None,
+                surface_visible: None,
+            })],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        assert!(rendered.contains("answer"));
+        assert!(!rendered.contains("recorded usage"));
+        assert!(!rendered.contains("Notice:"));
     }
 }
