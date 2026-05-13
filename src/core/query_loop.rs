@@ -186,10 +186,6 @@ impl EventCollector {
         self.events.push(event);
     }
 
-    fn as_slice(&self) -> &[EngineEvent] {
-        &self.events
-    }
-
     fn clone_events(&self) -> Vec<EngineEvent> {
         self.events.clone()
     }
