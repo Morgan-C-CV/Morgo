@@ -2,6 +2,9 @@ use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 
+const MAX_TOOL_DETAIL_LINES: usize = 8;
+const MAX_TOOL_DETAIL_WIDTH: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderDocument {
     pub blocks: Vec<RenderBlock>,
@@ -171,41 +174,43 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         blocks.push(RenderBlock::PrimaryText(view.primary_text.clone()));
     }
     for item in &view.items {
-        blocks.push(render_block_for_surface_item(item));
+        if let Some(block) = render_block_for_surface_item(item) {
+            blocks.push(block);
+        }
     }
     RenderDocument { blocks }
 }
 
-fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
+fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
     match item {
-        SurfaceItem::TaskUpdate(task) => RenderBlock::Panel(render_task_panel(task)),
+        SurfaceItem::TaskUpdate(task) => Some(RenderBlock::Panel(render_task_panel(task))),
         SurfaceItem::ApprovalRequired {
             tool_name,
             message,
             detail,
             ..
-        } => RenderBlock::Panel(render_approval_panel(tool_name, message, detail.as_deref())),
-        SurfaceItem::RuntimeNotice { kind, message, .. } => RenderBlock::Panel(render_panel(
+        } => Some(RenderBlock::Panel(render_approval_panel(
+            tool_name,
+            message,
+            detail.as_deref(),
+        ))),
+        SurfaceItem::RuntimeNotice { kind, message, .. } => Some(RenderBlock::Panel(render_panel(
             PanelKind::Notice,
             format!("Notice: {kind}"),
             vec![message.clone()],
-        )),
+        ))),
+        SurfaceItem::ToolCallStarted { .. } | SurfaceItem::AssistantDelta { .. } => None,
         SurfaceItem::ToolResult {
-            tool_name, content, ..
-        } => {
-            let mut lines = vec![format!("Tool: {tool_name}")];
-            if tool_name == "Bash" {
-                lines.extend(render_bash_result_lines(content));
-            } else if tool_name == "Read" {
-                lines.extend(render_read_result_lines(content));
-            } else if tool_name == "Edit" {
-                lines.extend(render_edit_result_lines(content));
-            } else {
-                lines.extend(content.lines().map(|line| line.to_string()));
-            }
-            RenderBlock::Panel(render_panel(PanelKind::ToolResult, "Tool result", lines))
-        }
-        other => RenderBlock::RawRuntime(other.to_legacy_line()),
+            tool_name,
+            content,
+            summary,
+            detail,
+        } => Some(RenderBlock::Panel(render_tool_result_panel(
+            tool_name, content, summary.as_deref(), detail.as_deref(),
+        ))),
+        SurfaceItem::Transition { .. }
+        | SurfaceItem::Terminal { .. }
+        | SurfaceItem::SessionMilestone { .. } => None,
     }
 }
 
@@ -280,6 +285,33 @@ fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -
     render_panel(PanelKind::Approval, "Approval required", lines)
 }
 
+fn render_tool_result_panel(
+    tool_name: &str,
+    content: &str,
+    summary: Option<&str>,
+    detail: Option<&str>,
+) -> RenderPanel {
+    let mut lines = vec![format!("Tool: {tool_name}")];
+
+    if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(format!("Summary: {}", truncate_for_tui(summary, 96)));
+    }
+
+    let detail_source = detail.unwrap_or(content);
+    let detail_lines = if tool_name == "Bash" {
+        render_bash_result_lines(detail_source)
+    } else if tool_name == "Read" {
+        render_read_result_lines(detail_source)
+    } else if tool_name == "Edit" {
+        render_edit_result_lines(detail_source)
+    } else {
+        detail_source.lines().map(|line| line.to_string()).collect()
+    };
+    lines.extend(compact_tool_detail_lines(detail_lines));
+
+    render_panel(PanelKind::ToolResult, "Tool result", lines)
+}
+
 fn render_bash_result_lines(content: &str) -> Vec<String> {
     content
         .lines()
@@ -336,6 +368,25 @@ fn render_edit_result_lines(content: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn compact_tool_detail_lines(lines: Vec<String>) -> Vec<String> {
+    let cleaned = lines
+        .into_iter()
+        .map(|line| truncate_for_tui(line.trim(), MAX_TOOL_DETAIL_WIDTH))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if cleaned.len() <= MAX_TOOL_DETAIL_LINES {
+        return cleaned;
+    }
+
+    let mut truncated = cleaned
+        .into_iter()
+        .take(MAX_TOOL_DETAIL_LINES)
+        .collect::<Vec<_>>();
+    truncated.push("...".into());
+    truncated
 }
 
 fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -> RenderPanel {
@@ -490,5 +541,72 @@ fn title_case_label(label: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interaction::cli::repl::{CliDisplayEvent, CliRuntimeEvent, CliTurnOutput};
+
+    #[test]
+    fn tui_output_omits_streaming_delta_noise() {
+        let turn = CliTurnOutput {
+            primary_text: "final answer".into(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                    text: "morg".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                    text: "o".into(),
+                }),
+            ],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        assert!(rendered.contains("final answer"));
+        assert!(!rendered.contains("[delta]"));
+        assert!(!rendered.contains("  morg"));
+        assert!(!rendered.contains("  o"));
+    }
+
+    #[test]
+    fn tui_tool_result_uses_summary_and_truncates_detail() {
+        let long_detail = [
+            "command: cargo test --package agent --lib -- interaction::cli::renderer",
+            "exit_code: 0",
+            "line-1",
+            "line-2",
+            "line-3",
+            "line-4",
+            "line-5",
+            "line-6",
+            "line-7",
+            "line-8",
+            "line-9",
+        ]
+        .join("\n");
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Bash".into(),
+                    input: r#"{"command":"cargo test -- --nocapture","timeout_ms":120000}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                    tool_name: "Bash".into(),
+                    content: long_detail.clone(),
+                    summary: Some("cargo test passed".into()),
+                    detail: Some(long_detail),
+                }),
+            ],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        assert!(rendered.contains("Summary: cargo test passed"));
+        assert!(rendered.contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
+        assert!(rendered.contains("Exit code: 0"));
+        assert!(rendered.contains("..."));
+        assert!(!rendered.contains("\"timeout_ms\":120000"));
     }
 }
