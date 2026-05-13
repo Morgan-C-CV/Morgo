@@ -2702,6 +2702,17 @@ impl RuntimeBootstrap {
                     active_turn_started_at = Some(Instant::now());
                     last_turn_duration = None;
 
+                    self.print_tui_interactive_frame(
+                        app_state,
+                        &current_document,
+                        "",
+                        &[],
+                        0,
+                        0,
+                        TuiTurnStatus::Working(Duration::ZERO),
+                        0,
+                    );
+
                     if self.should_exit_tui_input(&line) {
                         self.print_tui_message("Exiting TUI session.");
                         execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
