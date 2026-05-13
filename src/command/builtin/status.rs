@@ -519,19 +519,21 @@ impl Command for StatusCommand {
             OutputBlock::section(
                 "Working status",
                 {
-                    let mut items = vec![
+                    let mode_summary = if let Some(pending) = pending_approval {
+                        format!(
+                            "{permission_mode} | pending approval: {} ({})",
+                            pending.tool_name, pending.message
+                        )
+                    } else {
+                        permission_mode.to_string()
+                    };
+                    vec![
                         OutputBlock::kv("cwd", cwd.display().to_string()),
-                        OutputBlock::kv("mode", permission_mode),
-                    ];
-                    if let Some(pending) = pending_approval {
-                        items.push(OutputBlock::kv(
-                            "pending approval",
-                            format!("{} ({})", pending.tool_name, pending.message),
-                        ));
-                    }
-                    items
+                        OutputBlock::kv("mode", mode_summary),
+                    ]
                 },
             ),
+            OutputBlock::text("Diagnostics:"),
             OutputBlock::section("Runtime", runtime_items),
             OutputBlock::section("Observability", obs_items),
             OutputBlock::section("Commands", cmd_items),

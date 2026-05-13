@@ -203,6 +203,77 @@ async fn cli_status_surfaces_cwd_mode_and_pending_approval_before_debug_detail()
     );
 }
 
+#[tokio::test]
+async fn cli_status_keeps_working_state_compact_and_debug_sections_secondary() {
+    let root = unique_temp_path("rust-agent-status-working-vs-debug");
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.session = Some(SessionSnapshot {
+        session_id: SessionId("status-working-vs-debug".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: None,
+        prompt_seed: None,
+    });
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "pytest".into(),
+            message: "approval needed before running pytest".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+
+    let result = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("status command should produce plain text");
+    let lines = text.lines().collect::<Vec<_>>();
+
+    let working_anchor = lines
+        .iter()
+        .position(|line| *line == "Working status:")
+        .expect("working status section present");
+    let runtime_anchor = lines
+        .iter()
+        .position(|line| *line == "Runtime:")
+        .expect("runtime section present");
+    let pending_anchor = lines
+        .iter()
+        .position(|line| line.contains("pending approval"))
+        .expect("pending approval line present");
+
+    assert!(
+        runtime_anchor - working_anchor <= 4,
+        "working status should stay compact and limited to continue-working essentials before diagnostics begin; text={text}"
+    );
+    assert!(
+        pending_anchor < runtime_anchor,
+        "pending approval must stay in the working-state block instead of sinking into diagnostics; text={text}"
+    );
+    assert!(
+        text.contains("Debug details:")
+            || text.contains("Diagnostics:")
+            || text.contains("Runtime diagnostics:"),
+        "/status should explicitly mark Runtime/Observability/Commands/Integrations/Plugins as secondary diagnostics instead of presenting them as the same tier as working state; text={text}"
+    );
+}
+
 fn sample_plugin_command(name: &str) -> PluginCommandDefinition {
     PluginCommandDefinition {
         plugin_name: "demo-plugin".into(),
