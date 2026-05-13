@@ -1803,6 +1803,75 @@ async fn cli_tasks_summary_distinguishes_running_failed_and_completed_with_outpu
 }
 
 #[tokio::test]
+async fn cli_tasks_summary_keeps_stopped_tasks_distinct_from_failed_tasks() {
+    let manager = Arc::new(TaskManager::default());
+    let dispatcher = NotificationDispatcher::new(TelegramGateway::default());
+
+    let running = manager.create("stream logs", "test-session", InteractionSurface::Cli);
+    manager.start(&running.id);
+
+    let failed = manager.create("run failing verification", "test-session", InteractionSurface::Cli);
+    manager.append_output(&failed.id, "verification failed\n");
+    manager.fail(&failed.id, &dispatcher);
+
+    let stopped = manager.create("cancel stale worker", "test-session", InteractionSurface::Cli);
+    manager.launch(&stopped.id, "work", std::future::pending::<()>());
+    assert!(manager.kill(&stopped.id, "test-session", &dispatcher));
+
+    let completed = manager.create("finish repair", "test-session", InteractionSurface::Cli);
+    manager.append_output(&completed.id, "repair succeeded\n");
+    manager.complete(&completed.id, &dispatcher);
+
+    let app_state = test_app_state(None, Some(manager), None, None);
+    let result = TasksCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/tasks"),
+            &app_state,
+        )
+        .await
+        .expect("tasks command should render");
+
+    let text = result
+        .to_plain_text()
+        .expect("tasks command should produce plain text");
+
+    assert!(
+        text.contains("Stopped tasks:") || text.contains("Killed tasks:"),
+        "/tasks should distinguish user-stopped work from genuine failures instead of collapsing both into the failed bucket; text={text}"
+    );
+    assert!(
+        text.contains("cancel stale worker"),
+        "/tasks should keep the stopped task visible in its own terminal-state section; text={text}"
+    );
+
+    let failed_anchor = text.find("Failed tasks:").expect("failed section should be present");
+    let stopped_anchor = text
+        .find("Stopped tasks:")
+        .or_else(|| text.find("Killed tasks:"))
+        .expect("stopped section should be present");
+    let completed_anchor = text
+        .find("Completed tasks:")
+        .expect("completed section should be present");
+    let failed_block = &text[failed_anchor..stopped_anchor];
+    let stopped_block = &text[stopped_anchor..completed_anchor];
+
+    assert!(
+        failed_block.contains("run failing verification"),
+        "failed section should keep real failures visible; text={text}"
+    );
+    assert!(
+        !failed_block.contains("cancel stale worker"),
+        "stopped task should not be rendered inside the failed section; text={text}"
+    );
+    assert!(
+        stopped_block.contains("cancel stale worker")
+            && (stopped_block.contains("status: stopped")
+                || stopped_block.contains("status: killed")),
+        "stopped section should surface the killed/stopped task with a distinct terminal label; text={text}"
+    );
+}
+
+#[tokio::test]
 async fn cli_resume_restores_cwd_mode_and_pending_approval_consistently() {
     let root = unique_temp_path("rust-agent-resume-working-state");
     let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);

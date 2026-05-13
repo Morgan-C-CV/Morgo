@@ -9,6 +9,16 @@ use crate::task::types::{TaskRecord, TaskStatus};
 
 pub struct TasksCommand;
 
+fn user_facing_task_status(task: &TaskRecord) -> &'static str {
+    match task.status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Killed => "stopped",
+    }
+}
+
 fn push_user_facing_task_section(
     lines: &mut Vec<String>,
     title: &str,
@@ -23,7 +33,7 @@ fn push_user_facing_task_section(
     lines.push(title.to_string());
     for task in tasks {
         lines.push(format!("- [{}] {}", task.id, task.description));
-        lines.push(format!("  status: {:?}", task.status));
+        lines.push(format!("  status: {}", user_facing_task_status(task)));
         lines.push(format!("  next: {}", task_manager.task_hint(task)));
     }
 }
@@ -112,7 +122,12 @@ impl Command for TasksCommand {
                 .collect::<Vec<_>>();
             let failed_tasks = tasks
                 .iter()
-                .filter(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Killed))
+                .filter(|task| matches!(task.status, TaskStatus::Failed))
+                .cloned()
+                .collect::<Vec<_>>();
+            let stopped_tasks = tasks
+                .iter()
+                .filter(|task| matches!(task.status, TaskStatus::Killed))
                 .cloned()
                 .collect::<Vec<_>>();
             let completed_tasks = tasks
@@ -176,6 +191,12 @@ impl Command for TasksCommand {
                 &mut lines,
                 "Failed tasks:",
                 &failed_tasks,
+                task_manager,
+            );
+            push_user_facing_task_section(
+                &mut lines,
+                "Stopped tasks:",
+                &stopped_tasks,
                 task_manager,
             );
             push_user_facing_task_section(
