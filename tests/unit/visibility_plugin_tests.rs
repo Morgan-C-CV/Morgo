@@ -16,6 +16,7 @@ use rust_agent::command::builtin::tasks::TasksCommand;
 use rust_agent::command::registry::CommandRegistry;
 use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
 use rust_agent::core::message::Message;
+use rust_agent::history::resume::resolved_from_snapshot;
 use rust_agent::history::resume::RestoredSession;
 use rust_agent::history::session::{SessionId, SessionSnapshot};
 use rust_agent::history::transcript::Transcript;
@@ -1797,6 +1798,103 @@ async fn cli_tasks_summary_distinguishes_running_failed_and_completed_with_outpu
     assert!(
         running_anchor < failed_anchor || running_anchor < completed_anchor,
         "/tasks should present current running work before terminal-task details; text={text}"
+    );
+}
+
+#[tokio::test]
+async fn cli_resume_restores_cwd_mode_and_pending_approval_consistently() {
+    let root = unique_temp_path("rust-agent-resume-working-state");
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    app_state.permission_context.set_mode(PermissionMode::Plan);
+    app_state
+        .permission_context
+        .set_pending_approval(Some(PendingApproval {
+            tool_name: "Bash".into(),
+            tool_input: "cargo test --manifest-path RustAgent/Agent/Cargo.toml resume".into(),
+            message: "approval needed before running cargo test".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        }));
+
+    let restored_snapshot = SessionSnapshot {
+        session_id: SessionId("resume-state-session".into()),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: root.display().to_string(),
+        last_turn_at: Some("2026-05-13T10:45:00Z".into()),
+        prompt_seed: None,
+    };
+    let restored_history = rust_agent::history::session::SessionHistory {
+        entries: vec![rust_agent::history::session::SessionHistoryEntry {
+            message: Message::user("inspect the current verification task"),
+            timestamp: Some("2026-05-13T10:44:00Z".into()),
+            tool_refs: vec!["TaskOutput".into()],
+            milestone: None,
+        }],
+    };
+    let resolved = resolved_from_snapshot(
+        restored_snapshot.clone(),
+        restored_history.clone(),
+        true,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+    app_state.apply_resolved_session_state(&resolved);
+
+    let resume_result = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render after restore");
+    let resume_text = resume_result
+        .to_plain_text()
+        .expect("resume command should produce plain text");
+
+    let status_result = StatusCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/status"),
+            &app_state,
+        )
+        .await
+        .expect("status command should render after restore");
+    let status_text = status_result
+        .to_plain_text()
+        .expect("status command should produce plain text");
+
+    assert!(
+        resume_text.contains(&format!("cwd: {}", restored_snapshot.cwd)),
+        "/resume summary should keep the restored cwd visible after restore; text={resume_text}"
+    );
+    assert!(
+        status_text.contains(&restored_snapshot.cwd),
+        "/status should agree with /resume about the restored cwd; text={status_text}"
+    );
+    assert!(
+        resume_text.contains("mode: plan"),
+        "/resume summary should keep the restored permission mode visible after restore; text={resume_text}"
+    );
+    assert!(
+        status_text.contains("mode: plan")
+            || status_text.contains("mode: plan | pending approval: Bash"),
+        "/status should agree with /resume about the restored permission mode; text={status_text}"
+    );
+    assert!(
+        resume_text.to_ascii_lowercase().contains("pending approval: bash"),
+        "/resume summary should keep pending approval visible after restore instead of dropping it; text={resume_text}"
+    );
+    assert!(
+        status_text.to_ascii_lowercase().contains("pending approval")
+            && status_text.contains("Bash"),
+        "/status should still show the same pending approval after restore; text={status_text}"
     );
 }
 
