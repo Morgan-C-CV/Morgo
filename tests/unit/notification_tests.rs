@@ -1255,6 +1255,92 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
 }
 
 #[test]
+fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
+    let turn = CliTurnOutput {
+        primary_text: "Assistant summary: waiting on approval before verification.".into(),
+        events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+            tool_name: "Bash".into(),
+            message: "approval needed before running the verification command".into(),
+            code: Some("bash_warning".into()),
+            summary: Some("Bash pending approval".into()),
+            detail: Some(
+                "Reason: command requires explicit approval by ask rule.\nAction: approve or deny"
+                    .into(),
+            ),
+            approval_kind: Some("tool_permission".into()),
+            escalation_reasons: vec!["privileged_system".into()],
+        })],
+    };
+
+    let screen = build_tui_screen(&render_turn_document(&turn));
+    let footer_text = screen.footer.join("\n");
+    let main_text = screen.main.join("\n");
+    let panel_titles = screen
+        .panels
+        .iter()
+        .map(|panel| panel.title.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        screen
+            .footer
+            .iter()
+            .any(|line| line.contains("cwd:") || line.contains("Cwd:") || line.contains("Working directory:")),
+        "footer/status should surface the current working directory; footer={:?}",
+        screen.footer
+    );
+    assert!(
+        screen.footer.iter().any(|line| {
+            line.contains("mode:")
+                || line.contains("Mode:")
+                || line.contains("permission:")
+                || line.contains("Permission:")
+        }),
+        "footer/status should surface the current mode or permission state; footer={:?}",
+        screen.footer
+    );
+    assert!(
+        screen.footer.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("pending approval") || lower.contains("approval pending")
+        }),
+        "footer/status should surface pending approval state when approval is active; footer={:?}",
+        screen.footer
+    );
+
+    assert!(
+        !main_text.contains("cwd:")
+            && !main_text.contains("Cwd:")
+            && !main_text.contains("Working directory:")
+            && !main_text.contains("mode:")
+            && !main_text.contains("Mode:")
+            && !main_text.contains("permission:")
+            && !main_text.contains("Permission:")
+            && !main_text.to_ascii_lowercase().contains("pending approval"),
+        "footer/status metadata should not leak into the transcript main region; main={:?}",
+        screen.main
+    );
+    assert!(
+        !panel_titles.contains("cwd:")
+            && !panel_titles.contains("Cwd:")
+            && !panel_titles.contains("Working directory:")
+            && !panel_titles.contains("mode:")
+            && !panel_titles.contains("Mode:")
+            && !panel_titles.contains("permission:")
+            && !panel_titles.contains("Permission:")
+            && !panel_titles.to_ascii_lowercase().contains("pending approval"),
+        "footer/status metadata should not leak into panel titles; panel_titles={:?}",
+        screen.panels
+    );
+    assert!(
+        footer_text.contains("Controls:") || !footer_text.is_empty(),
+        "footer should remain a dedicated status/footer region rather than disappearing; footer={:?}",
+        screen.footer
+    );
+}
+
+#[test]
 fn remote_channel_matrix_matches_final_contract() {
     assert_eq!(
         REMOTE_CHANNEL_MATRIX,

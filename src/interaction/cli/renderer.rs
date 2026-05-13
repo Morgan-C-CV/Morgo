@@ -137,7 +137,7 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
             "Prompt".into(),
             "  > enter a request and press return".into(),
         ],
-        footer: vec!["Controls: /exit, exit, or quit leaves the TUI.".into()],
+        footer: build_tui_footer(document),
     }
 }
 
@@ -329,6 +329,31 @@ fn panel_marker(kind: PanelKind) -> &'static str {
         PanelKind::TaskSummary => "task",
         PanelKind::ToolResult => "tool",
     }
+}
+
+fn build_tui_footer(document: &RenderDocument) -> Vec<String> {
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".into());
+
+    let mut footer = vec![format!("Status: cwd: {cwd} | mode: default")];
+
+    if let Some(tool_name) = pending_approval_tool_name(document) {
+        footer.push(format!("Pending approval: {tool_name}"));
+    }
+
+    footer.push("Controls: /exit, exit, or quit leaves the TUI.".into());
+    footer
+}
+
+fn pending_approval_tool_name(document: &RenderDocument) -> Option<String> {
+    document.blocks.iter().find_map(|block| match block {
+        RenderBlock::Panel(panel) if panel.kind == PanelKind::Approval => panel
+            .lines
+            .iter()
+            .find_map(|line| line.strip_prefix("Tool: ").map(|tool| tool.trim().to_string())),
+        _ => None,
+    })
 }
 
 fn panel_header(title: &str) -> String {
