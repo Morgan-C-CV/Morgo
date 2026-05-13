@@ -172,6 +172,8 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> RenderBlock {
             let mut lines = vec![format!("Tool: {tool_name}")];
             if tool_name == "Bash" {
                 lines.extend(render_bash_result_lines(content));
+            } else if tool_name == "Read" {
+                lines.extend(render_read_result_lines(content));
             } else {
                 lines.extend(content.lines().map(|line| line.to_string()));
             }
@@ -260,6 +262,28 @@ fn render_bash_result_lines(content: &str) -> Vec<String> {
                 format!("Command: {}", command.trim())
             } else if let Some(exit_code) = line.strip_prefix("exit_code:") {
                 format!("Exit code: {}", exit_code.trim())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
+}
+
+fn render_read_result_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(|line| {
+            if let Some(path) = line.strip_prefix("path=") {
+                format!("Path: {}", path.trim())
+            } else if let Some(offset) = line.strip_prefix("offset=") {
+                format!("Offset: {}", offset.trim())
+            } else if let Some(returned_chars) = line.strip_prefix("returned_chars=") {
+                format!("Returned chars: {}", returned_chars.trim())
+            } else if let Some(truncated) = line
+                .strip_prefix("[Read truncated:")
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                format!("Truncation: {}", truncated.trim())
             } else {
                 line.to_string()
             }
