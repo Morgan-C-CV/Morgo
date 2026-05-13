@@ -214,6 +214,95 @@ async fn read_tool_blocks_structured_data_paging_after_schema_sample() {
 }
 
 #[tokio::test]
+async fn read_tool_result_shape_stays_locatable_truncation_aware_and_failure_explicit() {
+    let dir = std::env::temp_dir().join(unique_name("rust-agent-read-contract"));
+    fs::create_dir_all(&dir).await.expect("create dir");
+
+    let full_file = dir.join("full.txt");
+    fs::write(&full_file, "alpha\nbeta\ngamma\n")
+        .await
+        .expect("write full sample");
+
+    let large_file = dir.join("large.txt");
+    fs::write(&large_file, "z".repeat(9_000))
+        .await
+        .expect("write large sample");
+
+    let full = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({ "file_path": full_file }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("full read should succeed");
+    let ToolResult::Text(full_text) = full else {
+        panic!("expected text result for full read");
+    };
+
+    assert!(
+        full_text.contains(&format!("path={}", full_file.display()))
+            || full_text.contains(&format!("file_path={}", full_file.display()))
+            || full_text.contains(&full_file.display().to_string()),
+        "successful read should include stable file location context; text={full_text:?}"
+    );
+    assert!(
+        full_text.contains("line")
+            || full_text.contains("offset=")
+            || full_text.contains("range="),
+        "successful read should include line/range/offset-style locator, not just bare contents; text={full_text:?}"
+    );
+    assert!(
+        full_text.contains("alpha") && full_text.contains("beta") && full_text.contains("gamma"),
+        "successful read should still include file contents; text={full_text:?}"
+    );
+
+    let truncated = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({ "file_path": large_file }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("truncated read should succeed with structured text");
+    let ToolResult::Text(truncated_text) = truncated else {
+        panic!("expected text result for truncated read");
+    };
+    assert!(
+        truncated_text.contains("[Read truncated:")
+            || truncated_text.contains("truncated")
+            || truncated_text.contains("omitted"),
+        "truncated read must explicitly say content was truncated/omitted; text={truncated_text:?}"
+    );
+    assert!(
+        truncated_text.contains("offset=") && truncated_text.contains("total_chars="),
+        "truncated read should preserve continuation context; text={truncated_text:?}"
+    );
+
+    let missing = FileReadTool
+        .invoke(
+            &ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({ "file_path": dir.join("missing.txt") }).to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await;
+    let error = missing.expect_err("missing file should surface a read failure");
+    let message = error.to_string();
+    assert!(
+        message.contains("failed to read") || message.contains("No such file"),
+        "read failure should read like a file-read failure, not a silent success; message={message:?}"
+    );
+
+    fs::remove_dir_all(&dir).await.expect("cleanup dir");
+}
+
+#[tokio::test]
 async fn glob_tool_matches_nested_files() {
     let dir = std::env::temp_dir().join(unique_name("rust-agent-glob"));
     let nested = dir.join("nested");
