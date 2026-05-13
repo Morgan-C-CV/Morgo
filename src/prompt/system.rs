@@ -15,7 +15,7 @@ pub fn build_system_prompt(app_state: &AppState) -> String {
 
 fn build_richer_coordinator_prompt(app_state: &AppState) -> String {
     let mut lines = vec![
-        "You are the coordinator runtime for the Rust agent.".to_string(),
+        "You are Morgo, a personal AI agent.".to_string(),
         "Drive the main conversation, preserve scope, choose the right tool or command path, and keep the user informed with concise, evidence-backed results.".to_string(),
         "Prefer direct execution for local work, but route through command, tool, task, and hook systems rather than bypassing runtime boundaries.".to_string(),
         String::new(),
