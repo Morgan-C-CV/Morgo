@@ -2170,14 +2170,12 @@ fn copy_selected_text(
     Ok(true)
 }
 
-fn tui_is_copy_key(key: &crossterm::event::KeyEvent) -> bool {
+fn tui_is_copy_key(key: &crossterm::event::KeyEvent, has_selection: bool) -> bool {
     match key.code {
         KeyCode::Char('c' | 'C') => {
             key.modifiers
                 .intersects(KeyModifiers::SUPER | KeyModifiers::META)
-                || key
-                    .modifiers
-                    .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                || (has_selection && key.modifiers.contains(KeyModifiers::CONTROL))
         }
         _ => false,
     }
@@ -2402,6 +2400,30 @@ fn tui_detect_xterm_js() -> bool {
         .unwrap_or(false)
 }
 
+fn tui_terminal_program_is_ide(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "vscode",
+        "cursor",
+        "windsurf",
+        "jetbrains",
+        "jediterm",
+        "zed",
+        "antigravity",
+        "trae",
+    ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn tui_detect_ide_terminal() -> bool {
+    std::env::var("TERM_PROGRAM")
+        .ok()
+        .map(|value| tui_terminal_program_is_ide(&value))
+        .unwrap_or(false)
+        || std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some()
+}
+
 fn tui_compute_wheel_step(
     state: &mut TuiWheelAccelState,
     direction: i8,
@@ -2470,6 +2492,7 @@ mod tui_output_tests {
         render_tui_rendered_line, select_line_at, select_word_at, selected_text,
         shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_is_copy_key,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport,
+        tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -2826,22 +2849,44 @@ mod tui_output_tests {
 
     #[test]
     fn tui_copy_key_accepts_terminal_variants() {
-        assert!(tui_is_copy_key(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::SUPER
-        )));
-        assert!(tui_is_copy_key(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::META
-        )));
-        assert!(tui_is_copy_key(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT
-        )));
-        assert!(!tui_is_copy_key(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL
-        )));
+        assert!(tui_is_copy_key(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            false
+        ));
+        assert!(tui_is_copy_key(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::META),
+            false
+        ));
+        assert!(tui_is_copy_key(
+            &KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            true
+        ));
+        assert!(tui_is_copy_key(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            true
+        ));
+        assert!(!tui_is_copy_key(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            false
+        ));
+        assert!(!tui_is_copy_key(
+            &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER),
+            true
+        ));
+    }
+
+    #[test]
+    fn tui_ide_terminal_detection_matches_common_embedded_terminals() {
+        assert!(tui_terminal_program_is_ide("vscode"));
+        assert!(tui_terminal_program_is_ide("Cursor"));
+        assert!(tui_terminal_program_is_ide("JetBrains-JediTerm"));
+        assert!(tui_terminal_program_is_ide("zed"));
+        assert!(tui_terminal_program_is_ide("Google Antigravity"));
+        assert!(tui_terminal_program_is_ide("Trae"));
+        assert!(!tui_terminal_program_is_ide("Apple_Terminal"));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -3863,7 +3908,7 @@ impl RuntimeBootstrap {
                         continue;
                     }
 
-                    if tui_is_copy_key(&key) {
+                    if tui_is_copy_key(&key, tui_has_selection(&rendered_content, &selection)) {
                         let _ = copy_selected_text(&rendered_content, &selection);
                         pending_exit_gesture = None;
                         continue;
@@ -4198,7 +4243,7 @@ impl RuntimeBootstrap {
                             selection.dragging = false;
                             if !tui_has_selection(&rendered_content, &selection) {
                                 selection.clear();
-                            } else if tui_detect_xterm_js() {
+                            } else if tui_detect_ide_terminal() {
                                 let _ = copy_selected_text(&rendered_content, &selection);
                             }
                         }
