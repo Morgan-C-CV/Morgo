@@ -1283,9 +1283,7 @@ fn char_to_byte_index(value: &str, char_index: usize) -> usize {
 fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> TuiInputViewport {
     const PROMPT_VISIBLE_WIDTH: usize = 2;
     const CURSOR_BASE_COLUMN: usize = 3;
-    let visible_width = total_cols
-        .saturating_sub(PROMPT_VISIBLE_WIDTH + 1)
-        .max(1);
+    let visible_width = total_cols.saturating_sub(PROMPT_VISIBLE_WIDTH + 1).max(1);
     let chars = input.chars().collect::<Vec<_>>();
     let char_len = chars.len();
     let clamped_cursor = cursor_index.min(char_len);
@@ -1315,7 +1313,10 @@ fn tui_input_viewport(input: &str, cursor_index: usize, total_cols: usize) -> Tu
 }
 
 fn display_width_for_chars(chars: &[char]) -> usize {
-    chars.iter().map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0)).sum()
+    chars
+        .iter()
+        .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0))
+        .sum()
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -1387,9 +1388,8 @@ fn render_fixed_tui_layout(
     let viewport = tui_input_viewport(input, cursor_index, width);
     let title_text = " INPUT ";
     let title_padding = " ".repeat(width.saturating_sub(title_text.chars().count()));
-    let input_padding = " ".repeat(
-        width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())),
-    );
+    let input_padding = " "
+        .repeat(width.saturating_sub(2 + UnicodeWidthStr::width(viewport.visible_input.as_str())));
     let input_title_row = content_height.saturating_add(1).min(height);
     let input_row = content_height.saturating_add(2).min(height);
     let cursor_col = viewport.cursor_column.min(width).max(1);
@@ -1406,9 +1406,7 @@ fn render_fixed_tui_layout(
 
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;2;37m{}{}\x1b[0m",
-        input_title_row,
-        title_text,
-        title_padding
+        input_title_row, title_text, title_padding
     ));
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m\x1b[1;36m>\x1b[0m\x1b[48;5;238;97m {}{}\x1b[0m",
@@ -1554,14 +1552,7 @@ mod tui_output_tests {
             footer: vec![],
         };
 
-        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
-            &screen,
-            "",
-            &[],
-            0,
-            5,
-            0,
-        ));
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(&screen, "", &[], 0, 5, 0));
 
         assert!(rendered.contains("line-6"));
         assert!(!rendered.contains("line-40"));
@@ -2458,8 +2449,7 @@ impl RuntimeBootstrap {
             } else {
                 for line in io::stdin().lock().lines() {
                     let line = line?;
-                    let output =
-                        handle_cli_input(&router, &mut engine, &app_state, line).await?;
+                    let output = handle_cli_input(&router, &mut engine, &app_state, line).await?;
                     self.print_cli_turn_output(&output);
                 }
             }

@@ -268,7 +268,7 @@ async fn cli_smoke_coding_loop_reads_edits_verifies_and_concludes() {
         workspace.path(),
     );
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine
         .submit_turn(Message::user(
             "Open the local file, change status from todo to done, run a local verification command, and tell me if it passed.",
@@ -506,7 +506,7 @@ async fn cli_smoke_coding_loop_requests_more_context_when_target_is_underspecifi
     let sentinel = workspace.path().join("do_not_touch.txt");
     std::fs::write(&sentinel, "leave me alone\n").expect("seed sentinel file");
 
-    let engine = QueryEngine::new(coding_smoke_context(
+    let mut engine = QueryEngine::new(coding_smoke_context(
         vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::TextDelta(
@@ -614,7 +614,7 @@ async fn cli_smoke_coding_loop_surfaces_bash_pending_approval_without_false_succ
     permission_context.add_always_allow_rule("Edit");
     permission_context.add_always_ask_rule("Bash");
 
-    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -737,7 +737,7 @@ async fn cli_smoke_coding_loop_surfaces_bash_denial_with_clear_next_step() {
     permission_context.add_always_allow_rule("Edit");
     permission_context.add_always_ask_rule("Bash");
 
-    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -870,7 +870,7 @@ async fn cli_smoke_coding_loop_resumes_after_bash_approval_and_completes() {
     permission_context.add_always_allow_rule("Edit");
     permission_context.add_always_ask_rule("Bash");
 
-    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1004,7 +1004,7 @@ async fn cli_smoke_pending_approval_user_facing_copy_is_actionable() {
     permission_context.add_always_allow_rule("Edit");
     permission_context.add_always_ask_rule("Bash");
 
-    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1093,7 +1093,7 @@ async fn cli_smoke_resume_continuation_restores_interrupted_coding_context_witho
     permission_context.add_always_allow_rule("Edit");
     permission_context.add_always_ask_rule("Bash");
 
-    let engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::TextDelta(
@@ -1257,7 +1257,7 @@ async fn v1_release_gate_coding_smoke_bundle_stays_green() {
         "timeout": 5_000
     })
     .to_string();
-    let success_engine = QueryEngine::new(coding_smoke_context(
+    let mut success_engine = QueryEngine::new(coding_smoke_context(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1334,7 +1334,7 @@ async fn v1_release_gate_coding_smoke_bundle_stays_green() {
         .with_filesystem_policy(allow_write_policy_for(approval_workspace.path()));
     approval_permission_context.add_always_allow_rule("Edit");
     approval_permission_context.add_always_ask_rule("Bash");
-    let approval_engine = QueryEngine::new(coding_smoke_context_with_permissions(
+    let mut approval_engine = QueryEngine::new(coding_smoke_context_with_permissions(
         vec![
             vec![
                 StreamEvent::MessageStart,

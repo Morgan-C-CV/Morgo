@@ -2020,7 +2020,7 @@ async fn query_engine_submit_turn_works_through_production_provider_path() {
         context_prompt: "context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("hello")).await;
 
     assert_eq!(
@@ -2487,7 +2487,7 @@ async fn production_provider_merges_usage_across_provider_envelopes_without_drif
         context_prompt: "context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("hello")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
@@ -2901,7 +2901,7 @@ async fn production_provider_maps_terminal_http_error_to_query_loop_failure_code
         context_prompt: "context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("hello")).await;
 
     assert_eq!(result.state, QueryLoopState::Failed);
@@ -3381,7 +3381,7 @@ async fn production_provider_maps_timeout_after_retries_exhaust_to_query_loop_fa
         context_prompt: "context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("hello")).await;
 
     assert_eq!(result.state, QueryLoopState::Failed);

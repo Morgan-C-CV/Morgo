@@ -20,9 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{
-    PersistedSessionRecord, SessionHistory, SessionHistoryEntry, SessionId,
-    SessionLifecycleStatus, SessionRestoreRequest, SessionSnapshot, SessionStore,
-    SessionStoreWriteError,
+    PersistedSessionRecord, SessionHistory, SessionHistoryEntry, SessionId, SessionLifecycleStatus,
+    SessionRestoreRequest, SessionSnapshot, SessionStore, SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::approval_protocol::{ApprovalDecision, ApprovalSurface};

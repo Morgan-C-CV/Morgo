@@ -1672,7 +1672,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
         boss_coordinator: None,
         remote_actor_store: None,
     };
-    let engine =
+    let mut engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
@@ -1691,7 +1691,7 @@ async fn cli_repl_handles_multiple_inputs_in_sequence() {
             context_prompt: "test context".into(),
         });
 
-    let outputs = handle_cli_inputs(&router, &engine, &app_state, vec!["/help", "hello"])
+    let outputs = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help", "hello"])
         .await
         .expect("cli repl should handle sequential inputs");
 
@@ -1762,7 +1762,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
         InteractionSurface::Cli,
     );
     manager.complete(&task.id, &app_state.notification_dispatcher);
-    let engine =
+    let mut engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
@@ -1775,7 +1775,7 @@ async fn cli_repl_surfaces_task_events_for_active_session() {
             context_prompt: "test context".into(),
         });
 
-    let output = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let output = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("cli repl should surface notifications");
 
@@ -1863,7 +1863,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
         boss_coordinator: None,
         remote_actor_store: None,
     };
-    let engine =
+    let mut engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
@@ -1882,7 +1882,7 @@ async fn cli_repl_persists_history_for_local_and_query_turns() {
             context_prompt: "test context".into(),
         });
 
-    let outputs = handle_cli_inputs(&router, &engine, &app_state, vec!["/help", "hello"])
+    let outputs = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help", "hello"])
         .await
         .expect("cli repl should persist history");
 
@@ -2168,9 +2168,9 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
             tools_prompt: "test tools".into(),
             context_prompt: "test context".into(),
         });
-    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+    let mut engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
-    let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let first = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
     assert!(
@@ -2207,7 +2207,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
     assert_eq!(report.outcome.as_str(), "applied");
     assert_eq!(report.generation, 1);
 
-    let second = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let second = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("second turn should succeed");
     assert!(
@@ -2328,9 +2328,9 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
             tools_prompt: "test tools".into(),
             context_prompt: "test context".into(),
         });
-    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+    let mut engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
-    let first = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let first = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
     assert!(
@@ -2346,7 +2346,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
     assert_eq!(report.outcome.as_str(), "applied");
     assert_eq!(report.generation, 1);
 
-    let second = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let second = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("second turn should succeed");
     assert!(second[0].primary_text.contains("Available commands"));
@@ -2463,7 +2463,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
             tools_prompt: "test tools".into(),
             context_prompt: "test context".into(),
         });
-    let engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
+    let mut engine = build_turn_engine(&app_state, &initial_snapshot, &base_engine);
 
     assert_eq!(
         router
@@ -2517,7 +2517,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         })
     );
 
-    let after_disable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let after_disable = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("help after disable should succeed");
     assert!(
@@ -2570,7 +2570,7 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
         }
     );
 
-    let after_enable = handle_cli_inputs(&router, &engine, &app_state, vec!["/help"])
+    let after_enable = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("help after enable should succeed");
     assert!(
@@ -2818,7 +2818,7 @@ async fn cli_repl_persists_denied_turns() {
         boss_coordinator: None,
         remote_actor_store: None,
     };
-    let engine =
+    let mut engine =
         rust_agent::core::engine::QueryEngine::new(rust_agent::core::context::QueryContext {
             app_state: app_state.clone(),
             tool_registry: ToolRegistry::new(),
@@ -2831,7 +2831,7 @@ async fn cli_repl_persists_denied_turns() {
             context_prompt: "test context".into(),
         });
 
-    let output = handle_cli_inputs(&router, &engine, &app_state, vec!["/remote-safe"])
+    let output = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/remote-safe"])
         .await
         .expect("denied turn should still produce output");
 

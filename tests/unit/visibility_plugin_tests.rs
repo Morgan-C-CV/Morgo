@@ -18,7 +18,9 @@ use rust_agent::command::types::{Command, CommandAvailability, CommandResult};
 use rust_agent::core::message::Message;
 use rust_agent::history::resume::RestoredSession;
 use rust_agent::history::resume::resolved_from_snapshot;
-use rust_agent::history::session::{SessionId, SessionSnapshot};
+use rust_agent::history::session::{
+    InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
+};
 use rust_agent::history::transcript::Transcript;
 use rust_agent::interaction::cli::renderer::render_turn_output;
 use rust_agent::interaction::cli::repl::CliTurnOutput;
@@ -473,6 +475,80 @@ async fn cli_resume_summary_surfaces_last_task_and_working_state_before_full_his
     assert!(
         summary_anchor < restore_anchor,
         "/resume should show restore summary before raw resume instructions or full history; text={text}"
+    );
+}
+
+#[tokio::test]
+async fn cli_resume_prefers_canonical_history_over_stale_runtime_mirrors() {
+    let mut app_state = test_app_state(None, Some(Arc::new(TaskManager::default())), None, None);
+    let session_id = SessionId("resume-canonical-session".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/resume-canonical".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    let store = Arc::new(InMemorySessionStore::default());
+    let stale_history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::user("stale mirror task"),
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: None,
+        }],
+    };
+    let canonical_history = SessionHistory {
+        entries: vec![
+            SessionHistoryEntry {
+                message: Message::user("stale mirror task"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+            SessionHistoryEntry {
+                message: Message::assistant("intermediate assistant note"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+            SessionHistoryEntry {
+                message: Message::user("latest canonical task"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+        ],
+    };
+    store.insert(snapshot.clone(), canonical_history);
+    app_state.active_session_id = session_id.0.clone();
+    app_state.session = Some(snapshot.clone());
+    app_state.session_store = Some(store);
+    app_state.history = Some(stale_history.clone());
+    app_state.restored_session = Some(RestoredSession {
+        snapshot,
+        history: stale_history.clone(),
+        transcript: Transcript::from(stale_history),
+    });
+
+    let text = ResumeCommand
+        .execute(
+            &NormalizedInput::from_raw(InteractionSurface::Cli, "/resume"),
+            &app_state,
+        )
+        .await
+        .expect("resume command should render")
+        .to_plain_text()
+        .expect("resume command should produce text");
+
+    assert!(
+        text.contains("last task: latest canonical task"),
+        "/resume should prefer the latest canonical history entry instead of stale runtime mirrors; text={text}"
+    );
+    assert!(
+        !text.contains("last task: stale mirror task"),
+        "/resume should not let stale mirrors override canonical history; text={text}"
     );
 }
 

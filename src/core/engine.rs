@@ -87,7 +87,10 @@ impl QueryEngine {
             tool_refs: Vec::new(),
             milestone: Some(milestone.clone()),
         }));
-        let _ = self.context.app_state.append_current_session_history_entries(entries);
+        let _ = self
+            .context
+            .app_state
+            .append_current_session_history_entries(entries);
     }
 
     fn persist_turn(&mut self, input: Message, events: Vec<EngineEvent>) -> Vec<EngineEvent> {

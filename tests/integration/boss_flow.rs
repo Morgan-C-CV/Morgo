@@ -1073,6 +1073,82 @@ async fn report_payload_uses_historystore_derived_summary() {
 }
 
 #[tokio::test]
+async fn report_payload_prefers_canonical_history_when_runtime_mirror_is_stale() {
+    let task_manager = Arc::new(TaskManager::default());
+    let store = Arc::new(InMemorySessionStore::default());
+    let canonical_history = SessionHistory {
+        entries: vec![
+            SessionHistoryEntry {
+                message: rust_agent::core::message::Message::user("stale user note"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+            SessionHistoryEntry {
+                message: rust_agent::core::message::Message::assistant("fresh canonical summary"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            },
+        ],
+    };
+    let mut app_state = (*app_state_with_history(
+        "history-session-stale",
+        task_manager.clone(),
+        store.clone(),
+        SessionHistory {
+            entries: vec![SessionHistoryEntry {
+                message: rust_agent::core::message::Message::user("stale mirror only"),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            }],
+        },
+    ))
+    .clone();
+    store.insert(
+        app_state
+            .session
+            .clone()
+            .expect("history test app state should include session"),
+        canonical_history,
+    );
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "History-backed stale step")]),
+        "test_boss_historystore_stale_report.json",
+    )
+    .await;
+    coordinator
+        .attach_app_state_for_report_testing(Arc::new(app_state))
+        .await;
+
+    let response = coordinator
+        .handle_control_request(
+            BossControlRequest::Report,
+            &task_manager,
+            &NotificationDispatcher::new(TelegramGateway::default()),
+        )
+        .await
+        .unwrap();
+
+    match response {
+        BossControlResponse::Report(payload) => {
+            assert_eq!(payload.history_summary[0], "fresh canonical summary");
+            assert_eq!(payload.history_summary[1], "stale user note");
+            assert!(
+                !payload
+                    .history_summary
+                    .iter()
+                    .any(|item| item == "stale mirror only")
+            );
+        }
+        other => panic!("expected report payload, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
 async fn report_control_request_uses_dedicated_mailbox_runtime() {
     let task_manager = Arc::new(TaskManager::default());
     let dispatcher = NotificationDispatcher::new(TelegramGateway::default());

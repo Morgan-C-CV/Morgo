@@ -9,10 +9,12 @@ use rust_agent::core::query_loop::{
     Continue, QueryLoopState, QueryParams, Terminal, run_query_loop, run_query_loop_with_params,
 };
 use rust_agent::cost::tracker::CostTracker;
+use rust_agent::history::resume::RestoredSession;
 use rust_agent::history::session::{
     InMemorySessionStore, SessionHistory, SessionHistoryEntry, SessionId, SessionSnapshot,
     SessionStore,
 };
+use rust_agent::history::transcript::Transcript;
 use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
@@ -521,6 +523,88 @@ async fn query_loop_openai_tool_calling_includes_tools_and_preserves_transcript(
 }
 
 #[tokio::test]
+async fn query_engine_submit_turn_syncs_store_and_runtime_history_mirrors() {
+    let session_store = Arc::new(InMemorySessionStore::default());
+    let session_id = SessionId("mirror-sync-session".into());
+    let snapshot = SessionSnapshot {
+        session_id: session_id.clone(),
+        surface: InteractionSurface::Cli,
+        session_mode: SessionMode::Interactive,
+        cwd: "/tmp/mirror-sync".into(),
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    let restored_history = SessionHistory {
+        entries: vec![SessionHistoryEntry {
+            message: Message::user("restored objective"),
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: None,
+        }],
+    };
+    session_store
+        .save(snapshot.clone(), restored_history.clone())
+        .expect("seed restored history");
+
+    let mut context = test_context(vec![
+        StreamEvent::MessageStart,
+        StreamEvent::TextDelta("fresh assistant reply".into()),
+        StreamEvent::MessageStop {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]);
+    context.app_state.active_session_id = session_id.0.clone();
+    context.app_state.session_store = Some(session_store.clone());
+    context.app_state.session = Some(snapshot.clone());
+    context.app_state.history = Some(restored_history.clone());
+    context.app_state.restored_session = Some(RestoredSession {
+        snapshot: snapshot.clone(),
+        history: restored_history.clone(),
+        transcript: Transcript::from(restored_history),
+    });
+
+    let mut engine = QueryEngine::new(context);
+    let result = engine.submit_turn(Message::user("fresh task")).await;
+
+    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.terminal, Terminal::Completed);
+
+    let (_, persisted_history) = session_store
+        .load(&rust_agent::history::session::SessionRestoreRequest {
+            resume: Some(session_id.0.clone()),
+            continue_session: false,
+        })
+        .expect("persisted history should exist");
+    assert_eq!(persisted_history.entries.len(), 3);
+    assert_eq!(
+        persisted_history.entries[1].message,
+        Message::user("fresh task")
+    );
+    assert_eq!(
+        persisted_history.entries[2].message,
+        Message::assistant("fresh assistant reply")
+    );
+
+    let app_history = engine
+        .context
+        .app_state
+        .history
+        .clone()
+        .expect("app state history should stay populated");
+    assert_eq!(app_history, persisted_history);
+
+    let restored_runtime_history = engine
+        .context
+        .app_state
+        .restored_session
+        .as_ref()
+        .expect("restored session should stay attached")
+        .history
+        .clone();
+    assert_eq!(restored_runtime_history, persisted_history);
+}
+
+#[tokio::test]
 async fn query_engine_submit_turn_restores_transcript_from_store_before_current_input() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -789,7 +873,7 @@ async fn query_loop_records_usage_emitted_after_terminal_stop() {
 
 #[tokio::test]
 async fn engine_stream_turn_yields_committed_messages() {
-    let engine = QueryEngine::new(test_context(vec![
+    let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::TextDelta("hello ".into()),
         StreamEvent::TextDelta("stream".into()),
@@ -899,7 +983,7 @@ fn executor_b_subagent_prompt_keeps_bash_visible() {
 
 #[tokio::test]
 async fn query_loop_collects_text_until_end_turn() {
-    let engine = QueryEngine::new(test_context(vec![
+    let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::TextDelta("hello ".into()),
         StreamEvent::TextDelta("world".into()),
@@ -924,7 +1008,7 @@ async fn query_loop_collects_text_until_end_turn() {
 #[tokio::test]
 async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
     let registry = ToolRegistry::new().register(Arc::new(AgentTool));
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -996,7 +1080,7 @@ async fn query_loop_invokes_tool_and_continues_follow_up_turn() {
 #[tokio::test]
 async fn query_loop_executes_multiple_tool_calls_from_one_turn() {
     let registry = ToolRegistry::new().register(Arc::new(EchoFixtureTool));
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1051,7 +1135,7 @@ async fn query_loop_executes_multiple_tool_calls_from_one_turn() {
 #[tokio::test]
 async fn query_loop_surfaces_progress_record_summary_and_detail() {
     let registry = ToolRegistry::new().register(Arc::new(ProgressFixtureTool));
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1210,7 +1294,7 @@ async fn query_loop_pending_approval_uses_aggregated_summary_for_pending_context
 
 #[tokio::test]
 async fn query_loop_uses_max_output_escalation_then_recovery() {
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![
                 StreamEvent::MessageStart,
@@ -1278,7 +1362,7 @@ fn compact_service_returns_typed_auto_compact_contract() {
 
 #[tokio::test]
 async fn query_loop_requests_compaction_for_large_input() {
-    let engine = QueryEngine::new(test_context(Vec::new()));
+    let mut engine = QueryEngine::new(test_context(Vec::new()));
     let oversized = "x".repeat(AUTO_COMPACT_INPUT_CHAR_LIMIT + 1);
 
     let result = engine.submit_turn(Message::user(oversized)).await;
@@ -1316,7 +1400,7 @@ async fn query_loop_requests_compaction_for_large_input() {
 
 #[tokio::test]
 async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![StreamEvent::Error(StreamError {
                 provider_id: "anthropic".into(),
@@ -1368,7 +1452,7 @@ async fn query_loop_surfaces_stream_errors_after_recovery_attempt() {
 
 #[tokio::test]
 async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_failures() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+    let mut engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),
         kind: "http_status".into(),
         message: "provider request failed with status 400".into(),
@@ -1406,7 +1490,7 @@ async fn query_loop_treats_pre_stream_terminal_errors_as_immediate_terminal_fail
 
 #[tokio::test]
 async fn query_loop_treats_pre_stream_retryable_errors_as_terminal_after_retries_exhaust() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+    let mut engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),
         kind: "timeout".into(),
         message: "provider request timed out".into(),
@@ -1439,7 +1523,7 @@ async fn query_loop_treats_pre_stream_retryable_errors_as_terminal_after_retries
 
 #[tokio::test]
 async fn query_loop_treats_retry_exhausted_connection_failures_as_terminal_failures() {
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![StreamEvent::Error(StreamError {
                 provider_id: "anthropic".into(),
@@ -1478,7 +1562,7 @@ async fn query_loop_treats_retry_exhausted_connection_failures_as_terminal_failu
 
 #[tokio::test]
 async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal_failures() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+    let mut engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),
         kind: "sse_protocol".into(),
         message: "tool_use block ended without complete input payload".into(),
@@ -1511,7 +1595,7 @@ async fn query_loop_treats_stream_terminal_protocol_errors_as_immediate_terminal
 
 #[tokio::test]
 async fn query_loop_maps_tool_use_protocol_errors_to_stream_protocol_code() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+    let mut engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),
         kind: "tool_use_protocol".into(),
         message: "tool stop without tool payload".into(),
@@ -1536,7 +1620,7 @@ async fn query_loop_maps_tool_use_protocol_errors_to_stream_protocol_code() {
 
 #[tokio::test]
 async fn query_loop_maps_structured_output_invalid_errors_to_stream_protocol_code() {
-    let engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
+    let mut engine = QueryEngine::new(test_context(vec![StreamEvent::Error(StreamError {
         provider_id: "anthropic".into(),
         kind: "structured_output_invalid".into(),
         message: "structured output block ended without complete JSON payload".into(),
@@ -1561,7 +1645,7 @@ async fn query_loop_maps_structured_output_invalid_errors_to_stream_protocol_cod
 
 #[tokio::test]
 async fn query_loop_treats_stop_reason_error_as_terminal_protocol_failure() {
-    let engine = QueryEngine::new(test_context(vec![
+    let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::MessageStop {
             stop_reason: StopReason::Error,
@@ -1585,7 +1669,7 @@ async fn query_loop_treats_stop_reason_error_as_terminal_protocol_failure() {
 
 #[tokio::test]
 async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
-    let engine = QueryEngine::new(test_context(vec![
+    let mut engine = QueryEngine::new(test_context(vec![
         StreamEvent::MessageStart,
         StreamEvent::ToolUse {
             tool_name: "MissingTool".into(),
@@ -1622,7 +1706,7 @@ async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
 #[tokio::test]
 async fn query_loop_preserves_synthesized_missing_tool_result_for_denied_tool() {
     let registry = ToolRegistry::new().register(Arc::new(DeniedFixtureTool));
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![vec![
             StreamEvent::MessageStart,
             StreamEvent::ToolUse {
@@ -1739,7 +1823,7 @@ async fn query_loop_stop_hook_can_prevent_continuation() {
         context_prompt: "test context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
@@ -1845,7 +1929,7 @@ async fn query_loop_respects_pre_tool_hook_denial() {
         context_prompt: "test context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
@@ -1966,7 +2050,7 @@ async fn query_loop_runs_permission_request_hook_before_tool_execution() {
         context_prompt: "test context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Interrupted);
@@ -2082,7 +2166,7 @@ async fn query_loop_stop_hook_blocking_continues_with_follow_up_turn() {
         context_prompt: "test context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
@@ -2201,7 +2285,7 @@ async fn query_loop_uses_subagent_stop_hook_for_subagent_context() {
         context_prompt: "test context".into(),
     };
 
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let result = engine.submit_turn(Message::user("inspect file")).await;
 
     assert_eq!(result.state, QueryLoopState::Completed);
@@ -2465,7 +2549,7 @@ async fn worker_query_loop_consumes_mailbox_messages() {
     };
 
     manager.launch(&task.id, "initial", std::future::pending::<()>());
-    let engine = QueryEngine::new(context);
+    let mut engine = QueryEngine::new(context);
     let engine_handle =
         tokio::spawn(async move { engine.submit_turn(Message::user("initial")).await });
 
@@ -2884,7 +2968,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
         notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
     };
 
-    let old_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
+    let mut old_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
     let old_turn_result = old_turn_engine.submit_turn(Message::user("old turn")).await;
     assert!(
         old_turn_result
@@ -2920,7 +3004,7 @@ async fn updated_runtime_snapshot_applies_only_to_next_turn_and_new_subagents() 
     app_state.active_model_profile_name = Some("new-profile".into());
     app_state.active_model_provider_summary.model = "new-runtime-model".into();
 
-    let next_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
+    let mut next_turn_engine = build_turn_engine(&app_state, &snapshot, &base_engine);
     assert_eq!(
         next_turn_engine
             .context
@@ -4292,7 +4376,7 @@ async fn query_loop_second_max_tokens_hit_uses_recovery_branch() {
 
 #[tokio::test]
 async fn submit_turn_emits_runtime_events_for_compact_recovery_and_terminal_paths() {
-    let engine = QueryEngine::new(test_context_with_turns(
+    let mut engine = QueryEngine::new(test_context_with_turns(
         vec![
             vec![StreamEvent::Error(StreamError {
                 provider_id: "anthropic".into(),
@@ -4397,7 +4481,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
         .with_task_manager(Arc::new(TaskManager::default()));
     permission_context.add_always_allow_rule("Agent");
 
-    let prevented_engine = QueryEngine::new(QueryContext {
+    let mut prevented_engine = QueryEngine::new(QueryContext {
         app_state: AppState {
             surface: InteractionSurface::Cli,
             session_mode: SessionMode::Headless,
@@ -4468,7 +4552,7 @@ async fn submit_turn_distinguishes_stop_hook_prevented_and_blocking_runtime_even
         context_prompt: "test context".into(),
     });
 
-    let blocking_engine = QueryEngine::new(QueryContext {
+    let mut blocking_engine = QueryEngine::new(QueryContext {
         app_state: AppState {
             surface: InteractionSurface::Cli,
             session_mode: SessionMode::Headless,

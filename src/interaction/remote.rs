@@ -306,38 +306,34 @@ pub async fn handle_remote_request(
     }
     let mut remote_engine = bind_remote_engine(engine, app_state, &input);
     let remote_app_state = remote_engine.context.app_state.clone();
-    let output = match handle_normalized_input(
-        router,
-        &mut remote_engine,
-        &remote_app_state,
-        input.clone(),
-    )
-    .await
-    {
-        Ok(output) => {
-            record_remote_audit(
-                &remote_engine.context.app_state,
-                AuditEvent::RemoteRequestAccepted {
-                    session_id: input.session_id.clone(),
-                    actor_id: input.actor.actor_id.clone(),
-                    from_trusted_surface: input.metadata.from_trusted_surface,
-                },
-            );
-            output
-        }
-        Err(error) => {
-            record_remote_audit(
-                &remote_engine.context.app_state,
-                AuditEvent::RemoteRequestDenied {
-                    session_id: input.session_id.clone(),
-                    actor_id: input.actor.actor_id.clone(),
-                    reason: error.to_string(),
-                    outcome: "runtime_error".into(),
-                },
-            );
-            return Err(error);
-        }
-    };
+    let output =
+        match handle_normalized_input(router, &mut remote_engine, &remote_app_state, input.clone())
+            .await
+        {
+            Ok(output) => {
+                record_remote_audit(
+                    &remote_engine.context.app_state,
+                    AuditEvent::RemoteRequestAccepted {
+                        session_id: input.session_id.clone(),
+                        actor_id: input.actor.actor_id.clone(),
+                        from_trusted_surface: input.metadata.from_trusted_surface,
+                    },
+                );
+                output
+            }
+            Err(error) => {
+                record_remote_audit(
+                    &remote_engine.context.app_state,
+                    AuditEvent::RemoteRequestDenied {
+                        session_id: input.session_id.clone(),
+                        actor_id: input.actor.actor_id.clone(),
+                        reason: error.to_string(),
+                        outcome: "runtime_error".into(),
+                    },
+                );
+                return Err(error);
+            }
+        };
 
     let audit_event_kind = upsert_remote_actor(&remote_engine.context.app_state, &input);
     let request_count = remote_engine
