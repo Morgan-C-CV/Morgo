@@ -304,11 +304,12 @@ pub async fn handle_remote_request(
             },
         });
     }
-    let remote_engine = bind_remote_engine(engine, app_state, &input);
+    let mut remote_engine = bind_remote_engine(engine, app_state, &input);
+    let remote_app_state = remote_engine.context.app_state.clone();
     let output = match handle_normalized_input(
         router,
-        &remote_engine,
-        &remote_engine.context.app_state,
+        &mut remote_engine,
+        &remote_app_state,
         input.clone(),
     )
     .await

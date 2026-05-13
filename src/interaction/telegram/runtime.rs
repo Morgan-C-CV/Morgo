@@ -34,11 +34,12 @@ pub async fn handle_telegram_envelope(
 ) -> anyhow::Result<TelegramRuntimeResponse> {
     match intake_transport_envelope(gateway, envelope) {
         TelegramInboundIntake::Authorized { input, .. } => {
-            let telegram_engine = bind_telegram_engine(engine, app_state, &input);
+            let mut telegram_engine = bind_telegram_engine(engine, app_state, &input);
+            let telegram_app_state = telegram_engine.context.app_state.clone();
             let output = handle_normalized_input(
                 router,
-                &telegram_engine,
-                &telegram_engine.context.app_state,
+                &mut telegram_engine,
+                &telegram_app_state,
                 input.clone(),
             )
             .await?;

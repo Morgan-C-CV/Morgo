@@ -10854,18 +10854,12 @@ fn format_acceptance_from_items(items: &[String]) -> String {
 fn history_summary_from_app_state(
     app_state: &crate::state::app_state::AppState,
 ) -> Option<Vec<String>> {
-    if let Some(history) = &app_state.history {
-        return Some(history_summary_from_history(history));
+    let history = app_state.canonical_session_history();
+    if history.entries.is_empty() {
+        None
+    } else {
+        Some(history_summary_from_history(&history))
     }
-
-    let session_store = app_state.session_store.as_ref()?;
-    let session = app_state.session.as_ref()?;
-    let request = crate::history::session::SessionRestoreRequest {
-        resume: Some(session.session_id.0.clone()),
-        continue_session: false,
-    };
-    let (_, history) = session_store.load(&request)?;
-    Some(history_summary_from_history(&history))
 }
 
 fn history_summary_from_history(history: &SessionHistory) -> Vec<String> {

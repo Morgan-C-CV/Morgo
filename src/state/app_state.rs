@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::history::resume::{ResolvedSessionState, RestoredSession};
 use crate::history::session::{
-    PersistedSessionRecord, SessionHistory, SessionId, SessionLifecycleStatus,
-    SessionRestoreRequest, SessionSnapshot, SessionStore, SessionStoreWriteError,
+    PersistedSessionRecord, SessionHistory, SessionHistoryEntry, SessionId,
+    SessionLifecycleStatus, SessionRestoreRequest, SessionSnapshot, SessionStore,
+    SessionStoreWriteError,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::security::approval_protocol::{ApprovalDecision, ApprovalSurface};
@@ -184,6 +185,10 @@ impl AppState {
         self.canonical_session_history_for(&session_id, self.history.as_ref())
     }
 
+    pub fn canonical_session_history_entries(&self) -> Vec<SessionHistoryEntry> {
+        self.canonical_session_history().entries
+    }
+
     pub fn canonical_session_history_for(
         &self,
         session_id: &SessionId,
@@ -192,6 +197,48 @@ impl AppState {
         self.stored_session_history(session_id)
             .or_else(|| fallback.cloned())
             .unwrap_or_default()
+    }
+
+    pub fn append_current_session_history_entry(
+        &mut self,
+        entry: SessionHistoryEntry,
+    ) -> Result<(), SessionPersistFailure> {
+        self.append_current_session_history_entries(std::iter::once(entry))
+    }
+
+    pub fn append_current_session_history_entries<I>(
+        &mut self,
+        entries: I,
+    ) -> Result<(), SessionPersistFailure>
+    where
+        I: IntoIterator<Item = SessionHistoryEntry>,
+    {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let session_id = self.current_session_id();
+        if let Some(session_store) = &self.session_store {
+            for entry in &entries {
+                persist_store_write_with_retry("append_current_session_history_entries", || {
+                    session_store.append_entry(&session_id, entry.clone())
+                })?;
+            }
+        }
+
+        self.history
+            .get_or_insert_with(SessionHistory::default)
+            .entries
+            .extend(entries.iter().cloned());
+
+        if let Some(restored_session) = self.restored_session.as_mut() {
+            if restored_session.snapshot.session_id == session_id {
+                restored_session.history.entries.extend(entries);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn current_working_directory(&self) -> PathBuf {

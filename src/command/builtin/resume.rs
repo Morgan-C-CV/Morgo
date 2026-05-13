@@ -69,18 +69,11 @@ impl Command for ResumeCommand {
         let last_task = interrupted_continuation_target(app_state)
             .or_else(|| {
                 app_state
-                    .restored_session
-                    .as_ref()
-                    .map(|restored| &restored.history)
-                    .or(app_state.history.as_ref())
-                    .and_then(|history| {
-                        history
-                            .entries
-                            .iter()
-                            .rev()
-                            .find(|entry| entry.message.role == Role::User)
-                            .map(|entry| entry.message.content.trim().to_string())
-                    })
+                    .canonical_session_history_entries()
+                    .into_iter()
+                    .rev()
+                    .find(|entry| entry.message.role == Role::User)
+                    .map(|entry| entry.message.content.trim().to_string())
                     .filter(|text| !text.is_empty())
             })
             .unwrap_or_else(|| "none recorded".into());

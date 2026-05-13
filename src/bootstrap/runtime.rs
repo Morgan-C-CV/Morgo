@@ -2163,7 +2163,7 @@ impl RuntimeBootstrap {
             s
         };
         let router = finalized.router;
-        let engine = finalized.engine;
+        let mut engine = finalized.engine;
 
         // Bootstrap actor runtimes with full A+B callbacks now that AppState is available.
         // BossCoordinator must be constructed before AppState (it is a field of AppState),
@@ -2425,7 +2425,8 @@ impl RuntimeBootstrap {
                     prompt.clone(),
                 )
                 .with_attachments(self.cli.attachments.clone());
-                let output = handle_normalized_input(&router, &engine, &app_state, input).await?;
+                let output =
+                    handle_normalized_input(&router, &mut engine, &app_state, input).await?;
                 self.print_cli_turn_output(&output);
             }
             return Ok(());
@@ -2452,19 +2453,20 @@ impl RuntimeBootstrap {
 
         if self.cli.interactive {
             if self.cli.tui {
-                self.run_interactive_tui(&router, &engine, &app_state)
+                self.run_interactive_tui(&router, &mut engine, &app_state)
                     .await?;
             } else {
                 for line in io::stdin().lock().lines() {
                     let line = line?;
-                    let output = handle_cli_input(&router, &engine, &app_state, line).await?;
+                    let output =
+                        handle_cli_input(&router, &mut engine, &app_state, line).await?;
                     self.print_cli_turn_output(&output);
                 }
             }
             return Ok(());
         }
 
-        let output = handle_cli_input(&router, &engine, &app_state, "/help").await?;
+        let output = handle_cli_input(&router, &mut engine, &app_state, "/help").await?;
         self.print_cli_turn_output(&output);
         Ok(())
     }
@@ -2518,7 +2520,7 @@ impl RuntimeBootstrap {
     async fn handle_tui_input_with_loading(
         &self,
         router: &CommandRouter,
-        engine: &QueryEngine,
+        engine: &mut QueryEngine,
         app_state: &AppState,
         line: String,
         on_update: impl FnMut(&CliTurnOutput),
@@ -2530,7 +2532,7 @@ impl RuntimeBootstrap {
     async fn run_interactive_tui(
         &self,
         router: &CommandRouter,
-        engine: &QueryEngine,
+        engine: &mut QueryEngine,
         app_state: &AppState,
     ) -> anyhow::Result<()> {
         let _raw_mode = TuiRawModeGuard::activate()?;

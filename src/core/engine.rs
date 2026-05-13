@@ -5,7 +5,7 @@ use crate::core::events::{
 };
 use crate::core::message::Message;
 use crate::core::query_loop::{QueryLoopResult, QueryParams, run_query_loop_with_params};
-use crate::history::session::{SessionHistoryEntry, SessionId};
+use crate::history::session::SessionHistoryEntry;
 use crate::task::types::TaskEvent;
 use tokio::sync::mpsc;
 
@@ -28,15 +28,15 @@ impl QueryEngine {
         Self { context }
     }
 
-    pub async fn submit_message(&self, input: Message) -> Vec<Message> {
+    pub async fn submit_message(&mut self, input: Message) -> Vec<Message> {
         self.submit_turn(input).await.messages
     }
 
-    pub async fn submit_message_events(&self, input: Message) -> Vec<EngineEvent> {
+    pub async fn submit_message_events(&mut self, input: Message) -> Vec<EngineEvent> {
         self.submit_turn(input).await.events
     }
 
-    pub async fn stream_turn(&self, input: Message) -> mpsc::Receiver<EngineEvent> {
+    pub async fn stream_turn(&mut self, input: Message) -> mpsc::Receiver<EngineEvent> {
         let result = self.submit_turn(input).await;
         let (tx, rx) = mpsc::channel(result.events.len().max(1));
         for event in result.events {
@@ -47,7 +47,7 @@ impl QueryEngine {
         rx
     }
 
-    pub async fn submit_turn(&self, input: Message) -> QueryLoopResult {
+    pub async fn submit_turn(&mut self, input: Message) -> QueryLoopResult {
         let user_input = input.clone();
         let mut result = run_query_loop_with_params(
             &self.context,
@@ -70,53 +70,38 @@ impl QueryEngine {
     }
 
     pub fn persist_messages(
-        &self,
+        &mut self,
         input: Message,
         messages: &[Message],
         milestone: SessionMilestone,
     ) {
-        let Some(session_store) = &self.context.app_state.session_store else {
-            return;
-        };
-        let session_id = SessionId(self.context.app_state.active_session_id.clone());
-        let _ = session_store.append_entry(
-            &session_id,
-            SessionHistoryEntry {
-                message: input,
-                timestamp: None,
-                tool_refs: Vec::new(),
-                milestone: Some(SessionMilestone::UserInputCommitted),
-            },
-        );
-        for message in messages {
-            let _ = session_store.append_entry(
-                &session_id,
-                SessionHistoryEntry {
-                    message: message.clone(),
-                    timestamp: None,
-                    tool_refs: Vec::new(),
-                    milestone: Some(milestone.clone()),
-                },
-            );
-        }
+        let mut entries = vec![SessionHistoryEntry {
+            message: input,
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: Some(SessionMilestone::UserInputCommitted),
+        }];
+        entries.extend(messages.iter().cloned().map(|message| SessionHistoryEntry {
+            message,
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: Some(milestone.clone()),
+        }));
+        let _ = self.context.app_state.append_current_session_history_entries(entries);
     }
 
-    fn persist_turn(&self, input: Message, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
-        let session_store = self.context.app_state.session_store.as_ref();
-        let session_id = SessionId(self.context.app_state.active_session_id.clone());
+    fn persist_turn(&mut self, input: Message, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
+        let store_present = self.context.app_state.session_store.is_some();
         let mut persisted_events = Vec::new();
+        let mut history_entries = vec![SessionHistoryEntry {
+            message: input,
+            timestamp: None,
+            tool_refs: Vec::new(),
+            milestone: Some(SessionMilestone::UserInputCommitted),
+        }];
         let compact_plan_code = compact_plan_code_from_events(&events);
 
-        if let Some(session_store) = session_store {
-            let _ = session_store.append_entry(
-                &session_id,
-                SessionHistoryEntry {
-                    message: input,
-                    timestamp: None,
-                    tool_refs: Vec::new(),
-                    milestone: Some(SessionMilestone::UserInputCommitted),
-                },
-            );
+        if store_present {
             persisted_events.push(EngineEvent::SessionMilestoneWritten(
                 SessionMilestone::UserInputCommitted,
             ));
@@ -125,16 +110,13 @@ impl QueryEngine {
         for event in events {
             match &event {
                 EngineEvent::MessageCommitted(message) => {
-                    if let Some(session_store) = session_store {
-                        let _ = session_store.append_entry(
-                            &session_id,
-                            SessionHistoryEntry {
-                                message: message.clone(),
-                                timestamp: None,
-                                tool_refs: Vec::new(),
-                                milestone: Some(SessionMilestone::AssistantMessageCommitted),
-                            },
-                        );
+                    history_entries.push(SessionHistoryEntry {
+                        message: message.clone(),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: Some(SessionMilestone::AssistantMessageCommitted),
+                    });
+                    if store_present {
                         persisted_events.push(event.clone());
                         persisted_events.push(EngineEvent::SessionMilestoneWritten(
                             SessionMilestone::AssistantMessageCommitted,
@@ -151,19 +133,16 @@ impl QueryEngine {
                     kind,
                     report_modifier,
                 } => {
-                    if let Some(session_store) = session_store {
-                        let _ = session_store.append_entry(
-                            &session_id,
-                            SessionHistoryEntry {
-                                message: Message::assistant(format!(
-                                    "tool {tool_name} result: {}",
-                                    detail.clone().unwrap_or_else(|| summary.clone())
-                                )),
-                                timestamp: None,
-                                tool_refs: vec![tool_name.clone()],
-                                milestone: Some(SessionMilestone::ToolResultCommitted),
-                            },
-                        );
+                    history_entries.push(SessionHistoryEntry {
+                        message: Message::assistant(format!(
+                            "tool {tool_name} result: {}",
+                            detail.clone().unwrap_or_else(|| summary.clone())
+                        )),
+                        timestamp: None,
+                        tool_refs: vec![tool_name.clone()],
+                        milestone: Some(SessionMilestone::ToolResultCommitted),
+                    });
+                    if store_present {
                         persisted_events.push(EngineEvent::ToolResultCommitted {
                             tool_name: tool_name.clone(),
                             content: content.clone(),
@@ -191,7 +170,7 @@ impl QueryEngine {
                     record_runtime_observability(&self.context, &runtime);
                     persisted_events.push(EngineEvent::RuntimeEvent(runtime));
                     persisted_events.push(event.clone());
-                    if session_store.is_some() {
+                    if store_present {
                         persisted_events.push(EngineEvent::SessionMilestoneWritten(
                             SessionMilestone::TurnCompleted,
                         ));
@@ -207,6 +186,11 @@ impl QueryEngine {
             }
         }
 
+        let _ = self
+            .context
+            .app_state
+            .append_current_session_history_entries(history_entries);
+
         persisted_events
     }
 
@@ -219,8 +203,7 @@ impl QueryEngine {
         params.messages = self
             .context
             .app_state
-            .canonical_session_history()
-            .entries
+            .canonical_session_history_entries()
             .into_iter()
             .map(|entry| entry.message)
             .collect();
