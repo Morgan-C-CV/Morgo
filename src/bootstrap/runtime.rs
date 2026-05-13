@@ -5695,6 +5695,7 @@ fn print_lism_ab_summary(
 mod tests {
     use clap::Parser;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     use super::{
         BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS, preview_chars,
@@ -5702,7 +5703,60 @@ mod tests {
         terminal_tail_stalled, tui_input_suggestions,
     };
     use anyhow::anyhow;
-    use crate::state::permission_context::PendingApproval;
+    use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::command::registry::CommandRegistry;
+    use crate::cost::tracker::CostTracker;
+    use crate::interaction::dispatcher::NotificationDispatcher;
+    use crate::interaction::telegram::gateway::TelegramGateway;
+    use crate::security::audit::AuditLog;
+    use crate::service::observability::ServiceObservabilityTracker;
+    use crate::state::app_state::{
+        ActiveModelProfileSource, ActiveModelProviderSummary, AppState, RuntimeRole,
+    };
+    use crate::state::permission_context::{PendingApproval, PermissionMode, ToolPermissionContext};
+
+    fn test_app_state() -> AppState {
+        AppState {
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            client_type: ClientType::Cli,
+            session_source: SessionSource::LocalCli,
+            runtime_role: RuntimeRole::Coordinator,
+            worker_role: None,
+            permission_context: ToolPermissionContext::new(PermissionMode::Default),
+            command_registry: Some(Arc::new(CommandRegistry::new())),
+            runtime_tool_registry: None,
+            skill_registry: None,
+            mcp_runtime: None,
+            plugin_load_result: None,
+            cost_tracker: CostTracker::default(),
+            service_observability_tracker: ServiceObservabilityTracker::default(),
+            notification_dispatcher: NotificationDispatcher::new(TelegramGateway::default()),
+            audit_log: Arc::new(Mutex::new(AuditLog::default())),
+            startup_trace: Vec::new(),
+            active_model_runtime: None,
+            active_model_profile_name: None,
+            active_model_profile_source: ActiveModelProfileSource::BootstrapDefault,
+            active_model_provider_summary: ActiveModelProviderSummary {
+                provider_id: "default-provider".into(),
+                protocol: "MessagesApi".into(),
+                compatibility_profile: "MessagesApi".into(),
+                base_url_host: "localhost".into(),
+                model: "default-model".into(),
+                auth_status: "none".into(),
+            },
+            active_session_id: "approval-tests".into(),
+            session_store: None,
+            session: None,
+            history: None,
+            restored_session: None,
+            last_activity_ts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            subagent_limiter: None,
+            boss_coordinator: None,
+            remote_actor_store: None,
+        }
+    }
 
     #[test]
     fn preview_chars_respects_utf8_boundaries() {
