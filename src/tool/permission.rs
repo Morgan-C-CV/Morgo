@@ -1,5 +1,14 @@
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
-use crate::tool::definition::{PermissionDecision, ToolCall, ToolMetadata};
+use crate::tool::definition::{
+    PermissionApprovalMetadata, PermissionDecision, ToolCall, ToolMetadata,
+};
+
+fn explicit_ask_rule_detail(metadata: &ToolMetadata) -> String {
+    format!(
+        "Reason: explicit approval is required by ask rule for {}.\nChoose approve to run it, or deny to keep it from executing.",
+        metadata.name
+    )
+}
 
 pub fn is_tool_allowed(metadata: &ToolMetadata, permissions: &ToolPermissionContext) -> bool {
     matches!(
@@ -46,7 +55,13 @@ pub fn evaluate_tool_permission(
                 metadata.name
             ),
             reason: crate::tool::definition::PermissionDecisionReason::Rule,
-            metadata: None,
+            metadata: Some(PermissionApprovalMetadata {
+                code: Some("explicit_ask_rule".into()),
+                summary: Some(format!("{} approval required", metadata.name)),
+                detail: Some(explicit_ask_rule_detail(metadata)),
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["explicit_ask_rule".into()],
+            }),
         };
     }
 
