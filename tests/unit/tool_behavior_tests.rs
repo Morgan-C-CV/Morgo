@@ -744,6 +744,95 @@ async fn registry_returns_pending_approval_for_ask_only_bash() {
 }
 
 #[tokio::test]
+async fn bash_tool_pending_approval_and_denied_copy_stay_distinguishable() {
+    let registry = ToolRegistry::new().register(Arc::new(BashTool));
+
+    let approval = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "sudo whoami"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Default),
+        )
+        .await
+        .expect("approval-shaped bash request should return a structured result");
+
+    let ToolResult::PendingApproval {
+        tool_name,
+        message,
+        approval,
+    } = approval
+    else {
+        panic!("expected pending approval result for privileged bash request");
+    };
+
+    assert_eq!(tool_name, "Bash");
+    assert!(
+        message.starts_with("bash command warning ["),
+        "approval copy should read like a warning, not an execution failure; message={message:?}"
+    );
+    assert!(
+        message.contains("privileged_system"),
+        "approval copy should expose the policy category; message={message:?}"
+    );
+    assert!(
+        approval.summary.contains("pending approval"),
+        "approval summary should tell the user this is awaiting approval; summary={:?}",
+        approval.summary
+    );
+    assert!(
+        approval.detail.as_deref().unwrap_or_default().contains("command"),
+        "approval detail should preserve command-context reasoning; detail={:?}",
+        approval.detail
+    );
+    assert_eq!(approval.approval_kind.as_deref(), Some("tool_permission"));
+    assert!(
+        approval
+            .escalation_reasons
+            .iter()
+            .any(|reason| reason.contains("classifier.") || reason.contains("capability")),
+        "approval payload should preserve next-step approval context; escalation_reasons={:?}",
+        approval.escalation_reasons
+    );
+
+    let denied = registry
+        .invoke(
+            &ToolCall {
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": "echo hi > out.txt"
+                })
+                .to_string(),
+            },
+            &ToolPermissionContext::new(PermissionMode::Plan),
+        )
+        .await
+        .expect("denied bash request should return a structured result");
+
+    let ToolResult::Denied(message) = denied else {
+        panic!("expected denied result for plan-mode write bash request");
+    };
+    assert!(
+        message.contains("not allowed in plan mode"),
+        "denied copy should read as policy rejection, not command execution failure; message={message:?}"
+    );
+    assert!(
+        !message.contains("exit_code")
+            && !message.contains("stdout:")
+            && !message.contains("stderr:"),
+        "denied copy must not look like a command execution result; message={message:?}"
+    );
+    assert!(
+        !message.starts_with("bash command warning ["),
+        "denied copy must stay distinct from pending approval copy; message={message:?}"
+    );
+}
+
+#[tokio::test]
 async fn bash_tool_launches_background_task() {
     let manager = Arc::new(rust_agent::task::manager::TaskManager::default());
     let permissions = ToolPermissionContext::new(PermissionMode::Default)
