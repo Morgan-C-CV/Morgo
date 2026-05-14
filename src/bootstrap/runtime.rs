@@ -428,6 +428,7 @@ struct TuiLayoutMetrics {
     gap_row: usize,
     input_row: usize,
     suggestion_row: usize,
+    suggestion_height: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2203,6 +2204,36 @@ fn tui_terminal_dimensions() -> (usize, usize) {
     (usize::from(cols.max(1)), usize::from(rows.max(3)))
 }
 
+fn tui_suggestion_count_for_layout(input: &str, suggestions: &[TuiSuggestion]) -> usize {
+    if input.starts_with('/') {
+        suggestions.len().max(1)
+    } else {
+        suggestions.len()
+    }
+}
+
+fn tui_visible_suggestion_count(
+    terminal_rows: usize,
+    input: &str,
+    suggestions: &[TuiSuggestion],
+) -> usize {
+    const INPUT_BOX_HEIGHT: usize = 4;
+    const BOTTOM_PANEL_FIXED_ROWS: usize = 5;
+    const MAX_VISIBLE_SUGGESTIONS: usize = 8;
+
+    let suggestion_count = tui_suggestion_count_for_layout(input, suggestions);
+    if suggestion_count == 0 {
+        return 0;
+    }
+
+    let terminal_capacity = terminal_rows
+        .saturating_sub(BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT)
+        .saturating_add(1);
+    suggestion_count
+        .min(MAX_VISIBLE_SUGGESTIONS)
+        .min(terminal_capacity)
+}
+
 fn tui_layout_metrics(
     terminal_rows: usize,
     input: &str,
@@ -2210,16 +2241,10 @@ fn tui_layout_metrics(
 ) -> TuiLayoutMetrics {
     const INPUT_BOX_HEIGHT: usize = 4;
     const BOTTOM_PANEL_FIXED_ROWS: usize = 5;
-    let suggestion_count = if input.starts_with('/') {
-        suggestions.len().max(1)
-    } else if !suggestions.is_empty() {
-        suggestions.len()
-    } else {
-        0
-    };
+    let suggestion_height = tui_visible_suggestion_count(terminal_rows, input, suggestions);
     let height = terminal_rows.max(3);
     let bottom_reserved_height =
-        BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_count;
+        BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_height;
     let content_height = height.saturating_sub(bottom_reserved_height);
     let separator_row = content_height.saturating_add(1);
     TuiLayoutMetrics {
@@ -2230,7 +2255,30 @@ fn tui_layout_metrics(
         gap_row: separator_row.saturating_add(3),
         input_row: separator_row.saturating_add(4),
         suggestion_row: separator_row.saturating_add(8),
+        suggestion_height,
     }
+}
+
+fn tui_suggestion_viewport(
+    suggestion_count: usize,
+    selected_suggestion: Option<usize>,
+    visible_suggestion_count: usize,
+) -> (usize, usize) {
+    if suggestion_count == 0 || visible_suggestion_count == 0 {
+        return (0, 0);
+    }
+    if suggestion_count <= visible_suggestion_count {
+        return (0, suggestion_count);
+    }
+
+    let selected = selected_suggestion
+        .unwrap_or(0)
+        .min(suggestion_count.saturating_sub(1));
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(visible_suggestion_count)
+        .min(suggestion_count.saturating_sub(visible_suggestion_count));
+    (start, start.saturating_add(visible_suggestion_count))
 }
 
 fn strip_ansi_text(text: &str) -> String {
@@ -2754,7 +2802,7 @@ fn render_fixed_tui_layout(
     let (width, height) = tui_terminal_dimensions();
     let metrics = tui_layout_metrics(height, input, suggestions);
     let rendered_content = build_tui_rendered_content(&content_screen, width);
-    let suggestion_lines = if input.starts_with('/') {
+    let all_suggestion_lines = if input.starts_with('/') {
         if suggestions.is_empty() {
             vec!["No matching commands".to_string()]
         } else {
@@ -2777,6 +2825,24 @@ fn render_fixed_tui_layout(
     } else {
         Vec::new()
     };
+    let (suggestion_start, suggestion_end) = tui_suggestion_viewport(
+        all_suggestion_lines.len(),
+        selected_suggestion,
+        metrics.suggestion_height,
+    );
+    let mut suggestion_lines = all_suggestion_lines[suggestion_start..suggestion_end].to_vec();
+    if all_suggestion_lines.len() > suggestion_lines.len() && !suggestion_lines.is_empty() {
+        let page = (suggestion_start / metrics.suggestion_height).saturating_add(1);
+        let total_pages = all_suggestion_lines.len().div_ceil(metrics.suggestion_height);
+        let visible_end = suggestion_end.min(all_suggestion_lines.len());
+        let hint = colorize_ansi(
+            &format!("  [{visible_end}/{} · PgUp/PgDn {page}/{total_pages}]", all_suggestion_lines.len()),
+            "2;37",
+        );
+        if let Some(last_line) = suggestion_lines.last_mut() {
+            last_line.push_str(&hint);
+        }
+    }
     let max_scroll_top =
         max_tui_content_scroll_offset(rendered_content.lines.len(), metrics.content_height);
     let clamped_scroll_top = content_scroll_top.min(max_scroll_top);
@@ -3032,7 +3098,7 @@ mod tui_output_tests {
         render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
         selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_startup_face, tui_startup_face_frame, tui_startup_greeting,
+        tui_startup_face, tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
         tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -3149,6 +3215,49 @@ mod tui_output_tests {
             .expect("suggestions should render below input");
 
         assert!(input_pos < suggestion_pos);
+    }
+
+    #[test]
+    fn tui_suggestion_viewport_keeps_selected_item_visible() {
+        assert_eq!(tui_suggestion_viewport(12, Some(0), 4), (0, 4));
+        assert_eq!(tui_suggestion_viewport(12, Some(3), 4), (0, 4));
+        assert_eq!(tui_suggestion_viewport(12, Some(4), 4), (1, 5));
+        assert_eq!(tui_suggestion_viewport(12, Some(11), 4), (8, 12));
+    }
+
+    #[test]
+    fn tui_slash_suggestions_show_paged_window_for_long_lists() {
+        let app_state = test_app_state();
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["body".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+        let suggestions = (1..=12)
+            .map(|index| super::heuristic_suggestion(
+                format!("/cmd{index} "),
+                format!("cmd{index}"),
+                format!("detail {index}"),
+                "36",
+            ))
+            .collect::<Vec<_>>();
+
+        let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "/c",
+            &suggestions,
+            Some(11),
+            0,
+            TuiTurnStatus::Idle,
+            2,
+            &TuiSelectionState::default(),
+        ));
+
+        assert!(rendered.contains("cmd12"));
+        assert!(rendered.contains("[12/12"));
+        assert!(!rendered.contains("cmd1 detail 1"));
     }
 
     #[test]
@@ -5222,29 +5331,47 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            let page = (layout_metrics.content_height / 2).max(1);
-                            apply_tui_scroll(
-                                &mut follow_content_tail,
-                                &mut content_scroll_top,
-                                max_scroll_top,
-                                -(page as isize),
-                                &mut selection,
-                                &rendered_content,
-                            );
+                            if !suggestions.is_empty() {
+                                let page = layout_metrics.suggestion_height.max(1);
+                                selected_suggestion = Some(match selected_suggestion {
+                                    Some(index) => index.saturating_sub(page),
+                                    None => 0,
+                                });
+                            } else {
+                                let page = (layout_metrics.content_height / 2).max(1);
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    -(page as isize),
+                                    &mut selection,
+                                    &rendered_content,
+                                );
+                            }
                         }
                         KeyCode::PageDown => {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            let page = (layout_metrics.content_height / 2).max(1);
-                            apply_tui_scroll(
-                                &mut follow_content_tail,
-                                &mut content_scroll_top,
-                                max_scroll_top,
-                                page as isize,
-                                &mut selection,
-                                &rendered_content,
-                            );
+                            if !suggestions.is_empty() {
+                                let page = layout_metrics.suggestion_height.max(1);
+                                selected_suggestion = Some(match selected_suggestion {
+                                    Some(index) => index
+                                        .saturating_add(page)
+                                        .min(suggestions.len().saturating_sub(1)),
+                                    None => 0,
+                                });
+                            } else {
+                                let page = (layout_metrics.content_height / 2).max(1);
+                                apply_tui_scroll(
+                                    &mut follow_content_tail,
+                                    &mut content_scroll_top,
+                                    max_scroll_top,
+                                    page as isize,
+                                    &mut selection,
+                                    &rendered_content,
+                                );
+                            }
                         }
                         KeyCode::Char(ch) => {
                             if resume_picker.is_some() {
