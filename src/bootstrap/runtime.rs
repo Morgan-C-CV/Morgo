@@ -2259,26 +2259,142 @@ fn tui_layout_metrics(
     }
 }
 
+fn max_tui_suggestion_scroll_offset(suggestion_count: usize, visible_suggestion_count: usize) -> usize {
+    suggestion_count.saturating_sub(visible_suggestion_count)
+}
+
+fn clamp_tui_suggestion_scroll_top(
+    scroll_top: usize,
+    suggestion_count: usize,
+    visible_suggestion_count: usize,
+) -> usize {
+    scroll_top.min(max_tui_suggestion_scroll_offset(
+        suggestion_count,
+        visible_suggestion_count,
+    ))
+}
+
+fn ensure_selected_suggestion_visible(
+    scroll_top: usize,
+    selected_suggestion: Option<usize>,
+    suggestion_count: usize,
+    visible_suggestion_count: usize,
+) -> usize {
+    if suggestion_count == 0 || visible_suggestion_count == 0 {
+        return 0;
+    }
+    let mut scroll_top =
+        clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
+    let Some(selected) = selected_suggestion else {
+        return scroll_top;
+    };
+    if selected < scroll_top {
+        scroll_top = selected;
+    } else if selected >= scroll_top.saturating_add(visible_suggestion_count) {
+        scroll_top = selected
+            .saturating_add(1)
+            .saturating_sub(visible_suggestion_count);
+    }
+    clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count)
+}
+
 fn tui_suggestion_viewport(
     suggestion_count: usize,
-    selected_suggestion: Option<usize>,
+    scroll_top: usize,
     visible_suggestion_count: usize,
 ) -> (usize, usize) {
     if suggestion_count == 0 || visible_suggestion_count == 0 {
         return (0, 0);
     }
+    let start = clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
+    let end = start
+        .saturating_add(visible_suggestion_count)
+        .min(suggestion_count);
+    (start, end)
+}
+
+fn tui_move_suggestion_selection_down(
+    selected_suggestion: Option<usize>,
+    scroll_top: usize,
+    suggestion_count: usize,
+    visible_suggestion_count: usize,
+) -> (Option<usize>, usize) {
+    if suggestion_count == 0 {
+        return (None, 0);
+    }
+    let visible_suggestion_count = visible_suggestion_count.max(1);
+    let next_selected = Some(match selected_suggestion {
+        Some(index) => (index + 1) % suggestion_count,
+        None => 0,
+    });
     if suggestion_count <= visible_suggestion_count {
-        return (0, suggestion_count);
+        return (next_selected, 0);
     }
 
-    let selected = selected_suggestion
-        .unwrap_or(0)
-        .min(suggestion_count.saturating_sub(1));
-    let start = selected
-        .saturating_add(1)
-        .saturating_sub(visible_suggestion_count)
-        .min(suggestion_count.saturating_sub(visible_suggestion_count));
-    (start, start.saturating_add(visible_suggestion_count))
+    let mut next_scroll_top = clamp_tui_suggestion_scroll_top(
+        scroll_top,
+        suggestion_count,
+        visible_suggestion_count,
+    );
+    let selected = next_selected.expect("selected suggestion should exist");
+    if selected == 0 {
+        next_scroll_top = 0;
+    } else if next_scroll_top.saturating_add(visible_suggestion_count) < suggestion_count
+        && selected
+            == next_scroll_top
+                .saturating_add(visible_suggestion_count)
+                .saturating_sub(1)
+    {
+        next_scroll_top = (next_scroll_top + 1).min(max_tui_suggestion_scroll_offset(
+            suggestion_count,
+            visible_suggestion_count,
+        ));
+    } else {
+        next_scroll_top = ensure_selected_suggestion_visible(
+            next_scroll_top,
+            next_selected,
+            suggestion_count,
+            visible_suggestion_count,
+        );
+    }
+    (next_selected, next_scroll_top)
+}
+
+fn tui_move_suggestion_selection_up(
+    selected_suggestion: Option<usize>,
+    scroll_top: usize,
+    suggestion_count: usize,
+    visible_suggestion_count: usize,
+) -> (Option<usize>, usize) {
+    if suggestion_count == 0 {
+        return (None, 0);
+    }
+    let visible_suggestion_count = visible_suggestion_count.max(1);
+    let next_selected = Some(match selected_suggestion {
+        Some(index) => (index + suggestion_count - 1) % suggestion_count,
+        None => suggestion_count.saturating_sub(1),
+    });
+    if suggestion_count <= visible_suggestion_count {
+        return (next_selected, 0);
+    }
+
+    let mut next_scroll_top = clamp_tui_suggestion_scroll_top(
+        scroll_top,
+        suggestion_count,
+        visible_suggestion_count,
+    );
+    let selected = next_selected.expect("selected suggestion should exist");
+    if next_scroll_top > 0 && selected == next_scroll_top {
+        next_scroll_top = next_scroll_top.saturating_sub(1);
+    } else {
+        next_scroll_top = ensure_selected_suggestion_visible(
+            next_scroll_top,
+            next_selected,
+            suggestion_count,
+            visible_suggestion_count,
+        );
+    }
+    (next_selected, next_scroll_top)
 }
 
 fn strip_ansi_text(text: &str) -> String {
@@ -2791,6 +2907,7 @@ fn render_fixed_tui_layout(
     input: &str,
     suggestions: &[TuiSuggestion],
     selected_suggestion: Option<usize>,
+    suggestion_scroll_top: usize,
     content_scroll_top: usize,
     turn_status: TuiTurnStatus,
     cursor_index: usize,
@@ -2827,16 +2944,14 @@ fn render_fixed_tui_layout(
     };
     let (suggestion_start, suggestion_end) = tui_suggestion_viewport(
         all_suggestion_lines.len(),
-        selected_suggestion,
+        suggestion_scroll_top,
         metrics.suggestion_height,
     );
     let mut suggestion_lines = all_suggestion_lines[suggestion_start..suggestion_end].to_vec();
     if all_suggestion_lines.len() > suggestion_lines.len() && !suggestion_lines.is_empty() {
-        let page = (suggestion_start / metrics.suggestion_height).saturating_add(1);
-        let total_pages = all_suggestion_lines.len().div_ceil(metrics.suggestion_height);
         let visible_end = suggestion_end.min(all_suggestion_lines.len());
         let hint = colorize_ansi(
-            &format!("  [{visible_end}/{} · PgUp/PgDn {page}/{total_pages}]", all_suggestion_lines.len()),
+            &format!("  [{visible_end}/{}]", all_suggestion_lines.len()),
             "2;37",
         );
         if let Some(last_line) = suggestion_lines.last_mut() {
@@ -3098,7 +3213,8 @@ mod tui_output_tests {
         render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
         selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_startup_face, tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
+        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up, tui_startup_face,
+        tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
         tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -3203,6 +3319,7 @@ mod tui_output_tests {
             &suggestions,
             Some(0),
             0,
+            0,
             TuiTurnStatus::Idle,
             2,
             &TuiSelectionState::default(),
@@ -3218,11 +3335,10 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_suggestion_viewport_keeps_selected_item_visible() {
-        assert_eq!(tui_suggestion_viewport(12, Some(0), 4), (0, 4));
-        assert_eq!(tui_suggestion_viewport(12, Some(3), 4), (0, 4));
-        assert_eq!(tui_suggestion_viewport(12, Some(4), 4), (1, 5));
-        assert_eq!(tui_suggestion_viewport(12, Some(11), 4), (8, 12));
+    fn tui_suggestion_viewport_uses_scroll_top_window() {
+        assert_eq!(tui_suggestion_viewport(12, 0, 4), (0, 4));
+        assert_eq!(tui_suggestion_viewport(12, 3, 4), (3, 7));
+        assert_eq!(tui_suggestion_viewport(12, 8, 4), (8, 12));
     }
 
     #[test]
@@ -3249,6 +3365,7 @@ mod tui_output_tests {
             "/c",
             &suggestions,
             Some(11),
+            8,
             0,
             TuiTurnStatus::Idle,
             2,
@@ -3258,6 +3375,40 @@ mod tui_output_tests {
         assert!(rendered.contains("cmd12"));
         assert!(rendered.contains("[12/12"));
         assert!(!rendered.contains("cmd1 detail 1"));
+    }
+
+    #[test]
+    fn tui_down_arrow_scrolls_before_selected_hits_last_visible_row() {
+        let mut selected = Some(2);
+        let mut scroll_top = 0;
+
+        (selected, scroll_top) =
+            tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
+
+        assert_eq!(selected, Some(3));
+        assert_eq!(scroll_top, 1);
+
+        (selected, scroll_top) =
+            tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
+
+        assert_eq!(selected, Some(4));
+        assert_eq!(scroll_top, 2);
+    }
+
+    #[test]
+    fn tui_up_arrow_scrolls_window_back_when_selection_reaches_top() {
+        let mut selected = Some(3);
+        let mut scroll_top = 2;
+
+        (selected, scroll_top) = tui_move_suggestion_selection_up(selected, scroll_top, 10, 4);
+
+        assert_eq!(selected, Some(2));
+        assert_eq!(scroll_top, 1);
+
+        (selected, scroll_top) = tui_move_suggestion_selection_up(selected, scroll_top, 10, 4);
+
+        assert_eq!(selected, Some(1));
+        assert_eq!(scroll_top, 0);
     }
 
     #[test]
@@ -3276,6 +3427,7 @@ mod tui_output_tests {
             "",
             &[],
             None,
+            0,
             5,
             TuiTurnStatus::Idle,
             0,
@@ -3302,6 +3454,7 @@ mod tui_output_tests {
             "",
             &[],
             None,
+            0,
             0,
             TuiTurnStatus::Worked(Duration::from_secs(157)),
             0,
@@ -3490,6 +3643,7 @@ mod tui_output_tests {
             "",
             &[],
             None,
+            0,
             0,
             TuiTurnStatus::Idle,
             0,
@@ -3794,6 +3948,7 @@ mod tui_output_tests {
             "",
             &[],
             None,
+            0,
             0,
             TuiTurnStatus::Idle,
             0,
@@ -4881,6 +5036,7 @@ impl RuntimeBootstrap {
         let mut input = String::new();
         let mut cursor_index = 0usize;
         let mut selected_suggestion = None;
+        let mut suggestion_scroll_top = 0usize;
         let mut content_scroll_top = usize::MAX;
         let mut follow_content_tail = true;
         let mut wheel_accel = TuiWheelAccelState {
@@ -4928,6 +5084,12 @@ impl RuntimeBootstrap {
                 tui_content_screen(&app_state, &current_document)
             };
             let layout_metrics = tui_layout_metrics(terminal_height, &input, &suggestions);
+            suggestion_scroll_top = ensure_selected_suggestion_visible(
+                suggestion_scroll_top,
+                selected_suggestion,
+                suggestions.len(),
+                layout_metrics.suggestion_height,
+            );
             let rendered_content = build_tui_rendered_content(&content_screen, terminal_width);
             let max_scroll_top = max_tui_content_scroll_offset(
                 rendered_content.lines.len(),
@@ -4951,6 +5113,7 @@ impl RuntimeBootstrap {
                 &input,
                 &suggestions,
                 selected_suggestion,
+                suggestion_scroll_top,
                 if follow_content_tail {
                     usize::MAX
                 } else {
@@ -5041,6 +5204,7 @@ impl RuntimeBootstrap {
                             {
                                 insert_input_char(&mut input, &mut cursor_index, '\n');
                                 selected_suggestion = Some(0);
+                                suggestion_scroll_top = 0;
                                 continue;
                             }
                             if input.trim().is_empty() {
@@ -5079,6 +5243,7 @@ impl RuntimeBootstrap {
                             input.clear();
                             cursor_index = 0;
                             selected_suggestion = None;
+                            suggestion_scroll_top = 0;
                             follow_content_tail = true;
                             content_scroll_top = usize::MAX;
                             active_turn_started_at = Some(Instant::now());
@@ -5090,6 +5255,7 @@ impl RuntimeBootstrap {
                                 "",
                                 &[],
                                 None,
+                                0,
                                 0,
                                 TuiTurnStatus::Working(Duration::ZERO),
                                 0,
@@ -5139,6 +5305,7 @@ impl RuntimeBootstrap {
                                                 "",
                                                 &[],
                                                 None,
+                                                0,
                                                 0,
                                                 TuiTurnStatus::Working(
                                                     active_turn_started_at
@@ -5207,6 +5374,7 @@ impl RuntimeBootstrap {
                             }
                             if backspace_input_char(&mut input, &mut cursor_index) {
                                 selected_suggestion = Some(0);
+                                suggestion_scroll_top = 0;
                             }
                         }
                         KeyCode::Delete => {
@@ -5215,6 +5383,7 @@ impl RuntimeBootstrap {
                             }
                             if delete_input_char(&mut input, cursor_index) {
                                 selected_suggestion = Some(0);
+                                suggestion_scroll_top = 0;
                             }
                         }
                         KeyCode::Tab => {
@@ -5269,12 +5438,13 @@ impl RuntimeBootstrap {
                                     &rendered_content,
                                 );
                             } else if !suggestions.is_empty() {
-                                selected_suggestion = Some(match selected_suggestion {
-                                    Some(index) => {
-                                        (index + suggestions.len() - 1) % suggestions.len()
-                                    }
-                                    None => suggestions.len().saturating_sub(1),
-                                });
+                                (selected_suggestion, suggestion_scroll_top) =
+                                    tui_move_suggestion_selection_up(
+                                        selected_suggestion,
+                                        suggestion_scroll_top,
+                                        suggestions.len(),
+                                        layout_metrics.suggestion_height,
+                                    );
                             } else if let Some(next_cursor) =
                                 move_tui_cursor_vertically(&input, cursor_index, terminal_width, -1)
                             {
@@ -5308,10 +5478,13 @@ impl RuntimeBootstrap {
                                     &rendered_content,
                                 );
                             } else if !suggestions.is_empty() {
-                                selected_suggestion = Some(match selected_suggestion {
-                                    Some(index) => (index + 1) % suggestions.len(),
-                                    None => 0,
-                                });
+                                (selected_suggestion, suggestion_scroll_top) =
+                                    tui_move_suggestion_selection_down(
+                                        selected_suggestion,
+                                        suggestion_scroll_top,
+                                        suggestions.len(),
+                                        layout_metrics.suggestion_height,
+                                    );
                             } else if let Some(next_cursor) =
                                 move_tui_cursor_vertically(&input, cursor_index, terminal_width, 1)
                             {
@@ -5331,47 +5504,29 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            if !suggestions.is_empty() {
-                                let page = layout_metrics.suggestion_height.max(1);
-                                selected_suggestion = Some(match selected_suggestion {
-                                    Some(index) => index.saturating_sub(page),
-                                    None => 0,
-                                });
-                            } else {
-                                let page = (layout_metrics.content_height / 2).max(1);
-                                apply_tui_scroll(
-                                    &mut follow_content_tail,
-                                    &mut content_scroll_top,
-                                    max_scroll_top,
-                                    -(page as isize),
-                                    &mut selection,
-                                    &rendered_content,
-                                );
-                            }
+                            let page = (layout_metrics.content_height / 2).max(1);
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                -(page as isize),
+                                &mut selection,
+                                &rendered_content,
+                            );
                         }
                         KeyCode::PageDown => {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            if !suggestions.is_empty() {
-                                let page = layout_metrics.suggestion_height.max(1);
-                                selected_suggestion = Some(match selected_suggestion {
-                                    Some(index) => index
-                                        .saturating_add(page)
-                                        .min(suggestions.len().saturating_sub(1)),
-                                    None => 0,
-                                });
-                            } else {
-                                let page = (layout_metrics.content_height / 2).max(1);
-                                apply_tui_scroll(
-                                    &mut follow_content_tail,
-                                    &mut content_scroll_top,
-                                    max_scroll_top,
-                                    page as isize,
-                                    &mut selection,
-                                    &rendered_content,
-                                );
-                            }
+                            let page = (layout_metrics.content_height / 2).max(1);
+                            apply_tui_scroll(
+                                &mut follow_content_tail,
+                                &mut content_scroll_top,
+                                max_scroll_top,
+                                page as isize,
+                                &mut selection,
+                                &rendered_content,
+                            );
                         }
                         KeyCode::Char(ch) => {
                             if resume_picker.is_some() {
@@ -5380,6 +5535,7 @@ impl RuntimeBootstrap {
                             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                                 insert_input_char(&mut input, &mut cursor_index, ch);
                                 selected_suggestion = Some(0);
+                                suggestion_scroll_top = 0;
                             }
                         }
                         _ => {}
@@ -5392,6 +5548,7 @@ impl RuntimeBootstrap {
                     pending_exit_gesture = None;
                     insert_input_text(&mut input, &mut cursor_index, &data);
                     selected_suggestion = Some(0);
+                    suggestion_scroll_top = 0;
                 }
                 Event::Mouse(mouse) => {
                     pending_exit_gesture = None;
@@ -5519,6 +5676,7 @@ impl RuntimeBootstrap {
         input: &str,
         suggestions: &[TuiSuggestion],
         selected_suggestion: Option<usize>,
+        suggestion_scroll_top: usize,
         content_scroll_top: usize,
         turn_status: TuiTurnStatus,
         cursor_index: usize,
@@ -5544,6 +5702,7 @@ impl RuntimeBootstrap {
             input,
             suggestions,
             selected_suggestion,
+            suggestion_scroll_top,
             content_scroll_top,
             turn_status,
             cursor_index,
