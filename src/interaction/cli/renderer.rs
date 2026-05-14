@@ -3,7 +3,6 @@ use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use serde_json::Value;
-use std::path::PathBuf;
 
 const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
@@ -213,6 +212,25 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         blocks.push(RenderBlock::Panel(activity_panel));
     }
     for item in &view.items {
+        if let SurfaceItem::ToolResult {
+            tool_name,
+            content,
+            summary,
+            detail,
+        } = item
+        {
+            blocks.push(RenderBlock::Panel(render_tool_result_panel(
+                tool_name,
+                content,
+                summary.as_deref(),
+                detail.as_deref(),
+            )));
+        }
+    }
+    for item in &view.items {
+        if matches!(item, SurfaceItem::ToolResult { .. }) {
+            continue;
+        }
         if let Some(block) = render_block_for_surface_item(item) {
             blocks.push(block);
         }
@@ -233,7 +251,9 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
             message,
             detail.as_deref(),
         ))),
-        SurfaceItem::RuntimeNotice { .. } => None,
+        SurfaceItem::RuntimeNotice { kind, message, .. } => Some(RenderBlock::Panel(
+            render_notice_panel(kind, message),
+        )),
         SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::ToolResult { .. }
         | SurfaceItem::AssistantDelta { .. } => None,
@@ -326,6 +346,14 @@ fn render_approval_panel(tool_name: &str, message: &str, detail: Option<&str>) -
     render_panel(PanelKind::Approval, "Approval required", lines)
 }
 
+fn render_notice_panel(kind: &str, message: &str) -> RenderPanel {
+    render_panel(
+        PanelKind::Notice,
+        format!("Notice: {kind}"),
+        vec![message.to_string()],
+    )
+}
+
 fn approval_detail_value<'a>(line: &'a str, keys: &[&str]) -> Option<&'a str> {
     let (raw_key, value) = line.split_once(':')?;
     let normalized_key = raw_key
@@ -352,30 +380,6 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                         }
                     } else {
                         lines.push(format!("• {line}"));
-                    }
-                }
-            }
-            SurfaceItem::ToolResult {
-                tool_name,
-                content,
-                summary,
-                detail,
-            } => {
-                if let Some((headline, detail_lines)) = tool_result_activity_block(
-                    tool_name,
-                    content,
-                    summary.as_deref(),
-                    detail.as_deref(),
-                ) {
-                    let detail_lines = detail_lines
-                        .into_iter()
-                        .filter(|line| !is_low_signal_tool_detail(line))
-                        .collect::<Vec<_>>();
-                    if !headline.trim().is_empty() {
-                        lines.push(format!("• {headline}"));
-                    }
-                    for detail_line in detail_lines {
-                        lines.push(format!("  └ {detail_line}"));
                     }
                 }
             }
@@ -480,119 +484,11 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
     }
 }
 
-fn tool_result_activity_block(
-    tool_name: &str,
-    content: &str,
-    summary: Option<&str>,
-    detail: Option<&str>,
-) -> Option<(String, Vec<String>)> {
-    let summary = summary.map(str::trim).filter(|value| !value.is_empty())?;
-    if is_exploration_tool(tool_name) {
-        return None;
-    }
-
-    if matches!(tool_name, "Edit" | "FileEdit") {
-        return render_edit_activity_block(content, detail);
-    }
-
-    let headline = match tool_name {
-        "Bash" => summary
-            .strip_suffix(" succeeded")
-            .map(|value| {
-                format!(
-                    "{} {}",
-                    style_activity_action("RAN"),
-                    truncate_for_tui(value, 72)
-                )
-            })
-            .unwrap_or_else(|| truncate_for_tui(summary, 72)),
-        "Edit" | "Write" | "FileEdit" | "FileWrite" => truncate_for_tui(summary, 72),
-        _ => truncate_for_tui(summary, 72),
-    };
-
-    let detail_source = detail.unwrap_or(content);
-    let detail_lines = if tool_name == "Bash" {
-        summarize_bash_activity_detail(detail_source)
-    } else {
-        compact_tool_detail_lines(detail_source.lines().map(|line| line.to_string()).collect())
-    };
-
-    Some((headline, detail_lines))
-}
-
-fn summarize_bash_activity_detail(content: &str) -> Vec<String> {
-    let lines = render_bash_result_lines(content)
-        .into_iter()
-        .filter(|line| !line.starts_with("Command:"))
-        .collect::<Vec<_>>();
-    compact_tool_detail_lines(lines)
-}
-
-fn render_edit_activity_block(
-    content: &str,
-    detail: Option<&str>,
-) -> Option<(String, Vec<String>)> {
-    let detail_source = detail.unwrap_or(content);
-    let fields = parse_key_value_lines(detail_source);
-    let path = fields.get("path")?;
-    let old_text =
-        decode_tool_preview_text(fields.get("old_text").map(String::as_str).unwrap_or(""));
-    let new_text =
-        decode_tool_preview_text(fields.get("new_text").map(String::as_str).unwrap_or(""));
-
-    let old_count = count_nonempty_lines(&old_text);
-    let new_count = count_nonempty_lines(&new_text);
-    let display_path = display_activity_path(path);
-    let headline = format!(
-        "{} {} ({} {})",
-        style_activity_action("EDITED"),
-        display_path,
-        style_activity_added_count(new_count),
-        style_activity_removed_count(old_count),
-    );
-
-    let detail_lines = render_edit_diff_lines(path, &old_text, &new_text);
-    Some((headline, detail_lines))
-}
-
-fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<String> {
-    let file_text = std::fs::read_to_string(path).ok();
-    let new_lines = split_preserve_empty(new_text);
-    let old_lines = split_preserve_empty(old_text);
-    let start_line = file_text
-        .as_deref()
-        .and_then(|text| locate_line_number(text, new_text))
-        .unwrap_or(1);
-
-    let width = (start_line + old_lines.len().max(new_lines.len()) + 1)
-        .to_string()
-        .len()
-        .max(3);
-    let mut rendered = Vec::new();
-
-    for (idx, line) in old_lines.iter().enumerate() {
-        rendered.push(style_removed_diff_line(start_line + idx, width, line));
-    }
-    for (idx, line) in new_lines.iter().enumerate() {
-        rendered.push(style_added_diff_line(start_line + idx, width, line));
-    }
-
-    if rendered.is_empty() {
-        rendered.push(style_added_diff_line(
-            start_line,
-            width,
-            &truncate_for_tui(new_text, 96),
-        ));
-    }
-
-    rendered
-}
-
 fn parse_key_value_lines(text: &str) -> std::collections::BTreeMap<String, String> {
     let mut fields = std::collections::BTreeMap::new();
     for line in text.lines() {
         if let Some((key, value)) = line.split_once('=') {
-            fields.insert(key.trim().to_string(), value.trim().to_string());
+            fields.insert(key.trim().to_string(), value.trim_end().to_string());
         }
     }
     fields
@@ -600,89 +496,6 @@ fn parse_key_value_lines(text: &str) -> std::collections::BTreeMap<String, Strin
 
 fn decode_tool_preview_text(value: &str) -> String {
     value.replace("\\n", "\n")
-}
-
-fn split_preserve_empty(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    text.lines().map(|line| line.to_string()).collect()
-}
-
-fn locate_line_number(file_text: &str, snippet: &str) -> Option<usize> {
-    if snippet.trim().is_empty() {
-        return None;
-    }
-
-    let byte_index = file_text.find(snippet)?;
-    Some(
-        file_text[..byte_index]
-            .bytes()
-            .filter(|byte| *byte == b'\n')
-            .count()
-            + 1,
-    )
-}
-
-fn count_nonempty_lines(text: &str) -> usize {
-    let count = text.lines().count();
-    if count == 0 {
-        usize::from(!text.is_empty())
-    } else {
-        count
-    }
-}
-
-fn display_activity_path(path: &str) -> String {
-    current_dir_relative_path(path).unwrap_or_else(|| path.to_string())
-}
-
-fn current_dir_relative_path(path: &str) -> Option<String> {
-    let current_dir = std::env::current_dir().ok()?;
-    let absolute = PathBuf::from(path);
-    absolute
-        .strip_prefix(current_dir)
-        .ok()
-        .map(|relative| relative.display().to_string())
-}
-
-fn style_activity_added_count(count: usize) -> String {
-    format!("\x1b[32m+{count}\x1b[0m")
-}
-
-fn style_activity_removed_count(count: usize) -> String {
-    format!("\x1b[31m-{count}\x1b[0m")
-}
-
-fn style_added_diff_line(line_number: usize, width: usize, line: &str) -> String {
-    format!(
-        "\x1b[48;5;120m{:>width$} + {}\x1b[0m",
-        line_number,
-        truncate_for_tui(line, 96),
-        width = width
-    )
-}
-
-fn style_removed_diff_line(line_number: usize, width: usize, line: &str) -> String {
-    format!(
-        "\x1b[48;5;224m{:>width$} - {}\x1b[0m",
-        line_number,
-        truncate_for_tui(line, 96),
-        width = width
-    )
-}
-
-fn is_low_signal_tool_detail(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.is_empty()
-        || trimmed == "..."
-        || trimmed.starts_with("Path: ")
-        || trimmed.starts_with("Offset: ")
-        || trimmed.starts_with("Returned chars: ")
-        || trimmed.starts_with("Replacements: ")
-        || trimmed.starts_with("Replace all: ")
-        || trimmed.starts_with("Old text: ")
-        || trimmed.starts_with("New text: ")
 }
 
 fn render_bash_result_lines(content: &str) -> Vec<String> {
@@ -698,6 +511,124 @@ fn render_bash_result_lines(content: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn render_tool_result_panel(
+    tool_name: &str,
+    content: &str,
+    summary: Option<&str>,
+    detail: Option<&str>,
+) -> RenderPanel {
+    let detail_source = detail.unwrap_or(content);
+    let lines = match tool_name {
+        "Bash" => render_bash_tool_result_lines(tool_name, detail_source),
+        "Read" => render_read_tool_result_lines(tool_name, detail_source),
+        "Edit" | "FileEdit" => render_edit_tool_result_lines(tool_name, detail_source),
+        _ => render_generic_tool_result_lines(tool_name, content, summary, detail),
+    };
+
+    render_panel(PanelKind::ToolResult, "Tool result", lines)
+}
+
+fn render_bash_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
+    let mut lines = vec![format!("Tool: {tool_name}")];
+    lines.extend(compact_tool_detail_lines(render_bash_result_lines(detail)));
+    lines
+}
+
+fn render_read_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
+    let fields = parse_key_value_lines(detail);
+    let mut lines = vec![format!("Tool: {tool_name}")];
+
+    if let Some(path) = fields.get("path") {
+        lines.push(format!("Path: {path}"));
+    }
+    if let Some(offset) = fields.get("offset") {
+        lines.push(format!("Offset: {offset}"));
+    }
+    if let Some(returned_chars) = fields.get("returned_chars") {
+        lines.push(format!("Returned chars: {returned_chars}"));
+    }
+
+    let mut body_lines = Vec::new();
+    let mut truncation = None;
+    for line in detail.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("path=")
+            || trimmed.starts_with("offset=")
+            || trimmed.starts_with("returned_chars=")
+        {
+            continue;
+        }
+        if let Some(value) = trimmed
+            .strip_prefix("[Read truncated:")
+            .map(|value| value.trim_end_matches(']').trim())
+        {
+            truncation = Some(format!("Truncation: {value}"));
+            continue;
+        }
+        body_lines.push(line.to_string());
+    }
+
+    if let Some(truncation) = truncation {
+        lines.push(truncation);
+    }
+    lines.extend(compact_tool_detail_lines(body_lines));
+    lines
+}
+
+fn render_edit_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
+    let fields = parse_key_value_lines(detail);
+    let mut lines = vec![format!("Tool: {tool_name}")];
+
+    if let Some(path) = fields.get("path") {
+        lines.push(format!("Path: {path}"));
+    }
+    if let Some(replacements) = fields.get("replacements") {
+        lines.push(format!("Replacements: {replacements}"));
+    }
+    if let Some(replace_all) = fields.get("replace_all") {
+        lines.push(format!("Replace all: {replace_all}"));
+    }
+    if let Some(old_text) = fields.get("old_text") {
+        lines.push(format!(
+            "Old text: {}",
+            truncate_for_tui(&decode_tool_preview_text(old_text), MAX_TOOL_DETAIL_WIDTH)
+        ));
+    }
+    if let Some(new_text) = fields.get("new_text") {
+        lines.push(format!(
+            "New text: {}",
+            truncate_for_tui(&decode_tool_preview_text(new_text), MAX_TOOL_DETAIL_WIDTH)
+        ));
+    }
+
+    lines
+}
+
+fn render_generic_tool_result_lines(
+    tool_name: &str,
+    content: &str,
+    summary: Option<&str>,
+    detail: Option<&str>,
+) -> Vec<String> {
+    let mut lines = vec![format!("Tool: {tool_name}")];
+    if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(format!("Summary: {}", truncate_for_tui(summary, MAX_TOOL_DETAIL_WIDTH)));
+    }
+
+    let preview_source = detail.unwrap_or(content);
+    let preview_lines = compact_tool_detail_lines(
+        preview_source
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>(),
+    );
+    lines.extend(preview_lines);
+    lines
 }
 
 fn compact_tool_detail_lines(lines: Vec<String>) -> Vec<String> {
@@ -997,7 +928,12 @@ mod tests {
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("[Activity]"));
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
+        assert!(rendered.contains("[Tool result]"));
+        assert!(rendered.contains("Tool: Bash"));
+        assert!(rendered.contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
         assert!(rendered.contains("Exit code: 0"));
+        assert!(rendered.contains("line-1"));
+        assert!(rendered.contains("..."));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
     }
 
@@ -1058,15 +994,9 @@ mod tests {
     }
 
     #[test]
-    fn tui_renders_edit_activity_as_colored_diff_preview() {
+    fn tui_renders_edit_result_in_dedicated_tool_result_panel() {
         let path = std::env::temp_dir().join("renderer_edit_activity_preview.rs");
-        std::fs::write(
-            &path,
-            "fn before() {\n    println!(\"old\");\n}\nfn after() {}\n",
-        )
-        .expect("write temp preview file");
         let path_text = path.display().to_string();
-
         let turn = CliTurnOutput {
             primary_text: String::new(),
             events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
@@ -1083,24 +1013,18 @@ mod tests {
 
         let rendered = render_turn_tui_output(&turn);
         let plain = strip_ansi(&rendered);
-        assert!(plain.contains("[Activity]"));
-        assert!(plain.contains("EDITED"));
-        assert!(plain.contains("(+1 -1)"));
-        assert!(plain.contains("renderer_edit_activity_preview.rs"));
-        assert!(
-            plain.contains("+     println!(\"old\");") || plain.contains("+ println!(\"old\");")
-        );
-        assert!(
-            plain.contains("-     println!(\"todo\");") || plain.contains("- println!(\"todo\");")
-        );
-        assert!(rendered.contains("\x1b[48;5;120m"));
-        assert!(rendered.contains("\x1b[48;5;224m"));
-
-        let _ = std::fs::remove_file(path);
+        assert!(!plain.contains("[Activity]"));
+        assert!(plain.contains("[Tool result]"));
+        assert!(plain.contains("Tool: Edit"));
+        assert!(plain.contains(&format!("Path: {path_text}")));
+        assert!(plain.contains("Replacements: 1"));
+        assert!(plain.contains("Replace all: false"));
+        assert!(plain.contains("Old text:     println!(\"todo\");"));
+        assert!(plain.contains("New text:     println!(\"old\");"));
     }
 
     #[test]
-    fn tui_filters_runtime_notices() {
+    fn tui_surfaces_runtime_notices_in_panels() {
         let turn = CliTurnOutput {
             primary_text: "answer".into(),
             events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Notice {
@@ -1118,8 +1042,8 @@ mod tests {
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("answer"));
-        assert!(!rendered.contains("recorded usage"));
-        assert!(!rendered.contains("Notice:"));
+        assert!(rendered.contains("[Notice: usage]"));
+        assert!(rendered.contains("recorded usage"));
     }
 
     #[test]

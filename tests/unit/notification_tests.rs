@@ -889,8 +889,9 @@ fn cli_renderer_keeps_primary_text_before_mixed_panels_in_order() {
         .expect("tool panel present");
 
     assert!(primary_idx < notice_idx);
+    assert!(primary_idx < tool_idx);
+    assert!(tool_idx < notice_idx);
     assert!(notice_idx < task_idx);
-    assert!(task_idx < tool_idx);
     assert!(rendered.contains("[panel:notice]"));
     assert!(rendered.contains("[panel:task]"));
     assert!(rendered.contains("[panel:tool]"));
@@ -1004,8 +1005,10 @@ fn cli_renderer_tui_output_keeps_main_panels_and_footer_in_order() {
     assert!(rendered.contains("╔════════════════ CLI TUI ════════════════"));
     assert!(rendered.contains("Available commands:"));
     assert!(rendered.contains("approval needed for follow-up"));
-    assert!(!rendered.contains("line one"));
-    assert!(!rendered.contains("line two"));
+    assert!(rendered.contains("[Tool result]"));
+    assert!(rendered.contains("Tool: Read"));
+    assert!(rendered.contains("line one"));
+    assert!(rendered.contains("line two"));
     assert!(!rendered.contains("[Prompt]"));
     assert!(!rendered.contains("[Footer]"));
 }
@@ -1038,7 +1041,14 @@ fn cli_renderer_builds_tui_screen_with_fixed_layout_sections() {
     let screen = build_tui_screen(&render_turn_document(&turn));
 
     assert_eq!(screen.main.first().map(String::as_str), Some("Status"));
-    assert!(screen.panels.is_empty());
+    assert_eq!(
+        screen
+            .panels
+            .iter()
+            .map(|panel| panel.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Tool result", "Notice: validation"]
+    );
     assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
     assert!(screen.footer.is_empty());
 }
@@ -1069,10 +1079,17 @@ fn cli_renderer_tui_screen_filters_assistant_delta_runtime_noise() {
     let screen = build_tui_screen(&render_turn_document(&turn));
     let rendered = render_document_tui_output(&render_turn_document(&turn));
 
-    assert!(screen.panels.is_empty());
+    assert_eq!(
+        screen
+            .panels
+            .iter()
+            .map(|panel| panel.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Notice: validation"]
+    );
     assert!(!rendered.contains("[delta]"), "{rendered}");
     assert!(!rendered.contains("版"), "{rendered}");
-    assert!(!rendered.contains("verify before shipping"), "{rendered}");
+    assert!(rendered.contains("verify before shipping"), "{rendered}");
 }
 
 #[test]
@@ -1450,12 +1467,13 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
 
     assert_eq!(
         screen.panels.len(),
-        2,
-        "screen should keep approval and task update distinct, while suppressing low-signal read results: panels={:?}",
+        3,
+        "screen should keep approval, tool result, and task update distinct: panels={:?}",
         screen.panels
     );
     assert_eq!(screen.panels[0].title, "Approval required");
-    assert_eq!(screen.panels[1].title, "Task update");
+    assert_eq!(screen.panels[1].title, "Tool result");
+    assert_eq!(screen.panels[2].title, "Task update");
     assert!(
         screen.footer.is_empty(),
         "footer should stay empty in the streamlined TUI; footer={:?}",
@@ -1465,6 +1483,7 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
 
     assert!(rendered.contains("[Approval required]"), "{rendered}");
     assert!(!rendered.contains("[Activity]"), "{rendered}");
+    assert!(rendered.contains("[Tool result]"), "{rendered}");
     assert!(rendered.contains("[Task update]"), "{rendered}");
     assert!(!rendered.contains("[Prompt]"), "{rendered}");
     assert!(!rendered.contains("[Footer]"), "{rendered}");
@@ -1730,12 +1749,22 @@ fn cli_tui_panel_order_prioritizes_approval_over_tool_results_and_tasks() {
 
     assert_eq!(
         titles_a,
-        vec!["Approval required".to_string(), "Task update".to_string(),],
-        "panel priority should keep approval above task panels regardless of event order; titles_a={titles_a:?}"
+        vec![
+            "Approval required".to_string(),
+            "Tool result".to_string(),
+            "Task update".to_string(),
+            "Notice: validation".to_string(),
+        ],
+        "panel priority should keep approval above tool-result and task panels regardless of event order; titles_a={titles_a:?}"
     );
     assert_eq!(
         titles_b,
-        vec!["Approval required".to_string(), "Task update".to_string(),],
+        vec![
+            "Approval required".to_string(),
+            "Tool result".to_string(),
+            "Task update".to_string(),
+            "Notice: validation".to_string(),
+        ],
         "panel priority should stay stable even when the input event order changes; titles_b={titles_b:?}"
     );
     assert!(screen_a.footer.is_empty() && screen_b.footer.is_empty());
