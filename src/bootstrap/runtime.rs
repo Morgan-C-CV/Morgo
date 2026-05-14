@@ -271,6 +271,13 @@ pub fn tui_clear_screen_prefix() -> &'static str {
     "\x1B[2J\x1B[H"
 }
 
+fn tui_is_clear_command(input: &str) -> bool {
+    matches!(
+        input.trim(),
+        "/clear" | "clear" | "/new" | "new" | "/reset" | "reset" | "/c" | "c"
+    )
+}
+
 struct TuiRawModeGuard;
 
 impl TuiRawModeGuard {
@@ -3628,7 +3635,13 @@ mod tui_output_tests {
 
         assert!(rendered.contains(">_ Morgo"));
         assert!(rendered.contains(tui_startup_greeting(&app_state.active_session_id)));
-        assert!(rendered.contains(tui_startup_face_frame(&app_state.active_session_id)));
+        let face_family = super::tui_startup_face(&app_state.active_session_id);
+        let animated_faces = super::TUI_STARTUP_FACE_FRAMES
+            [super::TUI_STARTUP_FACES
+                .iter()
+                .position(|face| *face == face_family)
+                .unwrap_or(0)];
+        assert!(animated_faces.iter().any(|face| rendered.contains(face)));
         assert!(rendered.contains("model:     default-model   /model to change"));
         assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
         assert!(rendered.contains("Morgo is ready for coding tasks."));
@@ -3660,6 +3673,15 @@ mod tui_output_tests {
                 .iter()
                 .all(|face| face.starts_with('(') && face.ends_with(')'))
         );
+    }
+
+    #[test]
+    fn tui_clear_command_detection_matches_clear_aliases() {
+        assert!(super::tui_is_clear_command("/clear"));
+        assert!(super::tui_is_clear_command("/new"));
+        assert!(super::tui_is_clear_command("/reset"));
+        assert!(super::tui_is_clear_command("/c"));
+        assert!(!super::tui_is_clear_command("/help"));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -4769,6 +4791,7 @@ impl RuntimeBootstrap {
                             }
 
                             let line = input.trim().to_string();
+                            let is_clear_command = tui_is_clear_command(&line);
                             input.clear();
                             cursor_index = 0;
                             selected_suggestion = None;
@@ -4837,7 +4860,14 @@ impl RuntimeBootstrap {
                                     },
                                 )
                                 .await?;
-                            current_document = render_turn_document(&output);
+                            current_document = if is_clear_command {
+                                render_turn_document(&CliTurnOutput {
+                                    primary_text: String::new(),
+                                    events: vec![],
+                                })
+                            } else {
+                                render_turn_document(&output)
+                            };
                             if follow_content_tail {
                                 content_scroll_top = usize::MAX;
                             } else {
