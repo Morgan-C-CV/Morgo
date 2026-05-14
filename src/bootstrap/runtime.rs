@@ -411,6 +411,7 @@ struct TuiLayoutMetrics {
     content_height: usize,
     status_row: usize,
     model_row: usize,
+    gap_row: usize,
     input_row: usize,
 }
 
@@ -1863,11 +1864,18 @@ fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::re
         primary_text: String::new(),
         events: vec![],
     }));
+    prepend_tui_startup_card(app_state, &mut screen);
+    screen
+}
+
+fn prepend_tui_startup_card(
+    app_state: &AppState,
+    screen: &mut crate::interaction::cli::renderer::TuiScreen,
+) {
     let mut main = build_tui_startup_card(app_state);
     main.push(String::new());
-    main.extend(screen.main);
+    main.extend(std::mem::take(&mut screen.main));
     screen.main = main;
-    screen
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -2109,6 +2117,7 @@ fn tui_content_screen(
     let context_document = tui_context_document(app_state, document);
     let mut screen = build_tui_screen(&context_document);
     screen.prompt.clear();
+    prepend_tui_startup_card(app_state, &mut screen);
     screen
 }
 
@@ -2123,6 +2132,7 @@ fn tui_layout_metrics(
     suggestions: &[TuiSuggestion],
 ) -> TuiLayoutMetrics {
     const INPUT_BOX_HEIGHT: usize = 4;
+    const BOTTOM_PANEL_FIXED_ROWS: usize = 6;
     let suggestion_count = if input.starts_with('/') {
         suggestions.len().max(1)
     } else if !suggestions.is_empty() {
@@ -2130,14 +2140,15 @@ fn tui_layout_metrics(
     } else {
         0
     };
-    let bottom_reserved_height = 2usize + INPUT_BOX_HEIGHT + suggestion_count;
+    let bottom_reserved_height = BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_count;
     let height = terminal_rows.max(3);
     let content_height = height.saturating_sub(bottom_reserved_height);
     TuiLayoutMetrics {
         content_height,
         status_row: content_height.saturating_add(1).min(height),
         model_row: content_height.saturating_add(2).min(height),
-        input_row: content_height.saturating_add(3).min(height),
+        gap_row: content_height.saturating_add(3).min(height),
+        input_row: content_height.saturating_add(4).min(height),
     }
 }
 
@@ -2733,6 +2744,7 @@ fn render_fixed_tui_layout(
         "\x1b[{};1H\x1b[2K{}",
         metrics.model_row, model_cwd_line
     ));
+    frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
     for row_offset in 0..4 {
         let row = metrics.input_row.saturating_add(row_offset).min(height);
         let line = viewport
@@ -3580,7 +3592,7 @@ mod tui_output_tests {
 
         assert!(rendered.contains(">_ Morgo"));
         assert!(rendered.contains(tui_startup_greeting(&app_state.active_session_id)));
-        assert!(rendered.contains(tui_startup_face(&app_state.active_session_id)));
+        assert!(rendered.contains(tui_startup_face_frame(&app_state.active_session_id)));
         assert!(rendered.contains("model:     default-model   /model to change"));
         assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
         assert!(rendered.contains("Morgo is ready for coding tasks."));
