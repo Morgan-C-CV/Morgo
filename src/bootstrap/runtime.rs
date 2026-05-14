@@ -1711,6 +1711,64 @@ fn shorten_home_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+fn tui_startup_model_label(app_state: &AppState) -> String {
+    if let Some(runtime) = app_state.active_model_runtime.as_ref() {
+        let snapshot = runtime.snapshot_blocking();
+        match snapshot.active_level {
+            Some(level) => format!("{} {}", snapshot.config.model_id, level.as_str()),
+            None => snapshot.config.model_id,
+        }
+    } else {
+        app_state.active_model_provider_summary.model.clone()
+    }
+}
+
+fn tui_box_line(content: &str, width: usize) -> String {
+    let visible_width = UnicodeWidthStr::width(content);
+    let padding = " ".repeat(width.saturating_sub(visible_width));
+    format!("│ {content}{padding} │")
+}
+
+fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
+    let model_value = tui_startup_model_label(app_state);
+    let directory_value = shorten_home_path(&app_state.current_working_directory());
+    let model_line = format!("model:     {model_value}   /model to change");
+    let directory_line = format!("directory: {directory_value}");
+    let content_width = [
+        UnicodeWidthStr::width(">_ Morgo"),
+        0,
+        UnicodeWidthStr::width(model_line.as_str()),
+        UnicodeWidthStr::width(directory_line.as_str()),
+        43usize,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(43);
+    let top = format!("╭{}╮", "─".repeat(content_width + 2));
+    let bottom = format!("╰{}╯", "─".repeat(content_width + 2));
+
+    vec![
+        top,
+        tui_box_line(">_ Morgo", content_width),
+        tui_box_line("", content_width),
+        tui_box_line(&model_line, content_width),
+        tui_box_line(&directory_line, content_width),
+        bottom,
+    ]
+}
+
+fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::renderer::TuiScreen {
+    let mut screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![],
+    }));
+    let mut main = build_tui_startup_card(app_state);
+    main.push(String::new());
+    main.extend(screen.main);
+    screen.main = main;
+    screen
+}
+
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
     let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
     let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
@@ -3360,6 +3418,20 @@ mod tui_output_tests {
         assert!(!tui_terminal_program_is_ide("Apple_Terminal"));
     }
 
+    #[test]
+    fn tui_initial_screen_includes_startup_card_and_ready_text() {
+        let screen = super::build_initial_tui_screen(&test_app_state());
+        let rendered = strip_ansi_for_test(&super::render_tui_screen_output(&screen));
+
+        assert!(rendered.contains(">_ Morgo"));
+        assert!(rendered.contains("model:     default-model   /model to change"));
+        assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
+        assert!(rendered.contains("Morgo is ready for coding tasks."));
+        assert!(
+            rendered.contains("Ask me to inspect code, edit files, or run verification commands.")
+        );
+    }
+
     fn strip_ansi_for_test(text: &str) -> String {
         strip_ansi_text(text)
     }
@@ -4263,11 +4335,8 @@ impl RuntimeBootstrap {
         }
     }
 
-    fn print_tui_message(&self, message: &str) {
-        let mut screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
-            primary_text: String::new(),
-            events: vec![],
-        }));
+    fn print_tui_message(&self, app_state: &AppState, message: &str) {
+        let mut screen = build_initial_tui_screen(app_state);
         screen.footer = vec![message.to_string()];
         self.write_tui_frame(format!(
             "{}{}",
@@ -4335,7 +4404,11 @@ impl RuntimeBootstrap {
                 None
             };
             let (terminal_width, terminal_height) = tui_terminal_dimensions();
-            let content_screen = tui_content_screen(app_state, &current_document);
+            let content_screen = if current_document.blocks.is_empty() {
+                build_initial_tui_screen(app_state)
+            } else {
+                tui_content_screen(app_state, &current_document)
+            };
             let layout_metrics = tui_layout_metrics(terminal_height, &input, &suggestions);
             let rendered_content = build_tui_rendered_content(&content_screen, terminal_width);
             let max_scroll_top = max_tui_content_scroll_offset(
@@ -4413,7 +4486,7 @@ impl RuntimeBootstrap {
                             })
                             .unwrap_or(false);
                         if should_exit {
-                            self.print_tui_message("Exiting TUI session.");
+                            self.print_tui_message(app_state, "Exiting TUI session.");
                             execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
                             break;
                         }
@@ -4485,7 +4558,7 @@ impl RuntimeBootstrap {
                             );
 
                             if self.should_exit_tui_input(&line) {
-                                self.print_tui_message("Exiting TUI session.");
+                                self.print_tui_message(app_state, "Exiting TUI session.");
                                 execute_runtime_shutdown(app_state.clone(), "interactive_exit")
                                     .await;
                                 break;
