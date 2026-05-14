@@ -1704,6 +1704,7 @@ fn completion_gate_forbidden_evidence() -> &'static str {
     "Bash|Glob|cat|sed|ls|self_claims|report_prose"
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn collect_completion_evidence_gaps(frame: &StateFrame) -> Vec<CompletionEvidenceGap> {
     let evidence_refs = collect_evidence_refs(frame, None);
     collect_completion_evidence_gaps_with_refs(frame, &evidence_refs)
@@ -2150,6 +2151,7 @@ fn build_worker_structured_report_with_refs(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_worker_structured_report(
     frame: &StateFrame,
     usage: &LoopUsage,

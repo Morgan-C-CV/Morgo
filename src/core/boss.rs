@@ -6188,6 +6188,7 @@ impl BossCoordinator {
         self.shared_step_memory.read().await.get(&step_id).cloned()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn content_evidence_targets_for_step(&self, step_id: usize) -> Vec<String> {
         self.content_evidence_targets
             .read()
@@ -10165,6 +10166,7 @@ refresh_reason: {}\n\n{}",
             .payload)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn invoke_agent_tool(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -10263,6 +10265,7 @@ refresh_reason: {}\n\n{}",
     /// Send a message to A's running LLM session via AgentTool Continue.
     /// Requires `ensure_a_session` to have been called first so `designer_a.session_id` is real.
     /// Fire-and-forget: enqueues the message into A's mailbox; does not wait for A's reply.
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn send_to_a_session(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -10554,6 +10557,7 @@ refresh_reason: {}\n\n{}",
     /// If A is unavailable or the ask fails, returns Err — caller must fallback.
     /// Note: this call goes through ask_a_session and may leave a trace in A's runtime history.
     /// It does NOT write to BossPlan or session_snapshot.
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn summarize_context_with_a(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
@@ -10705,6 +10709,7 @@ refresh_reason: {}\n\n{}",
     }
 
     /// Fire-and-forget: send a message to B's running LLM session without waiting for a reply.
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn send_to_b_session(
         &self,
         app_state: &Arc<crate::state::app_state::AppState>,
