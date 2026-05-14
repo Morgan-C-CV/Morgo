@@ -1046,7 +1046,7 @@ async fn registry_returns_pending_approval_for_ask_only_bash() {
                 code: Some("privileged_system".into()),
                 summary: "Bash pending approval".into(),
                 detail: Some(
-                    "command: sudo whoami\nreason: command touches privileged system state\nnext_step: approve or deny this Bash command"
+                    "Run: sudo whoami\nReason: Command touches privileged system state\nAction: choose an approval option below"
                         .into(),
                 ),
                 approval_kind: Some("tool_permission".into()),
@@ -1102,7 +1102,7 @@ async fn bash_tool_pending_approval_and_denied_copy_stay_distinguishable() {
             .detail
             .as_deref()
             .unwrap_or_default()
-            .contains("command"),
+            .contains("Run:"),
         "approval detail should preserve command-context reasoning; detail={:?}",
         approval.detail
     );

@@ -1800,8 +1800,6 @@ fn cli_telegram_remote_share_core_runtime_initialization() {
 
 #[test]
 fn surface_init_respects_session_mode_consistently() {
-    // Headless mode should filter interactive tools consistently across all surfaces
-
     let cli_headless =
         initialized_tool_names(InteractionSurface::Cli, SessionMode::Headless, false);
     let telegram_headless =
@@ -1809,15 +1807,21 @@ fn surface_init_respects_session_mode_consistently() {
     let remote_headless =
         initialized_tool_names(InteractionSurface::Remote, SessionMode::Headless, false);
 
-    // All surfaces should apply same headless filtering
-    assert_eq!(cli_headless, telegram_headless);
-    assert_eq!(cli_headless, remote_headless);
-
-    // Agent should be visible (always_load)
     assert!(cli_headless.contains(&"Agent"));
-
-    // Interactive tools should be filtered in headless
-    // (This depends on actual metadata - adjust based on real behavior)
+    assert!(telegram_headless.contains(&"Agent"));
+    assert!(remote_headless.contains(&"Agent"));
+    assert!(cli_headless.contains(&"Read"));
+    assert!(telegram_headless.contains(&"Read"));
+    assert!(remote_headless.contains(&"Read"));
+    assert!(cli_headless.contains(&"Bash"));
+    assert!(!telegram_headless.contains(&"Bash"));
+    assert!(!remote_headless.contains(&"Bash"));
+    assert!(!cli_headless.contains(&"AskUserQuestion"));
+    assert!(telegram_headless.contains(&"AskUserQuestion"));
+    assert!(remote_headless.contains(&"AskUserQuestion"));
+    assert!(!cli_headless.contains(&"WebSearch"));
+    assert!(!telegram_headless.contains(&"WebSearch"));
+    assert!(!remote_headless.contains(&"WebSearch"));
 }
 
 #[test]

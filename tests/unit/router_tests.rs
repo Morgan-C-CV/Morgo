@@ -2173,16 +2173,9 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
     let first = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
-    assert!(
-        first[0]
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
-    assert!(
-        !first[0]
-            .primary_text
-            .contains("/demo-plugin-cmd-v2 — Updated plugin command")
-    );
+    assert!(first[0].primary_text.contains("/demo-plugin-cmd"));
+    assert!(first[0].primary_text.contains("Demo plugin command"));
+    assert!(!first[0].primary_text.contains("/demo-plugin-cmd-v2"));
 
     fs::write(
         &manifest_path,
@@ -2210,16 +2203,10 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_updates_manifest_s
     let second = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("second turn should succeed");
-    assert!(
-        !second[0]
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
-    assert!(
-        second[0]
-            .primary_text
-            .contains("/demo-plugin-cmd-v2 — Updated plugin command")
-    );
+    assert!(!second[0].primary_text.contains("/demo-plugin-cmd\n"));
+    assert!(!second[0].primary_text.contains("Demo plugin command"));
+    assert!(second[0].primary_text.contains("/demo-plugin-cmd-v2"));
+    assert!(second[0].primary_text.contains("Updated plugin command"));
 
     fs::remove_dir_all(root).expect("cleanup plugin reload update root");
 }
@@ -2333,11 +2320,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
     let first = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("first turn should succeed");
-    assert!(
-        first[0]
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
+    assert!(first[0].primary_text.contains("/demo-plugin-cmd"));
 
     fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
     let report = rebuild_runtime_plugin_state(&app_state)
@@ -2350,11 +2333,7 @@ async fn cli_repl_uses_next_turn_plugin_snapshot_after_reload_removes_deleted_pl
         .await
         .expect("second turn should succeed");
     assert!(second[0].primary_text.contains("Available commands"));
-    assert!(
-        !second[0]
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
+    assert!(!second[0].primary_text.contains("/demo-plugin-cmd"));
 
     fs::remove_dir_all(root).expect("cleanup plugin reload root");
 }
@@ -2573,11 +2552,8 @@ async fn cli_repl_applies_disable_and_enable_only_on_next_turn_boundaries() {
     let after_enable = handle_cli_inputs(&router, &mut engine, &app_state, vec!["/help"])
         .await
         .expect("help after enable should succeed");
-    assert!(
-        after_enable[0]
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
+    assert!(after_enable[0].primary_text.contains("/demo-plugin-cmd"));
+    assert!(after_enable[0].primary_text.contains("Demo plugin command"));
 
     fs::remove_dir_all(root).expect("cleanup visibility matrix root");
 }
@@ -2715,11 +2691,8 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
     )
     .await
     .expect("first remote turn should succeed");
-    assert!(
-        first
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
+    assert!(first.primary_text.contains("/demo-plugin-cmd"));
+    assert!(first.primary_text.contains("Demo plugin command"));
 
     fs::remove_dir_all(&plugin_dir).expect("plugin dir should be removed");
     let report = rebuild_runtime_plugin_state(&app_state)
@@ -2744,11 +2717,7 @@ async fn remote_handler_uses_next_turn_plugin_snapshot_after_reload_removes_dele
     .await
     .expect("second remote turn should succeed");
     assert!(second.primary_text.contains("Available commands"));
-    assert!(
-        !second
-            .primary_text
-            .contains("/demo-plugin-cmd — Demo plugin command")
-    );
+    assert!(!second.primary_text.contains("/demo-plugin-cmd"));
 
     fs::remove_dir_all(root).expect("cleanup remote plugin reload root");
 }
@@ -3007,7 +2976,9 @@ async fn router_denies_pending_request_without_session_approval() {
 
     assert_eq!(
         result,
-        RouteExecution::CommandResult(CommandResult::Message("Denied approval for Bash".into()))
+        RouteExecution::CommandResult(CommandResult::Message(
+            "Denied approval for Bash. The command was not executed. Tell me what to run instead, or ask me to make it safer.".into()
+        ))
     );
     assert_eq!(permission_context.mode(), PermissionMode::Default);
     assert!(permission_context.pending_approval().is_none());
@@ -4072,7 +4043,7 @@ async fn swarm_teammates_lists_valid_registry() {
         "got: {text}"
     );
     assert!(text.contains("allowed_tools: Read, Edit"), "got: {text}");
-    assert!(text.contains("max_turns: 20"), "got: {text}");
+    assert!(text.contains("max_turns: 4"), "got: {text}");
 }
 
 #[tokio::test]

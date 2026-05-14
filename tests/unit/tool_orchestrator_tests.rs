@@ -337,14 +337,23 @@ async fn orchestrator_executes_single_request_through_registry() {
     assert_eq!(outcomes[0].tool_name, "Read");
     assert_eq!(
         outcomes[0].result,
-        rust_agent::tool::definition::ToolResult::Text("hello orchestrator".into())
+        rust_agent::tool::definition::ToolResult::Text(format!(
+            "path={}\noffset=0\nreturned_chars=18\n\nhello orchestrator",
+            dir.display()
+        ))
     );
     assert_eq!(
         outcomes[0].record.kind,
         rust_agent::tool::result::ToolExecutionOutcomeKind::Success
     );
     assert_eq!(outcomes[0].record.summary, "Read succeeded");
-    assert_eq!(outcomes[0].record.detail, Some("hello orchestrator".into()));
+    assert_eq!(
+        outcomes[0].record.detail,
+        Some(format!(
+            "path={}\noffset=0\nreturned_chars=18\n\nhello orchestrator",
+            dir.display()
+        ))
+    );
     assert_eq!(outcomes[0].record.report_modifier, ToolReportModifier::None);
     assert_eq!(
         outcomes[0].record.observable_input,

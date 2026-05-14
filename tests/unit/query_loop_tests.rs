@@ -1867,10 +1867,11 @@ fn test_subagent_context_inherits_activity_tracking() {
         updated_ts
     );
 
-    // Verify cancellation token is also shared
+    // Child cancellation should not cancel the parent token.
     assert!(!context.app_state.cancellation_token.is_cancelled());
     sub_context.app_state.cancellation_token.cancel();
-    assert!(context.app_state.cancellation_token.is_cancelled());
+    assert!(sub_context.app_state.cancellation_token.is_cancelled());
+    assert!(!context.app_state.cancellation_token.is_cancelled());
 }
 
 #[test]
@@ -2296,7 +2297,7 @@ async fn query_loop_requests_compaction_for_large_input() {
 
     let result = engine.submit_turn(Message::user(oversized)).await;
 
-    assert_eq!(result.state, QueryLoopState::Completed);
+    assert_eq!(result.state, QueryLoopState::Compacting);
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ReactiveCompactRetry));
     assert!(

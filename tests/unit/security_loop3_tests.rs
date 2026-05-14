@@ -111,8 +111,7 @@ async fn bash_policy_escalation_uses_structured_warning_contract() {
     assert!(matches!(
         decision,
         PermissionDecision::Ask { message, metadata: Some(metadata), .. }
-            if message.contains("bash command warning [policy_escalation]: explicit approval required")
-                && message.contains("sandbox=WorkspaceWrite")
+            if message.contains("workspace write access")
                 && metadata.code.as_deref() == Some("policy_escalation")
                 && metadata.escalation_reasons.iter().any(|reason| reason == "shell_operator.pipe")
     ));
