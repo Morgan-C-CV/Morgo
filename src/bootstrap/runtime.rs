@@ -1820,13 +1820,13 @@ fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
     let directory_value = shorten_home_path(&app_state.current_working_directory());
     let model_line = format!(
         "{}{}     {}",
-        colorize_ansi("model", "1;34"),
+        colorize_ansi("model", "34"),
         colorize_ansi(":", "2;36"),
         colorize_ansi(&format!("{model_value}   /model to change"), "2;37")
     );
     let directory_line = format!(
         "{}{} {}",
-        colorize_ansi("directory", "1;34"),
+        colorize_ansi("directory", "34"),
         colorize_ansi(":", "2;36"),
         colorize_ansi(&directory_value, "2;37")
     );
