@@ -756,6 +756,7 @@ fn build_messages_url_for_provider(config: &ModelProviderConfig) -> Result<Strin
     adapter_for_config(config)?.messages_url(config)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_request_payload_for_provider(
     config: &ModelProviderConfig,
     input: &Message,

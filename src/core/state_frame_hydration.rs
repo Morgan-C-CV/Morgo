@@ -278,8 +278,8 @@ struct ContractArtifactEntry {
 
 #[derive(Debug, Clone)]
 struct ContractVerificationEntry {
-    target_ref: String,
-    target_path: Option<String>,
+    _target_ref: String,
+    _target_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +290,7 @@ struct ContractTestEntry {
 #[derive(Debug, Clone, Default)]
 struct TypedContractIndex {
     artifacts: Vec<ContractArtifactEntry>,
-    verifications: Vec<ContractVerificationEntry>,
+    _verifications: Vec<ContractVerificationEntry>,
     tests: Vec<ContractTestEntry>,
 }
 
@@ -307,13 +307,13 @@ impl TypedContractIndex {
                     kind: item.kind.clone(),
                 })
                 .collect(),
-            verifications: frame
+            _verifications: frame
                 .stage_execution_contract
                 .verifications
                 .iter()
                 .map(|item| ContractVerificationEntry {
-                    target_ref: item.target_ref.clone(),
-                    target_path: item.target_path.clone(),
+                    _target_ref: item.target_ref.clone(),
+                    _target_path: item.target_path.clone(),
                 })
                 .collect(),
             tests: frame

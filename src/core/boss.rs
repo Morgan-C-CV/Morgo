@@ -793,6 +793,7 @@ fn worker_report_runtime_view(
     runtime_report
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<String> {
     let mut raw_targets = Vec::new();
     if let Some(context) = step.stage_continuation_context.as_ref() {
@@ -825,6 +826,7 @@ fn verification_first_step_required_runtime_targets(step: &BossPlanStep) -> Vec<
     targets
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verification_first_read_anchor_closed(
     step: &BossPlanStep,
     report: &crate::core::state_frame::WorkerStructuredReport,
@@ -2126,6 +2128,7 @@ fn parse_verification_first_patch_refs(value: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verification_first_shared_memory_lines_from_text(target: &str, text: &str) -> Vec<String> {
     parse_verification_first_patch(text, target).canonical_facts()
 }
@@ -2763,6 +2766,7 @@ fn step_looks_like_development_task(
     false
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn development_task_requires_source_evidence(step: &BossPlanStep) -> bool {
     step.stage_execution_contract
         .requires_source_evidence
@@ -10831,6 +10835,7 @@ fn next_runnable_step(plan: &BossPlan) -> Option<&BossPlanStep> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_acceptance(step: &BossPlanStep) -> String {
     format_acceptance_from_items(&step.acceptance)
 }

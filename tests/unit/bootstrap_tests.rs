@@ -4739,6 +4739,24 @@ fn rust_agent_proxy_env_overrides_system_env() {
 }
 
 #[test]
+fn rust_agent_proxy_only_env_populates_proxy_contract() {
+    let _env_lock = lock_bootstrap_env();
+    let _guard = BootstrapEnvGuard::new();
+    apply_proxy_env_scenario(ProxyEnvScenario::RustAgentProxyOnly);
+
+    let resolution = rust_agent::bootstrap::proxy_env::resolve_proxy_env_contract();
+    assert_eq!(
+        resolution.source,
+        rust_agent::bootstrap::proxy_env::ProxySource::RustAgentEnv
+    );
+    assert_eq!(
+        resolution.proxy_url.as_deref(),
+        Some("http://rust-agent-proxy:3128")
+    );
+    assert_eq!(resolution.no_proxy.as_deref(), Some("rust-agent.local"));
+}
+
+#[test]
 fn https_proxy_falls_back_when_rust_agent_proxy_unset() {
     let _env_lock = lock_bootstrap_env();
     let _guard = BootstrapEnvGuard::new();

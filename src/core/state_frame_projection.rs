@@ -283,6 +283,7 @@ fn push_none_recorded_unless_present(facts: &mut Vec<String>, fact_name: &str) {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanStep) -> String {
     let mut text = current_task_contract_text(step.objective());
     if !step.acceptance.is_empty() {
@@ -292,6 +293,7 @@ fn step_contract_text_with_acceptance(step: &crate::core::boss_state::BossPlanSt
     text
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn first_declared_target_directory(
     declared_artifacts: &[DeclaredArtifactContract],
 ) -> Option<String> {
@@ -316,6 +318,7 @@ fn first_declared_target_directory(
         })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn first_absolute_path_token(text: &str) -> Option<String> {
     let start = text
         .char_indices()
@@ -336,6 +339,7 @@ fn first_absolute_path_token(text: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn first_step_target_directory(step: &crate::core::boss_state::BossPlanStep) -> Option<String> {
     let path = first_absolute_path_token(&step_contract_text_with_acceptance(step))?;
     if path

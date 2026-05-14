@@ -653,17 +653,6 @@ pub fn fact_lines_from_ledgers(ledgers: &StepFactLedgers) -> Vec<String> {
     facts
 }
 
-fn bash_artifact_status(record: &ToolExecutionRecord) -> &'static str {
-    match record.kind {
-        ToolExecutionOutcomeKind::Success => "observed",
-        ToolExecutionOutcomeKind::Denied => "denied",
-        ToolExecutionOutcomeKind::PendingApproval => "pending_approval",
-        ToolExecutionOutcomeKind::Interrupted => "interrupted",
-        ToolExecutionOutcomeKind::Progress => "in_progress",
-        ToolExecutionOutcomeKind::ResultTooLarge => "result_too_large",
-    }
-}
-
 fn bash_test_status(record: &ToolExecutionRecord) -> &'static str {
     let detail = record.detail.as_deref().unwrap_or_default();
     match record.kind {
@@ -1296,29 +1285,6 @@ fn apply_runtime_tool_records(ledgers: &mut StepFactLedgers, step: &BossPlanStep
             _ => {}
         }
     }
-}
-
-fn infer_test_status(text: &str) -> Option<&'static str> {
-    let lowered = text.to_lowercase();
-    if lowered.contains("test") || lowered.contains("测试") {
-        if lowered.contains("fail")
-            || lowered.contains("failed")
-            || lowered.contains("failing")
-            || lowered.contains("error")
-            || lowered.contains("回归")
-            || lowered.contains("失败")
-        {
-            return Some("failed");
-        }
-        if lowered.contains("pass")
-            || lowered.contains("passed")
-            || lowered.contains("green")
-            || lowered.contains("通过")
-        {
-            return Some("passed");
-        }
-    }
-    None
 }
 
 fn infer_review_verdict(step: &BossPlanStep, review: &str) -> &'static str {

@@ -82,13 +82,6 @@ fn tool_assembly_context_for_role(role: ActorRole) -> ToolAssemblyContext {
     }
 }
 
-fn has_any_marker(items: &[String], markers: &[&str]) -> bool {
-    items.iter().any(|item| {
-        let lowered = item.to_ascii_lowercase();
-        markers.iter().any(|marker| lowered.contains(marker))
-    })
-}
-
 fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolContractPreflightSpec {
     let mut spec = ToolContractPreflightSpec {
         required_visible_tools: Vec::new(),

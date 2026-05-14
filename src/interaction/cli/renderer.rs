@@ -668,6 +668,7 @@ fn panel_marker(kind: PanelKind) -> &'static str {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_tui_footer(document: &RenderDocument) -> Vec<String> {
     let cwd = std::env::current_dir()
         .map(|path| path.display().to_string())
@@ -683,6 +684,7 @@ fn build_tui_footer(document: &RenderDocument) -> Vec<String> {
     footer
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn pending_approval_tool_name(document: &RenderDocument) -> Option<String> {
     document.blocks.iter().find_map(|block| match block {
         RenderBlock::Panel(panel) if panel.kind == PanelKind::Approval => {
