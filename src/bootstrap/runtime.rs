@@ -496,7 +496,6 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
             .cmp(&suggestion_match_score(left, &query))
             .then_with(|| left.label.cmp(&right.label))
     });
-    suggestions.truncate(8);
     suggestions
 }
 
@@ -3218,6 +3217,7 @@ mod tui_output_tests {
         tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::command::builtin::register_builtin_commands;
     use crate::command::registry::CommandRegistry;
     use crate::core::message::Message;
     use crate::cost::tracker::CostTracker;
@@ -4027,7 +4027,7 @@ mod tui_output_tests {
             runtime_role: RuntimeRole::Coordinator,
             worker_role: None,
             permission_context: ToolPermissionContext::new(PermissionMode::Default),
-            command_registry: Some(Arc::new(CommandRegistry::new())),
+            command_registry: Some(Arc::new(register_builtin_commands(CommandRegistry::new()))),
             runtime_tool_registry: None,
             skill_registry: None,
             mcp_runtime: None,
@@ -4071,6 +4071,14 @@ mod tui_output_tests {
                 .iter()
                 .any(|item| item.label == "use" && !item.detail.is_empty())
         );
+    }
+
+    #[test]
+    fn tui_root_command_suggestions_are_not_hard_truncated_to_eight_items() {
+        let app_state = test_app_state();
+        let suggestions = super::tui_command_suggestions(&app_state, "/");
+
+        assert!(suggestions.len() > 8);
     }
 
     #[test]
