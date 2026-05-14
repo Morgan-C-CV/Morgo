@@ -1490,7 +1490,7 @@ fn target_scoped_verification_evidence(step: &BossPlanStep) -> Vec<String> {
     evidence
 }
 
-fn build_brief_verification_review_summary(step: &BossPlanStep, source: &str) -> String {
+fn build_brief_verification_review_summary(step: &BossPlanStep, _source: &str) -> String {
     let verified_target = verification_first_target_path(step)
         .or_else(|| primary_declared_artifact_path(step))
         .unwrap_or_else(|| "unknown".into());
@@ -9296,7 +9296,6 @@ impl BossCoordinator {
                                     .get(&step_id)
                                     .cloned();
                                 let repairable_continuation_dispatched = {
-                                    let mut dispatched = false;
                                     let mut plan_guard = self.plan.write().await;
                                     let plan = plan_guard
                                         .as_mut()
@@ -9314,13 +9313,12 @@ impl BossCoordinator {
                                         &reason_clone,
                                         metadata_snapshot.as_ref(),
                                     );
-                                    dispatched = should_continue_repairable_failure(
+                                    should_continue_repairable_failure(
                                         step,
                                         metadata_snapshot.as_ref(),
                                         failure_classification,
                                         step.status,
-                                    );
-                                    dispatched
+                                    )
                                 };
                                 self.update_current_step(Some(step_id)).await;
                                 if !repairable_continuation_dispatched
@@ -9521,8 +9519,7 @@ impl BossCoordinator {
             }
         }
 
-        let mut latest_message = None;
-        loop {
+        let latest_message = loop {
             let message = self.advance_once(app_state).await?;
             let routed_step_metadata_snapshot = self.routed_step_metadata.read().await.clone();
             let should_continue = {
@@ -9548,11 +9545,10 @@ impl BossCoordinator {
                         && next_runnable_step(plan).is_some()
                 })
             };
-            latest_message = message;
             if !should_continue {
-                break;
+                break message;
             }
-        }
+        };
         Ok(latest_message)
     }
 

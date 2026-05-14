@@ -1,7 +1,5 @@
-use std::collections::BTreeSet;
-
 use rust_agent::core::boss_test_readiness::{
-    BossAdmissionDenyReason, BossAdmissionResult, BossRollbackPolicy, BossRollbackTrigger,
+    BossAdmissionDenyReason, BossRollbackPolicy, BossRollbackTrigger,
     BossTestAdmissionPolicy, BossTestAllowlist, BossTestReadinessGate, BossTestRunOutcome,
     BossTestSampleRecord, evaluate_rollback_triggers,
 };

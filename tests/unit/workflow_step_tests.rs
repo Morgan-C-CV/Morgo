@@ -1,7 +1,7 @@
 use rust_agent::core::workflow_step::{
     WorkflowObservationKind, WorkflowResourceAvailability, WorkflowStepBlocker,
     WorkflowStepContract, WorkflowStepKind, WorkflowStepObservation, WorkflowStepOutput,
-    WorkflowStepReadiness, WorkflowStepResourceRef, WorkflowStepState, build_handoff_state,
+    WorkflowStepResourceRef, WorkflowStepState, build_handoff_state,
     check_step_readiness,
 };
 

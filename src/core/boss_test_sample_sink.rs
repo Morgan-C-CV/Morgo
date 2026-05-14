@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::boss_state::BossReportPayload;
 use crate::core::boss_test_readiness::{
-    BossRollbackPolicy, BossRollbackTrigger, BossTestRunOutcome, BossTestSampleRecord,
-    evaluate_rollback_triggers,
+    BossRollbackPolicy, BossTestRunOutcome, BossTestSampleRecord, evaluate_rollback_triggers,
 };
 
 // ── Sample sink ───────────────────────────────────────────────────────────────

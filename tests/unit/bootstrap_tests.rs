@@ -3884,7 +3884,6 @@ async fn startup_warnings_are_present_in_initialize_runtime_bundle() {
 fn migration_success_writes_readable_upgraded_session_record() {
     let root = unique_temp_path("rust-agent-migration-upgrade");
     let store = FileBackedSessionStore::new(root.clone());
-    let session_id = SessionId("session-upgrade-write".into());
 
     // Write a legacy record missing all three new fields.
     let legacy_json = r#"{

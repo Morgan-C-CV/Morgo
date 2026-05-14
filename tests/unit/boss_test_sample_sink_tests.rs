@@ -1,7 +1,7 @@
 use std::fs;
 
 use rust_agent::core::boss_state::{
-    BossActorHandle, BossActorRole, BossActorStatus, BossLisMPolicy, BossObservabilitySummary,
+    BossActorHandle, BossActorRole, BossLisMPolicy, BossObservabilitySummary,
     BossPlanStepStatus, BossReportPayload, BossStage, BossStepReport, BossStepRoutedMetadata,
 };
 use rust_agent::core::boss_test_readiness::{BossRollbackPolicy, BossTestRunOutcome};

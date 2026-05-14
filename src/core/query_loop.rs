@@ -2840,16 +2840,6 @@ fn mcp_runtime_failure_code(detail: Option<&str>) -> Option<ServiceFailureCode> 
         .map(|_| ServiceFailureCode::McpRuntimeError)
 }
 
-trait QueryLoopStateExt {
-    fn or(self, fallback: QueryLoopState) -> QueryLoopState;
-}
-
-impl QueryLoopStateExt for QueryLoopState {
-    fn or(self, _fallback: QueryLoopState) -> QueryLoopState {
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

@@ -3,7 +3,7 @@ use crate::plugins::types::{
     PluginLifecycleState, PluginLoadResult,
 };
 use crate::skills::visibility::{
-    SkillActivationDecision, SkillConflictRecord, SkillVisibilityResult,
+    SkillActivationDecision, SkillVisibilityResult,
 };
 
 // ── Capability block reasons ──────────────────────────────────────────────────

@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use rust_agent::plugins::diagnostics::{
-    CapabilityBlockReason, PluginCapabilityStatus, PluginDiagnosticReport, build_capability_record,
-    build_diagnostic_report,
+    CapabilityBlockReason, PluginCapabilityStatus, build_capability_record, build_diagnostic_report,
 };
 use rust_agent::plugins::types::{
     PluginActivationSummary, PluginApplyStatus, PluginCapability, PluginConfigSource,

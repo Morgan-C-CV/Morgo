@@ -159,7 +159,7 @@ pub async fn handle_normalized_input_streaming<F>(
     engine: &mut QueryEngine,
     app_state: &AppState,
     input: NormalizedInput,
-    mut on_update: F,
+    on_update: F,
 ) -> anyhow::Result<CliTurnOutput>
 where
     F: FnMut(&CliTurnOutput),
