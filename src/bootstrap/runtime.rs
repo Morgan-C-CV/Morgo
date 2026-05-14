@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
-use std::sync::{Arc, Mutex};
+use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -1731,19 +1732,40 @@ struct TuiInputPalette {
     text_code: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiThemePreference {
+    Light,
+    Dark,
+}
+
 fn tui_input_palette() -> TuiInputPalette {
-    tui_input_palette_for_background_code(
+    tui_input_palette_for_light_mode(tui_should_use_light_input_palette())
+}
+
+fn tui_should_use_light_input_palette() -> bool {
+    tui_should_use_light_input_palette_with_context(
+        std::env::var("MORGO_TUI_THEME")
+            .ok()
+            .and_then(|value| tui_theme_preference_from_value(&value)),
         std::env::var("COLORFGBG")
             .ok()
             .and_then(|value| tui_colorfgbg_background_code(&value)),
+        tui_detect_ide_terminal(),
+        tui_detect_macos_light_appearance(),
     )
 }
 
+#[cfg(test)]
 fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInputPalette {
-    if background_code
-        .map(tui_background_code_is_light)
-        .unwrap_or(false)
-    {
+    tui_input_palette_for_light_mode(
+        background_code
+            .map(tui_background_code_is_light)
+            .unwrap_or(false),
+    )
+}
+
+fn tui_input_palette_for_light_mode(light_mode: bool) -> TuiInputPalette {
+    if light_mode {
         TuiInputPalette {
             background_code: "48;5;252",
             text_code: "30",
@@ -1756,6 +1778,36 @@ fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInpu
     }
 }
 
+fn tui_should_use_light_input_palette_with_context(
+    forced_theme: Option<TuiThemePreference>,
+    colorfgbg_background_code: Option<u8>,
+    ide_terminal: bool,
+    macos_light_appearance: Option<bool>,
+) -> bool {
+    match forced_theme {
+        Some(TuiThemePreference::Light) => true,
+        Some(TuiThemePreference::Dark) => false,
+        None => {
+            if let Some(background_code) = colorfgbg_background_code {
+                return tui_background_code_is_light(background_code);
+            }
+            if ide_terminal {
+                return macos_light_appearance.unwrap_or(false);
+            }
+            false
+        }
+    }
+}
+
+fn tui_theme_preference_from_value(value: &str) -> Option<TuiThemePreference> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "light" => Some(TuiThemePreference::Light),
+        "dark" => Some(TuiThemePreference::Dark),
+        "auto" | "" => None,
+        _ => None,
+    }
+}
+
 fn tui_colorfgbg_background_code(value: &str) -> Option<u8> {
     value
         .split(';')
@@ -1765,6 +1817,29 @@ fn tui_colorfgbg_background_code(value: &str) -> Option<u8> {
 
 fn tui_background_code_is_light(code: u8) -> bool {
     matches!(code, 7 | 15) || (code >= 10 && code <= 14)
+}
+
+#[cfg(target_os = "macos")]
+fn tui_detect_macos_light_appearance() -> Option<bool> {
+    static DETECTED: OnceLock<Option<bool>> = OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        let output = Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let style = String::from_utf8_lossy(&output.stdout);
+            Some(!style.trim().eq_ignore_ascii_case("Dark"))
+        } else {
+            // Missing AppleInterfaceStyle means macOS is currently using light appearance.
+            Some(true)
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tui_detect_macos_light_appearance() -> Option<bool> {
+    None
 }
 
 fn render_tui_input_text_line(
@@ -2845,6 +2920,58 @@ mod tui_output_tests {
         assert!(super::tui_background_code_is_light(10));
         assert!(!super::tui_background_code_is_light(0));
         assert!(!super::tui_background_code_is_light(8));
+    }
+
+    #[test]
+    fn tui_theme_preference_parses_override_values() {
+        assert_eq!(
+            super::tui_theme_preference_from_value("light"),
+            Some(super::TuiThemePreference::Light)
+        );
+        assert_eq!(
+            super::tui_theme_preference_from_value("dark"),
+            Some(super::TuiThemePreference::Dark)
+        );
+        assert_eq!(super::tui_theme_preference_from_value("auto"), None);
+        assert_eq!(super::tui_theme_preference_from_value("weird"), None);
+    }
+
+    #[test]
+    fn tui_light_palette_prefers_explicit_override_over_terminal_signals() {
+        assert!(super::tui_should_use_light_input_palette_with_context(
+            Some(super::TuiThemePreference::Light),
+            Some(0),
+            false,
+            Some(false),
+        ));
+        assert!(!super::tui_should_use_light_input_palette_with_context(
+            Some(super::TuiThemePreference::Dark),
+            Some(15),
+            true,
+            Some(true),
+        ));
+    }
+
+    #[test]
+    fn tui_light_palette_uses_macos_appearance_for_ide_terminals_without_colorfgbg() {
+        assert!(super::tui_should_use_light_input_palette_with_context(
+            None,
+            None,
+            true,
+            Some(true),
+        ));
+        assert!(!super::tui_should_use_light_input_palette_with_context(
+            None,
+            None,
+            true,
+            Some(false),
+        ));
+        assert!(!super::tui_should_use_light_input_palette_with_context(
+            None,
+            None,
+            false,
+            Some(true),
+        ));
     }
 
     #[test]
