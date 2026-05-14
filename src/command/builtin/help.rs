@@ -9,6 +9,10 @@ use crate::state::app_state::AppState;
 
 pub struct HelpCommand;
 
+fn ansi(text: impl AsRef<str>, code: &str) -> String {
+    format!("\u{1b}[{code}m{}\u{1b}[0m", text.as_ref())
+}
+
 #[async_trait]
 impl Command for HelpCommand {
     fn metadata(&self) -> CommandMetadata {
@@ -48,14 +52,25 @@ impl Command for HelpCommand {
         });
 
         let mut lines = vec![
-            "RustAgent is optimized for coding tasks.".to_string(),
-            "Ask RustAgent to inspect code, edit files, or run verification commands."
-                .to_string(),
-            "Coding workflow: read/search -> edit -> verify -> approve if needed -> resume."
-                .to_string(),
+            ansi("RustAgent is optimized for coding tasks.", "1;34"),
+            "Ask RustAgent to inspect code, edit files, or run verification commands.".to_string(),
+            format!(
+                "{} {} {} {} {}",
+                ansi("Coding workflow:", "1;36"),
+                ansi("read/search", "2;37"),
+                ansi("->", "2;36"),
+                ansi("edit", "2;37"),
+                ansi("-> verify -> approve if needed -> resume", "2;37")
+            ),
             String::new(),
-            "Available commands:".to_string(),
-            "Legend: [type=<prompt|local>] [availability=<cli-only|remote-safe>] [source:category] [sensitive] [model_invocation=disabled] [immediate]".to_string(),
+            ansi("Available commands", "1;34"),
+            format!(
+                "{}",
+                ansi(
+                    "Tags: prompt/local, cli-only, sensitive, immediate, no-model, aliases",
+                    "2;37"
+                )
+            ),
         ];
         let (coding_commands, advanced_commands): (Vec<_>, Vec<_>) =
             metadata.into_iter().partition(is_coding_command);
@@ -73,10 +88,18 @@ impl Command for HelpCommand {
                 );
                 lines.push(String::new());
                 lines.push(format!(
-                    "Plugin diagnostics: {} issue(s) detected (warnings={}, errors={}); run /plugins or /status for details.",
-                    plugin_load_result.diagnostics.len(),
-                    warning_count,
-                    error_count
+                    "{} {} detected {}",
+                    ansi("Plugin diagnostics:", "1;33"),
+                    ansi(
+                        format!(
+                            "{} issue(s) (warnings={}, errors={})",
+                            plugin_load_result.diagnostics.len(),
+                            warning_count,
+                            error_count
+                        ),
+                        "33"
+                    ),
+                    ansi("run /plugins or /status for details.", "2;37")
                 ));
             }
         }
@@ -105,7 +128,11 @@ fn append_command_section(lines: &mut Vec<String>, title: &str, commands: &[Comm
     }
 
     lines.push(String::new());
-    lines.push(format!("{title} ({})", commands.len()));
+    lines.push(format!(
+        "{} {}",
+        ansi(title, "1;36"),
+        ansi(format!("({})", commands.len()), "2;37")
+    ));
 
     let mut grouped: BTreeMap<CommandSource, Vec<&CommandMetadata>> = BTreeMap::new();
     for command in commands {
@@ -115,7 +142,11 @@ fn append_command_section(lines: &mut Vec<String>, title: &str, commands: &[Comm
 
     for (source, entries) in grouped {
         if show_source_headers {
-            lines.push(format!("{} ({}):", source.display_name(), entries.len()));
+            lines.push(format!(
+                "{} {}",
+                ansi(format!("{}:", source.display_name()), "1;37"),
+                ansi(format!("({})", entries.len()), "2;37")
+            ));
         }
         for command in entries {
             lines.push(format_command_line(command));
@@ -124,43 +155,36 @@ fn append_command_section(lines: &mut Vec<String>, title: &str, commands: &[Comm
 }
 
 fn format_command_line(command: &CommandMetadata) -> String {
-    let aliases = if command.aliases.is_empty() {
-        String::new()
-    } else {
-        format!(" aliases={}", command.aliases.join(", "))
-    };
-    let availability = command
-        .availability
-        .short_label()
-        .map(|label| format!(" [availability={label}]"))
-        .unwrap_or_default();
-    let sensitivity = if command.is_sensitive {
-        " [sensitive]"
-    } else {
-        ""
-    };
-    let invocation = if command.disable_model_invocation {
-        " [model_invocation=disabled]"
-    } else {
-        ""
-    };
-    let immediacy = if command.immediate {
-        " [immediate]"
-    } else {
-        ""
-    };
+    let mut tags = vec![
+        ansi(command.command_type.as_str(), "2;36"),
+        ansi(
+            format!("{}:{}", command.source.as_str(), command.category),
+            "2;37",
+        ),
+    ];
+
+    if let Some(label) = command.availability.short_label() {
+        tags.push(ansi(label, "33"));
+    }
+    if command.is_sensitive {
+        tags.push(ansi("sensitive", "31"));
+    }
+    if command.disable_model_invocation {
+        tags.push(ansi("no-model", "35"));
+    }
+    if command.immediate {
+        tags.push(ansi("immediate", "32"));
+    }
+    if !command.aliases.is_empty() {
+        tags.push(ansi(
+            format!("aliases: {}", command.aliases.join(", ")),
+            "2;37",
+        ));
+    }
 
     format!(
-        "- /{} — {} [type={}] [{}:{}]{}{}{}{}{}",
-        command.name,
-        command.description,
-        command.command_type.as_str(),
-        command.source.as_str(),
-        command.category,
-        aliases,
-        availability,
-        sensitivity,
-        invocation,
-        immediacy
-    )
+        "{} {}",
+        ansi(format!("/{}", command.name), "1;34"),
+        command.description
+    ) + &format!("\n    {}", tags.join("  "))
 }
