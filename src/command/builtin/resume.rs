@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
+    SystemTrapAction,
 };
 use crate::core::message::Role;
 use crate::interaction::envelope::NormalizedInput;
@@ -51,12 +52,20 @@ impl Command for ResumeCommand {
 
     async fn execute(
         &self,
-        _input: &NormalizedInput,
+        input: &NormalizedInput,
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        // TODO: 状态留存与外部自动重载机制
-        // 当 TUI 日志选择器开发完毕且选中某个 session_id 时，需要能够要求用户输入 /confirm，
-        // 将外围循环跳出、应用新装载的 AppState，重入大循环（即实现热重载会话恢复）。
+        let args = input.command_args.trim();
+        if !args.is_empty() {
+            return Ok(CommandResult::SystemTrap(SystemTrapAction::ResumeSession(
+                args.to_string(),
+            )));
+        }
+        if matches!(app_state.surface, crate::bootstrap::InteractionSurface::Cli)
+            && app_state.session_mode == crate::bootstrap::SessionMode::Interactive
+        {
+            return Ok(CommandResult::SystemTrap(SystemTrapAction::OpenResumePicker));
+        }
         let current_id = &app_state.active_session_id;
         let cwd = app_state.current_working_directory();
         let permission_mode = match app_state.permission_context.mode() {

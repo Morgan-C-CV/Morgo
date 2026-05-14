@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
+    SystemTrapAction,
 };
 use crate::interaction::envelope::NormalizedInput;
 use crate::state::app_state::AppState;
@@ -31,8 +32,6 @@ impl Command for ClearCommand {
         _input: &NormalizedInput,
         _app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        Ok(CommandResult::Message(
-            "\x1b[2J\x1b[3J\x1b[HConversation cleared.".into(),
-        ))
+        Ok(CommandResult::SystemTrap(SystemTrapAction::NewSession))
     }
 }

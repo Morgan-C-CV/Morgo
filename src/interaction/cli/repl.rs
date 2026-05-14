@@ -1,4 +1,4 @@
-use crate::command::types::CommandResult;
+use crate::command::types::{CommandResult, SystemTrapAction};
 use crate::core::attachment::load_attachment;
 use crate::core::engine::QueryEngine;
 use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
@@ -113,18 +113,19 @@ pub struct CliTurnOutput {
     pub events: Vec<CliDisplayEvent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliDispatchOutcome {
+    pub output: CliTurnOutput,
+    pub system_trap: Option<SystemTrapAction>,
+}
+
 pub async fn handle_cli_input(
     router: &CommandRouter,
     engine: &mut QueryEngine,
     app_state: &AppState,
     raw: impl Into<String>,
 ) -> anyhow::Result<CliTurnOutput> {
-    let input = NormalizedInput::from_session_raw(
-        app_state.surface,
-        app_state.active_session_id.clone(),
-        raw,
-    );
-    handle_normalized_input(router, engine, app_state, input).await
+    Ok(handle_cli_input_dispatch(router, engine, app_state, raw).await?.output)
 }
 
 pub async fn handle_cli_input_streaming<F>(
@@ -137,12 +138,9 @@ pub async fn handle_cli_input_streaming<F>(
 where
     F: FnMut(&CliTurnOutput),
 {
-    let input = NormalizedInput::from_session_raw(
-        app_state.surface,
-        app_state.active_session_id.clone(),
-        raw,
-    );
-    handle_normalized_input_streaming(router, engine, app_state, input, on_update).await
+    Ok(handle_cli_input_dispatch_streaming(router, engine, app_state, raw, on_update)
+        .await?
+        .output)
 }
 
 pub async fn handle_normalized_input(
@@ -151,7 +149,9 @@ pub async fn handle_normalized_input(
     app_state: &AppState,
     input: NormalizedInput,
 ) -> anyhow::Result<CliTurnOutput> {
-    handle_normalized_input_streaming(router, engine, app_state, input, |_| {}).await
+    Ok(handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {})
+        .await?
+        .output)
 }
 
 pub async fn handle_normalized_input_streaming<F>(
@@ -161,6 +161,53 @@ pub async fn handle_normalized_input_streaming<F>(
     input: NormalizedInput,
     mut on_update: F,
 ) -> anyhow::Result<CliTurnOutput>
+where
+    F: FnMut(&CliTurnOutput),
+{
+    Ok(handle_normalized_input_dispatch_streaming(router, engine, app_state, input, on_update)
+        .await?
+        .output)
+}
+
+pub async fn handle_cli_input_dispatch(
+    router: &CommandRouter,
+    engine: &mut QueryEngine,
+    app_state: &AppState,
+    raw: impl Into<String>,
+) -> anyhow::Result<CliDispatchOutcome> {
+    let input = NormalizedInput::from_session_raw(
+        app_state.surface,
+        app_state.active_session_id.clone(),
+        raw,
+    );
+    handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {}).await
+}
+
+pub async fn handle_cli_input_dispatch_streaming<F>(
+    router: &CommandRouter,
+    engine: &mut QueryEngine,
+    app_state: &AppState,
+    raw: impl Into<String>,
+    on_update: F,
+) -> anyhow::Result<CliDispatchOutcome>
+where
+    F: FnMut(&CliTurnOutput),
+{
+    let input = NormalizedInput::from_session_raw(
+        app_state.surface,
+        app_state.active_session_id.clone(),
+        raw,
+    );
+    handle_normalized_input_dispatch_streaming(router, engine, app_state, input, on_update).await
+}
+
+pub async fn handle_normalized_input_dispatch_streaming<F>(
+    router: &CommandRouter,
+    engine: &mut QueryEngine,
+    app_state: &AppState,
+    input: NormalizedInput,
+    mut on_update: F,
+) -> anyhow::Result<CliDispatchOutcome>
 where
     F: FnMut(&CliTurnOutput),
 {
@@ -179,10 +226,10 @@ where
         (router, engine, app_state)
     };
     let route_result = router.route(&input, app_state).await?;
-    let (persisted_messages, runtime_events, engine_persisted) = match route_result {
+    let (persisted_messages, runtime_events, engine_persisted, system_trap) = match route_result {
         RouteExecution::CommandResult(command_result) => match command_result {
             CommandResult::Message(message) => {
-                (vec![Message::assistant(message)], Vec::new(), false)
+                (vec![Message::assistant(message)], Vec::new(), false, None)
             }
             CommandResult::Blocks(blocks) => {
                 use crate::core::output::blocks_to_plain_text;
@@ -190,44 +237,47 @@ where
                     vec![Message::assistant(blocks_to_plain_text(&blocks))],
                     Vec::new(),
                     false,
+                    None,
                 )
             }
-            CommandResult::Prompt(prompt) => (vec![Message::assistant(prompt)], Vec::new(), false),
+            CommandResult::Prompt(prompt) => {
+                (vec![Message::assistant(prompt)], Vec::new(), false, None)
+            }
             CommandResult::ContinueToQuery => {
                 let (messages, events) =
                     collect_stream_messages(engine, build_user_message(&input), &mut on_update)
                         .await;
-                (messages, events, true)
+                (messages, events, true, None)
             }
             CommandResult::Denied(reason) => (
                 vec![Message::assistant(format!("Denied: {reason}"))],
                 Vec::new(),
                 false,
+                None,
             ),
             CommandResult::UpdateConfig { key, value } => (
                 vec![Message::assistant(format!("Config updated: {key}={value}"))],
                 Vec::new(),
                 false,
+                None,
             ),
-            CommandResult::SystemTrap(action) => (
-                vec![Message::assistant(format!("System trap: {:?}", action))],
-                Vec::new(),
-                false,
-            ),
+            CommandResult::SystemTrap(action) => (Vec::new(), Vec::new(), false, Some(action)),
         },
         RouteExecution::EnterQuery { prompt, source } => {
             let user_message = source.to_user_message(&input, &prompt);
             let (messages, events) =
                 collect_stream_messages(engine, user_message, &mut on_update).await;
-            (messages, events, true)
+            (messages, events, true, None)
         }
     };
     if !engine_persisted {
-        engine.persist_messages(
-            build_user_message(&input),
-            &persisted_messages,
-            crate::core::events::SessionMilestone::AssistantMessageCommitted,
-        );
+        if !persisted_messages.is_empty() {
+            engine.persist_messages(
+                build_user_message(&input),
+                &persisted_messages,
+                crate::core::events::SessionMilestone::AssistantMessageCommitted,
+            );
+        }
     }
     let primary_text = collect_message_content(&persisted_messages);
 
@@ -245,7 +295,17 @@ where
     Ok(CliTurnOutput {
         primary_text,
         events,
-    })
+    }
+    .into_dispatch(system_trap))
+}
+
+impl CliTurnOutput {
+    fn into_dispatch(self, system_trap: Option<SystemTrapAction>) -> CliDispatchOutcome {
+        CliDispatchOutcome {
+            output: self,
+            system_trap,
+        }
+    }
 }
 
 pub async fn handle_cli_inputs<I, S>(

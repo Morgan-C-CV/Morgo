@@ -351,6 +351,14 @@ impl QueryEngine {
         }
     }
 
+    pub fn replace_app_state(&mut self, app_state: AppState) {
+        self.context.app_state = app_state.clone();
+        *self
+            .latest_app_state
+            .lock()
+            .expect("query engine app state should not be poisoned") = app_state;
+    }
+
     pub fn format_task_event_message(event: &TaskEvent) -> Message {
         Message::assistant(event.format_notification())
     }

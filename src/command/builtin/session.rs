@@ -31,7 +31,6 @@ impl Command for SessionCommand {
         _input: &NormalizedInput,
         app_state: &AppState,
     ) -> anyhow::Result<CommandResult> {
-        // TODO: 可补充实现 TS Reference 中的 Remote 模式终端打印 QR Code 配对能力
         let current_id = &app_state.active_session_id;
         let surface = format!("{:?}", app_state.surface);
         let store_status = if app_state.session_store.is_some() {
@@ -39,10 +38,28 @@ impl Command for SessionCommand {
         } else {
             "Inactive"
         };
+        let parent_id = app_state
+            .session_store
+            .as_ref()
+            .and_then(|store| {
+                let current_id = app_state.current_session_id();
+                let sessions = store.list_sessions();
+                sessions
+                    .into_iter()
+                    .find(|session| session.session_id == current_id)
+                    .and_then(|session| session.parent_session_id)
+            })
+            .map(|session_id| session_id.0)
+            .unwrap_or_else(|| "none".into());
+        let last_turn_at = app_state
+            .session
+            .as_ref()
+            .and_then(|session| session.last_turn_at.as_deref())
+            .unwrap_or("unknown");
 
         Ok(CommandResult::Message(format!(
-            "Session Diagnostics:\n- Session ID: {}\n- Surface: {}\n- Persistence: {}\n\n(Tip: use /resume to learn how to restore sessions)",
-            current_id, surface, store_status
+            "Session Diagnostics:\n- Session ID: {}\n- Parent Session ID: {}\n- Surface: {}\n- Persistence: {}\n- Last Activity: {}\n\n(Tip: use /resume to switch sessions, or /new to start a fresh session)",
+            current_id, parent_id, surface, store_status, last_turn_at
         )))
     }
 }

@@ -26,6 +26,14 @@ pub struct RestoreRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshSessionRequest {
+    pub parent_session_id: Option<SessionId>,
+    pub surface: InteractionSurface,
+    pub session_mode: SessionMode,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoredSession {
     pub snapshot: SessionSnapshot,
     pub history: SessionHistory,
@@ -35,6 +43,7 @@ pub struct RestoredSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSessionState {
     pub snapshot: SessionSnapshot,
+    pub parent_session_id: Option<SessionId>,
     pub history: SessionHistory,
     pub restored_session: Option<RestoredSession>,
     pub client_type: ClientType,
@@ -128,6 +137,7 @@ pub fn resolved_from_snapshot(
     let (client_type, session_source) = surface_binding(snapshot.surface);
     ResolvedSessionState {
         snapshot,
+        parent_session_id: None,
         history,
         restored_session,
         client_type,
@@ -135,6 +145,29 @@ pub fn resolved_from_snapshot(
         model_level_override,
         external_memory_entries: sanitize_external_memory_entries(external_memory_entries),
         nested_memory_lineage: sanitize_nested_memory_lineage(nested_memory_lineage),
+    }
+}
+
+pub fn build_fresh_session_state(request: FreshSessionRequest) -> ResolvedSessionState {
+    let snapshot = SessionSnapshot {
+        session_id: generate_fresh_session_id(),
+        surface: request.surface,
+        session_mode: request.session_mode,
+        cwd: request.cwd,
+        last_turn_at: None,
+        prompt_seed: None,
+    };
+    let (client_type, session_source) = surface_binding(snapshot.surface);
+    ResolvedSessionState {
+        snapshot,
+        parent_session_id: request.parent_session_id,
+        history: SessionHistory::default(),
+        restored_session: None,
+        client_type,
+        session_source,
+        model_level_override: None,
+        external_memory_entries: Vec::new(),
+        nested_memory_lineage: Vec::new(),
     }
 }
 
@@ -158,4 +191,28 @@ fn generate_fresh_session_id() -> SessionId {
         std::process::id(),
         counter
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_fresh_session_state_records_parent_and_starts_empty() {
+        let resolved = build_fresh_session_state(FreshSessionRequest {
+            parent_session_id: Some(SessionId("parent-1".into())),
+            surface: InteractionSurface::Cli,
+            session_mode: SessionMode::Interactive,
+            cwd: "/tmp/work".into(),
+        });
+
+        assert_eq!(
+            resolved.parent_session_id.as_ref().map(|id| id.0.as_str()),
+            Some("parent-1")
+        );
+        assert!(resolved.history.entries.is_empty());
+        assert!(resolved.restored_session.is_none());
+        assert!(resolved.external_memory_entries.is_empty());
+        assert!(resolved.nested_memory_lineage.is_empty());
+    }
 }

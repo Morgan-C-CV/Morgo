@@ -86,6 +86,8 @@ pub struct CommandMetadata {
 pub enum SystemTrapAction {
     RequireReboot,
     ResumeSession(String),
+    NewSession,
+    OpenResumePicker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

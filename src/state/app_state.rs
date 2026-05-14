@@ -31,6 +31,7 @@ use crate::security::approval_protocol::{
 use crate::security::audit::{AuditEvent, AuditLog};
 use crate::state::active_model_runtime::ActiveModelRuntime;
 use crate::state::permission_context::ToolPermissionContext;
+use crate::task::list_manager::TaskListManager;
 
 const SESSION_PERSIST_MAX_ATTEMPTS: usize = 3;
 
@@ -221,6 +222,7 @@ impl AppState {
         }
 
         let session_id = self.current_session_id();
+        let now = session_timestamp_now();
         if let Some(session_store) = &self.session_store {
             for entry in &entries {
                 persist_store_write_with_retry("append_current_session_history_entries", || {
@@ -237,7 +239,11 @@ impl AppState {
         if let Some(restored_session) = self.restored_session.as_mut() {
             if restored_session.snapshot.session_id == session_id {
                 restored_session.history.entries.extend(entries);
+                restored_session.snapshot.last_turn_at = Some(now.clone());
             }
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.last_turn_at = Some(now);
         }
 
         Ok(())
@@ -288,6 +294,7 @@ impl AppState {
         let history = self.canonical_session_history_for(&session_id, self.history.as_ref());
         let record = PersistedSessionRecord {
             snapshot: snapshot.clone(),
+            parent_session_id: None,
             history,
             task_list: session_store.load_task_list(&session_id),
             plan_state: session_store.load_plan_state(&session_id),
@@ -295,6 +302,7 @@ impl AppState {
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: session_store.load_lifecycle_status(&session_id),
             model_level_override: session_store.load_model_level_override(&session_id),
+            title: None,
         };
         persist_store_write_with_retry("persist_current_session_state", || {
             session_store.save_full_record(&session_id, record.clone())
@@ -404,6 +412,7 @@ impl AppState {
         let history = self.canonical_session_history_for(&session_id, Some(&resolved.history));
         let record = PersistedSessionRecord {
             snapshot: resolved.snapshot.clone(),
+            parent_session_id: resolved.parent_session_id.clone(),
             history,
             task_list: session_store.load_task_list(&session_id),
             plan_state: session_store.load_plan_state(&session_id),
@@ -411,6 +420,7 @@ impl AppState {
             nested_memory_lineage: Some(self.permission_context.nested_memory_lineage()),
             lifecycle_status: SessionLifecycleStatus::Active,
             model_level_override: session_store.load_model_level_override(&session_id),
+            title: None,
         };
         persist_store_write_with_retry("persist_resolved_session_state", || {
             session_store.save_full_record(&session_id, record.clone())
@@ -422,6 +432,33 @@ impl AppState {
             .as_ref()
             .map(|session| session.session_id.clone())
             .unwrap_or_else(|| SessionId(self.active_session_id.clone()))
+    }
+
+    pub fn rebind_session_managers(&mut self) {
+        let Some(session_store) = self.session_store.as_ref() else {
+            return;
+        };
+        let session_id = self.current_session_id();
+        let task_list_snapshot = session_store.load_task_list(&session_id);
+        let task_list_manager = Arc::new(
+            task_list_snapshot
+                .map(TaskListManager::from_snapshot)
+                .unwrap_or_default()
+                .with_persistence(session_store.clone(), session_id.clone()),
+        );
+        let plan_state = session_store.load_plan_state(&session_id);
+        let plan_manager = Arc::new(
+            plan_state
+                .map(crate::plan::manager::PlanManager::from_state)
+                .unwrap_or_default()
+                .with_persistence(session_store.clone(), session_id.clone()),
+        );
+        self.permission_context = self
+            .permission_context
+            .clone()
+            .with_task_list_manager(task_list_manager)
+            .with_plan_manager(plan_manager)
+            .with_active_session_id(session_id.0);
     }
 
     pub async fn resolve_pending_approval(&self, approved: bool) -> anyhow::Result<CommandResult> {
@@ -548,6 +585,14 @@ impl AppState {
             }
         }
     }
+}
+
+fn session_timestamp_now() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.to_string()
 }
 
 fn prepend_notice(notice: Option<String>, body: String) -> String {

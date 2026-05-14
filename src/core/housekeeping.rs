@@ -715,6 +715,10 @@ mod tests {
         ) -> Result<(), SessionStoreWriteError> {
             self.inner.save_model_level_override(session_id, level)
         }
+
+        fn list_sessions(&self) -> Vec<crate::history::session::SessionSummary> {
+            self.inner.list_sessions()
+        }
     }
 
     fn test_app_state(
@@ -726,6 +730,7 @@ mod tests {
         let session_id = SessionId("session-housekeeping".into());
         let snapshot = SessionSnapshot {
             session_id: session_id.clone(),
+            parent_session_id: None,
             surface: InteractionSurface::Cli,
             session_mode: SessionMode::Interactive,
             cwd: ".".into(),

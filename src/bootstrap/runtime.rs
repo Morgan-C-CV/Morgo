@@ -31,7 +31,7 @@ use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::setup::SetupContext;
 use crate::bootstrap::{BootstrapPhase, BootstrapState, InteractionSurface, SessionMode};
 use crate::command::registry::CommandRegistry;
-use crate::command::types::{CommandMetadata, CommandSource};
+use crate::command::types::{CommandMetadata, CommandSource, SystemTrapAction};
 use crate::core::boss::BossCoordinator;
 use crate::core::boss_runtime::BossRuntimeHost;
 use crate::core::boss_state::BossLisMPolicy;
@@ -41,9 +41,10 @@ use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::core::lism_ab_sample::LisMRolloutConclusion;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
-    ResolvedSessionState, RestoreRequest, RestoreSource, resolve_session_state,
+    FreshSessionRequest, ResolvedSessionState, RestoreRequest, RestoreSource,
+    build_fresh_session_state, resolve_session_state,
 };
-use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore};
+use crate::history::session::{FileBackedSessionStore, SessionId, SessionStore, SessionSummary};
 use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
@@ -52,7 +53,8 @@ use crate::interaction::cli::renderer::{
     render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{
-    CliTurnOutput, handle_cli_input, handle_cli_input_streaming, handle_normalized_input,
+    CliDispatchOutcome, CliTurnOutput, handle_cli_input, handle_cli_input_dispatch_streaming,
+    handle_normalized_input,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::envelope::NormalizedInput;
@@ -435,6 +437,12 @@ enum TuiTurnStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiExitGesture {
     Esc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiResumePickerState {
+    sessions: Vec<SessionSummary>,
+    selected: usize,
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -2138,6 +2146,52 @@ fn tui_content_screen(
     screen.prompt.clear();
     prepend_tui_startup_card(app_state, &mut screen);
     screen
+}
+
+fn tui_resume_picker_screen(
+    app_state: &AppState,
+    picker: &TuiResumePickerState,
+) -> crate::interaction::cli::renderer::TuiScreen {
+    let mut screen = build_initial_tui_screen(app_state);
+    let lines = if picker.sessions.is_empty() {
+        vec!["No saved sessions found.".into()]
+    } else {
+        picker
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let cursor = if index == picker.selected { ">" } else { " " };
+                let preview = session.preview.as_deref().unwrap_or("No preview");
+                let updated = session.last_turn_at.as_deref().unwrap_or("unknown");
+                format!(
+                    "{cursor} {}  {}  {}",
+                    session.session_id.0,
+                    truncate_resume_picker_line(&session.cwd, 32),
+                    truncate_resume_picker_line(&format!("{updated} · {preview}"), 60)
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    screen.panels.push(crate::interaction::cli::renderer::TuiPanelSection {
+        title: "Resume Session".into(),
+        lines,
+    });
+    screen.footer = vec![
+        "Enter: resume selected session".into(),
+        "Esc: cancel".into(),
+    ];
+    screen
+}
+
+fn truncate_resume_picker_line(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
 }
 
 fn tui_terminal_dimensions() -> (usize, usize) {
@@ -4604,8 +4658,91 @@ impl RuntimeBootstrap {
         app_state: &AppState,
         line: String,
         on_update: impl FnMut(&CliTurnOutput),
-    ) -> anyhow::Result<CliTurnOutput> {
-        handle_cli_input_streaming(router, engine, app_state, line, on_update).await
+    ) -> anyhow::Result<CliDispatchOutcome> {
+        handle_cli_input_dispatch_streaming(router, engine, app_state, line, on_update).await
+    }
+
+    fn apply_session_state_to_engine(
+        &self,
+        engine: &mut QueryEngine,
+        app_state: &mut AppState,
+        resolved: ResolvedSessionState,
+    ) -> anyhow::Result<()> {
+        let mut next_state = app_state.clone();
+        next_state.apply_resolved_session_state(&resolved);
+        next_state.rebind_session_managers();
+        next_state
+            .persist_resolved_session_state(&resolved)
+            .map_err(|error| anyhow::anyhow!(error.reason()))?;
+        engine.replace_app_state(next_state.clone());
+        *app_state = next_state;
+        Ok(())
+    }
+
+    fn open_resume_picker(&self, app_state: &AppState) -> TuiResumePickerState {
+        let sessions = app_state
+            .session_store
+            .as_ref()
+            .map(|store| {
+                store
+                    .list_sessions()
+                    .into_iter()
+                    .filter(|summary| summary.session_id.0 != app_state.active_session_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        TuiResumePickerState {
+            sessions,
+            selected: 0,
+        }
+    }
+
+    fn switch_to_session_id(
+        &self,
+        app_state: &mut AppState,
+        engine: &mut QueryEngine,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
+        let Some(session_store) = app_state.session_store.as_ref() else {
+            anyhow::bail!("session store is unavailable");
+        };
+        app_state
+            .persist_current_session_state()
+            .map_err(|error| anyhow::anyhow!(error.reason()))?;
+        let cwd = app_state.current_working_directory();
+        let resolved = resolve_session_state(
+            session_store.as_ref(),
+            Some(&RestoreRequest {
+                source: RestoreSource::ResumeSession,
+                session_id: Some(session_id.to_string()),
+            }),
+            app_state.surface,
+            app_state.session_mode,
+            &cwd,
+        );
+        let resumed_id = resolved.active_session_id();
+        self.apply_session_state_to_engine(engine, app_state, resolved)?;
+        Ok(resumed_id)
+    }
+
+    fn create_new_session(
+        &self,
+        app_state: &mut AppState,
+        engine: &mut QueryEngine,
+    ) -> anyhow::Result<String> {
+        app_state
+            .persist_current_session_state()
+            .map_err(|error| anyhow::anyhow!(error.reason()))?;
+        let current_session_id = app_state.current_session_id();
+        let resolved = build_fresh_session_state(FreshSessionRequest {
+            parent_session_id: Some(current_session_id),
+            surface: app_state.surface,
+            session_mode: app_state.session_mode,
+            cwd: app_state.current_working_directory().display().to_string(),
+        });
+        let new_session_id = resolved.active_session_id();
+        self.apply_session_state_to_engine(engine, app_state, resolved)?;
+        Ok(new_session_id)
     }
 
     async fn run_interactive_tui(
@@ -4615,6 +4752,7 @@ impl RuntimeBootstrap {
         app_state: &AppState,
     ) -> anyhow::Result<()> {
         let _raw_mode = TuiRawModeGuard::activate()?;
+        let mut app_state = app_state.clone();
         let mut current_document = render_turn_document(&CliTurnOutput {
             primary_text: String::new(),
             events: vec![],
@@ -4634,6 +4772,7 @@ impl RuntimeBootstrap {
         let mut last_turn_duration: Option<Duration> = None;
         let mut selection = TuiSelectionState::default();
         let mut click_state = TuiClickState::default();
+        let mut resume_picker: Option<TuiResumePickerState> = None;
         let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
         const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
         const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
@@ -4645,7 +4784,11 @@ impl RuntimeBootstrap {
             {
                 pending_exit_gesture = None;
             }
-            let suggestions = tui_input_suggestions(app_state, &input);
+            let suggestions = if resume_picker.is_some() {
+                Vec::new()
+            } else {
+                tui_input_suggestions(&app_state, &input)
+            };
             selected_suggestion = if !suggestions.is_empty() {
                 Some(
                     selected_suggestion
@@ -4656,10 +4799,12 @@ impl RuntimeBootstrap {
                 None
             };
             let (terminal_width, terminal_height) = tui_terminal_dimensions();
-            let content_screen = if current_document.blocks.is_empty() {
-                build_initial_tui_screen(app_state)
+            let content_screen = if let Some(picker) = resume_picker.as_ref() {
+                tui_resume_picker_screen(&app_state, picker)
+            } else if current_document.blocks.is_empty() {
+                build_initial_tui_screen(&app_state)
             } else {
-                tui_content_screen(app_state, &current_document)
+                tui_content_screen(&app_state, &current_document)
             };
             let layout_metrics = tui_layout_metrics(terminal_height, &input, &suggestions);
             let rendered_content = build_tui_rendered_content(&content_screen, terminal_width);
@@ -4680,7 +4825,7 @@ impl RuntimeBootstrap {
                 TuiTurnStatus::Idle
             };
             self.print_tui_interactive_frame(
-                app_state,
+                &app_state,
                 &current_document,
                 &input,
                 &suggestions,
@@ -4740,7 +4885,7 @@ impl RuntimeBootstrap {
                             })
                             .unwrap_or(false);
                         if should_exit {
-                            self.print_tui_message(app_state, "Exiting TUI session.");
+                            self.print_tui_message(&app_state, "Exiting TUI session.");
                             execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
                             break;
                         }
@@ -4752,6 +4897,23 @@ impl RuntimeBootstrap {
 
                     match key.code {
                         KeyCode::Enter => {
+                            if let Some(picker) = resume_picker.as_ref() {
+                                if picker.sessions.is_empty() {
+                                    resume_picker = None;
+                                    continue;
+                                }
+                                let session_id = picker.sessions[picker.selected].session_id.0.clone();
+                                let resumed_id =
+                                    self.switch_to_session_id(&mut app_state, engine, &session_id)?;
+                                current_document = render_turn_document(&CliTurnOutput {
+                                    primary_text: format!("Resumed session {resumed_id}."),
+                                    events: vec![],
+                                });
+                                resume_picker = None;
+                                active_turn_started_at = None;
+                                last_turn_duration = None;
+                                continue;
+                            }
                             if key
                                 .modifiers
                                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
@@ -4801,7 +4963,7 @@ impl RuntimeBootstrap {
                             selection.clear();
 
                             self.print_tui_interactive_frame(
-                                app_state,
+                                &app_state,
                                 &current_document,
                                 "",
                                 &[],
@@ -4813,17 +4975,17 @@ impl RuntimeBootstrap {
                             );
 
                             if self.should_exit_tui_input(&line) {
-                                self.print_tui_message(app_state, "Exiting TUI session.");
+                                self.print_tui_message(&app_state, "Exiting TUI session.");
                                 execute_runtime_shutdown(app_state.clone(), "interactive_exit")
                                     .await;
                                 break;
                             }
 
-                            let output = self
+                            let dispatch = self
                                 .handle_tui_input_with_loading(
                                     router,
                                     engine,
-                                    app_state,
+                                    &app_state,
                                     line,
                                     |snapshot| {
                                         let next_document = render_turn_document(snapshot);
@@ -4842,7 +5004,7 @@ impl RuntimeBootstrap {
                                                     content_scroll_top.min(max_scroll_top);
                                             }
                                             self.print_tui_interactive_frame(
-                                                app_state,
+                                                &app_state,
                                                 &current_document,
                                                 "",
                                                 &[],
@@ -4860,14 +5022,43 @@ impl RuntimeBootstrap {
                                     },
                                 )
                                 .await?;
-                            current_document = if is_clear_command {
-                                render_turn_document(&CliTurnOutput {
-                                    primary_text: String::new(),
-                                    events: vec![],
-                                })
-                            } else {
-                                render_turn_document(&output)
-                            };
+                            match dispatch.system_trap.clone() {
+                                Some(SystemTrapAction::NewSession) => {
+                                    let new_session_id =
+                                        self.create_new_session(&mut app_state, engine)?;
+                                    current_document = render_turn_document(&CliTurnOutput {
+                                        primary_text: format!("Started new session {new_session_id}."),
+                                        events: vec![],
+                                    });
+                                }
+                                Some(SystemTrapAction::OpenResumePicker) => {
+                                    resume_picker = Some(self.open_resume_picker(&app_state));
+                                }
+                                Some(SystemTrapAction::ResumeSession(session_id)) => {
+                                    let resumed_id = self
+                                        .switch_to_session_id(&mut app_state, engine, &session_id)?;
+                                    current_document = render_turn_document(&CliTurnOutput {
+                                        primary_text: format!("Resumed session {resumed_id}."),
+                                        events: vec![],
+                                    });
+                                }
+                                Some(SystemTrapAction::RequireReboot) => {
+                                    current_document = render_turn_document(&CliTurnOutput {
+                                        primary_text: "A reboot is required.".into(),
+                                        events: vec![],
+                                    });
+                                }
+                                None => {
+                                    current_document = if is_clear_command {
+                                        render_turn_document(&CliTurnOutput {
+                                            primary_text: String::new(),
+                                            events: vec![],
+                                        })
+                                    } else {
+                                        render_turn_document(&dispatch.output)
+                                    };
+                                }
+                            }
                             if follow_content_tail {
                                 content_scroll_top = usize::MAX;
                             } else {
@@ -4880,16 +5071,25 @@ impl RuntimeBootstrap {
                             active_turn_started_at = None;
                         }
                         KeyCode::Backspace => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             if backspace_input_char(&mut input, &mut cursor_index) {
                                 selected_suggestion = Some(0);
                             }
                         }
                         KeyCode::Delete => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             if delete_input_char(&mut input, cursor_index) {
                                 selected_suggestion = Some(0);
                             }
                         }
                         KeyCode::Tab => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             if let Some(completed) =
                                 apply_selected_suggestion(&suggestions, selected_suggestion)
                             {
@@ -4898,18 +5098,36 @@ impl RuntimeBootstrap {
                             }
                         }
                         KeyCode::Left => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             cursor_index = cursor_index.saturating_sub(1);
                         }
                         KeyCode::Right => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             cursor_index = (cursor_index + 1).min(input.chars().count());
                         }
                         KeyCode::Home => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             cursor_index = 0;
                         }
                         KeyCode::End => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             cursor_index = input.chars().count();
                         }
                         KeyCode::Up => {
+                            if let Some(picker) = resume_picker.as_mut() {
+                                if !picker.sessions.is_empty() {
+                                    picker.selected = picker.selected.saturating_sub(1);
+                                }
+                                continue;
+                            }
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
@@ -4942,6 +5160,13 @@ impl RuntimeBootstrap {
                             }
                         }
                         KeyCode::Down => {
+                            if let Some(picker) = resume_picker.as_mut() {
+                                if !picker.sessions.is_empty() {
+                                    picker.selected = (picker.selected + 1)
+                                        .min(picker.sessions.len().saturating_sub(1));
+                                }
+                                continue;
+                            }
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
@@ -4972,6 +5197,9 @@ impl RuntimeBootstrap {
                             }
                         }
                         KeyCode::PageUp => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             let page = (layout_metrics.content_height / 2).max(1);
                             apply_tui_scroll(
                                 &mut follow_content_tail,
@@ -4983,6 +5211,9 @@ impl RuntimeBootstrap {
                             );
                         }
                         KeyCode::PageDown => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             let page = (layout_metrics.content_height / 2).max(1);
                             apply_tui_scroll(
                                 &mut follow_content_tail,
@@ -4994,6 +5225,9 @@ impl RuntimeBootstrap {
                             );
                         }
                         KeyCode::Char(ch) => {
+                            if resume_picker.is_some() {
+                                continue;
+                            }
                             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                                 insert_input_char(&mut input, &mut cursor_index, ch);
                                 selected_suggestion = Some(0);
@@ -5003,6 +5237,9 @@ impl RuntimeBootstrap {
                     }
                 }
                 Event::Paste(data) => {
+                    if resume_picker.is_some() {
+                        continue;
+                    }
                     pending_exit_gesture = None;
                     insert_input_text(&mut input, &mut cursor_index, &data);
                     selected_suggestion = Some(0);

@@ -96,6 +96,19 @@ pub struct SessionStoreWriteError {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: SessionId,
+    pub parent_session_id: Option<SessionId>,
+    pub cwd: String,
+    pub surface: InteractionSurface,
+    pub session_mode: SessionMode,
+    pub last_turn_at: Option<String>,
+    pub title: Option<String>,
+    pub preview: Option<String>,
+    pub lifecycle_status: SessionLifecycleStatus,
+}
+
 impl SessionStoreWriteError {
     pub fn is_transient(&self) -> bool {
         self.kind == SessionStoreWriteErrorKind::IoTransient
@@ -190,6 +203,7 @@ pub trait SessionStore: Send + Sync {
         session_id: &SessionId,
         level: Option<ModelLevel>,
     ) -> Result<(), SessionStoreWriteError>;
+    fn list_sessions(&self) -> Vec<SessionSummary>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -457,6 +471,38 @@ impl SessionStore for InMemorySessionStore {
         }
         Ok(())
     }
+
+    fn list_sessions(&self) -> Vec<SessionSummary> {
+        let sessions = self
+            .sessions
+            .read()
+            .map(|sessions| sessions.clone())
+            .unwrap_or_default();
+        let lifecycle_statuses = self
+            .lifecycle_statuses
+            .read()
+            .map(|statuses| statuses.clone())
+            .unwrap_or_default();
+        let mut summaries = sessions
+            .into_iter()
+            .map(|(session_id, (snapshot, history))| SessionSummary {
+                session_id,
+                parent_session_id: None,
+                cwd: snapshot.cwd.clone(),
+                surface: snapshot.surface,
+                session_mode: snapshot.session_mode,
+                last_turn_at: snapshot.last_turn_at.clone(),
+                title: None,
+                preview: summarize_history_preview(&history),
+                lifecycle_status: lifecycle_statuses
+                    .get(&snapshot.session_id)
+                    .copied()
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        sort_session_summaries(&mut summaries);
+        summaries
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -467,6 +513,8 @@ pub struct FileBackedSessionStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSessionRecord {
     pub snapshot: SessionSnapshot,
+    #[serde(default)]
+    pub parent_session_id: Option<SessionId>,
     pub history: SessionHistory,
     pub task_list: Option<TaskListSnapshot>,
     pub plan_state: Option<PlanState>,
@@ -476,6 +524,8 @@ pub struct PersistedSessionRecord {
     pub lifecycle_status: SessionLifecycleStatus,
     #[serde(default)]
     pub model_level_override: Option<ModelLevel>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl FileBackedSessionStore {
@@ -495,6 +545,7 @@ impl FileBackedSessionStore {
                 last_turn_at: None,
                 prompt_seed: None,
             },
+            parent_session_id: None,
             history: SessionHistory::default(),
             task_list: None,
             plan_state: None,
@@ -502,6 +553,7 @@ impl FileBackedSessionStore {
             nested_memory_lineage: None,
             lifecycle_status: SessionLifecycleStatus::Active,
             model_level_override: None,
+            title: None,
         }
     }
 
@@ -720,12 +772,16 @@ impl SessionStore for FileBackedSessionStore {
         let nested_memory_lineage = record
             .as_ref()
             .and_then(|record| record.nested_memory_lineage.clone());
-        let model_level_override = record.and_then(|record| record.model_level_override);
+        let model_level_override = record.as_ref().and_then(|record| record.model_level_override);
+        let title = record.as_ref().and_then(|record| record.title.clone());
         let lifecycle_status = self.load_lifecycle_status(&session_id);
         self.write_record(
             &session_id,
             &PersistedSessionRecord {
                 snapshot,
+                parent_session_id: record
+                    .as_ref()
+                    .and_then(|record| record.parent_session_id.clone()),
                 history,
                 task_list,
                 plan_state,
@@ -733,6 +789,7 @@ impl SessionStore for FileBackedSessionStore {
                 nested_memory_lineage,
                 lifecycle_status,
                 model_level_override,
+                title,
             },
         )
     }
@@ -847,13 +904,47 @@ impl SessionStore for FileBackedSessionStore {
             record.model_level_override = level;
         })
     }
+
+    fn list_sessions(&self) -> Vec<SessionSummary> {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut summaries = entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+            })
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .filter_map(|raw| {
+                let record = serde_json::from_str::<PersistedSessionRecord>(&raw).ok()?;
+                Some(SessionSummary {
+                    session_id: record.snapshot.session_id.clone(),
+                    parent_session_id: record.parent_session_id.clone(),
+                    cwd: record.snapshot.cwd.clone(),
+                    surface: record.snapshot.surface,
+                    session_mode: record.snapshot.session_mode,
+                    last_turn_at: record.snapshot.last_turn_at.clone(),
+                    title: record.title.clone(),
+                    preview: summarize_history_preview(&record.history),
+                    lifecycle_status: record.lifecycle_status,
+                })
+            })
+            .collect::<Vec<_>>();
+        sort_session_summaries(&mut summaries);
+        summaries
+    }
 }
 
 fn is_legacy_record(raw: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
         return false;
     };
-    v.get("external_memory_entries").is_none()
+    v.get("parent_session_id").is_none()
+        || v.get("external_memory_entries").is_none()
         || v.get("nested_memory_lineage").is_none()
         || v.get("lifecycle_status").is_none()
 }
@@ -866,4 +957,131 @@ fn sanitize_session_id(session_id: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+fn summarize_history_preview(history: &SessionHistory) -> Option<String> {
+    history
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| entry.message.has_visible_text())
+        .map(|entry| summarize_preview_text(&entry.message.text()))
+        .filter(|preview| !preview.is_empty())
+}
+
+fn summarize_preview_text(text: &str) -> String {
+    let flattened = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = flattened.chars();
+    let preview = chars.by_ref().take(96).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn sort_session_summaries(summaries: &mut [SessionSummary]) {
+    summaries.sort_by(|left, right| {
+        right
+            .last_turn_at
+            .cmp(&left.last_turn_at)
+            .then_with(|| right.session_id.0.cmp(&left.session_id.0))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::message::Message;
+
+    #[test]
+    fn in_memory_session_list_sorts_latest_first_and_preserves_parent_lineage() {
+        let store = InMemorySessionStore::default();
+        store
+            .save(
+                SessionSnapshot {
+                    session_id: SessionId("session-a".into()),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/a".into(),
+                    last_turn_at: Some("100".into()),
+                    prompt_seed: None,
+                },
+                SessionHistory {
+                    entries: vec![SessionHistoryEntry {
+                        message: Message::user("older preview"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    }],
+                },
+            )
+            .expect("save session a");
+        store
+            .save_full_record(
+                &SessionId("session-a".into()),
+                PersistedSessionRecord {
+                    snapshot: SessionSnapshot {
+                        session_id: SessionId("session-a".into()),
+                        surface: InteractionSurface::Cli,
+                        session_mode: SessionMode::Interactive,
+                        cwd: "/tmp/a".into(),
+                        last_turn_at: Some("100".into()),
+                        prompt_seed: None,
+                    },
+                    parent_session_id: Some(SessionId("parent-a".into())),
+                    history: SessionHistory {
+                        entries: vec![SessionHistoryEntry {
+                            message: Message::user("older preview"),
+                            timestamp: None,
+                            tool_refs: Vec::new(),
+                            milestone: None,
+                        }],
+                    },
+                    task_list: None,
+                    plan_state: None,
+                    external_memory_entries: None,
+                    nested_memory_lineage: None,
+                    lifecycle_status: SessionLifecycleStatus::Active,
+                    model_level_override: None,
+                    title: None,
+                },
+            )
+            .expect("save session a full record");
+        store
+            .save(
+                SessionSnapshot {
+                    session_id: SessionId("session-b".into()),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/b".into(),
+                    last_turn_at: Some("200".into()),
+                    prompt_seed: None,
+                },
+                SessionHistory {
+                    entries: vec![SessionHistoryEntry {
+                        message: Message::assistant("newer preview"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    }],
+                },
+            )
+            .expect("save session b");
+
+        let sessions = store.list_sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id.0, "session-b");
+        assert_eq!(sessions[1].session_id.0, "session-a");
+        assert_eq!(
+            sessions[1].parent_session_id.as_ref().map(|id| id.0.as_str()),
+            Some("parent-a")
+        );
+        assert_eq!(sessions[0].preview.as_deref(), Some("newer preview"));
+    }
 }

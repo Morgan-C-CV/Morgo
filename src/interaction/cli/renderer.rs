@@ -882,6 +882,7 @@ mod tests {
                 }),
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta { text: "o".into() }),
             ],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -923,6 +924,7 @@ mod tests {
                     detail: Some(long_detail),
                 }),
             ],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -955,6 +957,7 @@ mod tests {
                     input: r#"{"pattern":"delta|tool use","path":"/tmp/reference"}"#.into(),
                 }),
             ],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -979,6 +982,7 @@ mod tests {
                     input: r#"{"pattern":"export function createBridgeLogger|function renderConnectingLine|function renderStatusLine","path":"src"}"#.into(),
                 }),
             ],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -1009,6 +1013,7 @@ mod tests {
                     "path={path_text}\nreplacements=1\nreplace_all=false\nold_text=    println!(\"todo\");\nnew_text=    println!(\"old\");"
                 )),
             })],
+            system_trap: None,
         };
 
         let rendered = render_turn_tui_output(&turn);
@@ -1038,6 +1043,7 @@ mod tests {
                 retryable: None,
                 surface_visible: None,
             })],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -1062,6 +1068,7 @@ mod tests {
             ]
             .join("\n"),
             events: vec![],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
@@ -1090,6 +1097,7 @@ mod tests {
                 approval_kind: Some("tool_permission".into()),
                 escalation_reasons: vec!["shell_operator.pipe".into()],
             })],
+            system_trap: None,
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
