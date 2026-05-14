@@ -789,13 +789,13 @@ fn render_document_to_tui_text(document: &RenderDocument) -> String {
 fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
     let mut sections = Vec::new();
 
-    if !screen.main.is_empty() {
-        sections.push(screen.main.join("\n"));
-    }
-
     let activity_sections = render_activity_sections(screen);
     if !activity_sections.is_empty() {
         sections.extend(activity_sections);
+    }
+
+    if !screen.main.is_empty() {
+        sections.push(screen.main.join("\n"));
     }
 
     let boxed_sections = render_tui_boxed_sections(screen);
@@ -955,7 +955,6 @@ mod tests {
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("final answer"));
-        assert!(rendered.starts_with("final answer"));
         assert!(!rendered.contains("[delta]"));
         assert!(!rendered.contains("  morg"));
         assert!(!rendered.contains("  o"));
@@ -1028,6 +1027,34 @@ mod tests {
         assert!(rendered.contains("READ renderer.rs"));
         assert!(rendered.contains("SEARCH delta|tool use in reference"));
         assert_eq!(rendered.matches("READ renderer.rs").count(), 1);
+    }
+
+    #[test]
+    fn tui_places_activity_above_final_answer_without_duplication() {
+        let turn = CliTurnOutput {
+            primary_text: "### 方案 B：直接给你一个“改造优先级清单”".into(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr","path":"src"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"export function createBridgeLogger|function renderConnectingLine|function renderStatusLine","path":"src"}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let activity_pos = rendered.find("[Activity]").expect("activity section");
+        let answer_pos = rendered
+            .find("### 方案 B：直接给你一个“改造优先级清单”")
+            .expect("final answer text");
+        assert!(activity_pos < answer_pos, "{rendered}");
+        assert_eq!(rendered.matches("[Activity]").count(), 1, "{rendered}");
+        assert!(rendered.contains(
+            "SEARCH createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr in src"
+        ));
     }
 
     #[test]
