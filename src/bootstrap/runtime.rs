@@ -474,29 +474,48 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
                 .metadata()
                 .into_iter()
                 .filter(|command| !command.is_hidden && command_match_score(command, &query) > 0)
-                .map(|command| TuiSuggestion {
-                    replacement: format!("/{} ", command.name),
-                    label: format!("/{}", command.name),
-                    detail: command.description,
-                    accent_color: match command.source {
-                        CommandSource::Builtin => "36",
-                        CommandSource::Coding => "32",
-                        CommandSource::Skill => "35",
-                        CommandSource::Mcp => "34",
-                        CommandSource::Plugin => "33",
-                    },
-                    submit_on_enter: false,
+                .map(|command| {
+                    let rank = command_match_score(&command, &query);
+                    (
+                        rank,
+                        command.name.clone(),
+                        TuiSuggestion {
+                            replacement: format!("/{} ", command.name),
+                            label: format!("/{}", command.name),
+                            detail: command.description,
+                            accent_color: match command.source {
+                                CommandSource::Builtin => "36",
+                                CommandSource::Coding => "32",
+                                CommandSource::Skill => "35",
+                                CommandSource::Mcp => "34",
+                                CommandSource::Plugin => "33",
+                            },
+                            submit_on_enter: false,
+                        },
+                    )
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    suggestions.extend(runtime_only_tui_suggestions(&query));
+    suggestions.extend(
+        runtime_only_tui_suggestions(&query)
+            .into_iter()
+            .map(|suggestion| {
+                let rank = suggestion_match_score(&suggestion, &query);
+                let label = suggestion.label.clone();
+                (rank, label, suggestion)
+            }),
+    );
     suggestions.sort_by(|left, right| {
-        suggestion_match_score(right, &query)
-            .cmp(&suggestion_match_score(left, &query))
-            .then_with(|| left.label.cmp(&right.label))
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
     });
     suggestions
+        .into_iter()
+        .map(|(_, _, suggestion)| suggestion)
+        .collect()
 }
 
 fn runtime_only_tui_suggestions(query: &str) -> Vec<TuiSuggestion> {
@@ -1387,24 +1406,40 @@ fn suggestion_match_score(suggestion: &TuiSuggestion, query: &str) -> i32 {
 
 fn default_command_priority(command: &CommandMetadata) -> i32 {
     match command.name.as_str() {
-        "help" => 1000,
-        "status" => 950,
-        "model" => 900,
-        "permissions" => 850,
-        "plan" => 800,
-        "resume" => 780,
-        "clear" => 760,
-        "compact" => 740,
-        "context" => 720,
-        "diff" => 700,
-        "tasks" => 680,
-        "config" => 660,
+        // First-tier: orientation and immediate session controls.
+        "help" => 2000,
+        "status" => 1950,
+        "clear" => 1900,
+        "resume" => 1850,
+        "session" => 1800,
+        // Second-tier: core coding workflow and session shaping.
+        "model" => 1750,
+        "plan" => 1700,
+        "tasks" => 1650,
+        "compact" => 1600,
+        "diff" => 1550,
+        "review" => 1500,
+        "context" => 1450,
+        "commit" => 1400,
+        // Third-tier: safety and configuration controls.
+        "permissions" => 1350,
+        "config" => 1300,
+        "cost" => 1250,
+        "doctor" => 1200,
+        // Fourth-tier: advanced orchestration and integrations.
+        "swarm" => 1150,
+        "plugins" => 1100,
+        "skills" => 1050,
+        "mcp" => 1000,
+        // Fifth-tier: niche/system toggles.
+        "computer" => 900,
+        "LisM" | "UM" => 850,
         _ => match command.source {
-            CommandSource::Builtin => 500,
-            CommandSource::Coding => 450,
-            CommandSource::Skill => 350,
-            CommandSource::Mcp => 300,
-            CommandSource::Plugin => 250,
+            CommandSource::Builtin => 700,
+            CommandSource::Coding => 650,
+            CommandSource::Skill => 550,
+            CommandSource::Mcp => 500,
+            CommandSource::Plugin => 450,
         },
     }
 }
@@ -3218,6 +3253,7 @@ mod tui_output_tests {
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
+    use crate::command::coding::register_coding_commands;
     use crate::command::registry::CommandRegistry;
     use crate::core::message::Message;
     use crate::cost::tracker::CostTracker;
@@ -4027,7 +4063,9 @@ mod tui_output_tests {
             runtime_role: RuntimeRole::Coordinator,
             worker_role: None,
             permission_context: ToolPermissionContext::new(PermissionMode::Default),
-            command_registry: Some(Arc::new(register_builtin_commands(CommandRegistry::new()))),
+            command_registry: Some(Arc::new(register_coding_commands(
+                register_builtin_commands(CommandRegistry::new()),
+            ))),
             runtime_tool_registry: None,
             skill_registry: None,
             mcp_runtime: None,
@@ -4079,6 +4117,25 @@ mod tui_output_tests {
         let suggestions = super::tui_command_suggestions(&app_state, "/");
 
         assert!(suggestions.len() > 8);
+    }
+
+    #[test]
+    fn tui_root_command_suggestions_prioritize_common_workflow_commands() {
+        let app_state = test_app_state();
+        let suggestions = super::tui_command_suggestions(&app_state, "/");
+        let labels = suggestions
+            .iter()
+            .take(10)
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels[0], "/help");
+        assert_eq!(labels[1], "/status");
+        assert!(labels[..5].contains(&"/clear"));
+        assert!(labels[..5].contains(&"/resume"));
+        assert!(labels[..8].contains(&"/model"));
+        assert!(labels[..8].contains(&"/plan"));
+        assert!(labels[..10].contains(&"/tasks"));
     }
 
     #[test]
