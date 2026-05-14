@@ -1725,6 +1725,83 @@ fn colorize_ansi(text: &str, code: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TuiInputPalette {
+    background_code: &'static str,
+    text_code: &'static str,
+}
+
+fn tui_input_palette() -> TuiInputPalette {
+    tui_input_palette_for_background_code(
+        std::env::var("COLORFGBG")
+            .ok()
+            .and_then(|value| tui_colorfgbg_background_code(&value)),
+    )
+}
+
+fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInputPalette {
+    if background_code
+        .map(tui_background_code_is_light)
+        .unwrap_or(false)
+    {
+        TuiInputPalette {
+            background_code: "48;5;252",
+            text_code: "30",
+        }
+    } else {
+        TuiInputPalette {
+            background_code: "48;5;238",
+            text_code: "97",
+        }
+    }
+}
+
+fn tui_colorfgbg_background_code(value: &str) -> Option<u8> {
+    value
+        .split(';')
+        .filter_map(|part| part.trim().parse::<u8>().ok())
+        .next_back()
+}
+
+fn tui_background_code_is_light(code: u8) -> bool {
+    matches!(code, 7 | 15) || (code >= 10 && code <= 14)
+}
+
+fn render_tui_input_text_line(
+    prefix: &str,
+    line: &str,
+    padding: &str,
+    input_palette: TuiInputPalette,
+) -> String {
+    format!(
+        "\x1b[{};{}m\x1b[1;36m{}\x1b[{};{}m {}{}\x1b[0m",
+        input_palette.background_code,
+        input_palette.text_code,
+        prefix,
+        input_palette.background_code,
+        input_palette.text_code,
+        line,
+        padding
+    )
+}
+
+fn render_tui_content_line_with_palette(
+    message_line: &str,
+    width: usize,
+    input_palette: TuiInputPalette,
+) -> String {
+    let visible_width = UnicodeWidthStr::width(message_line);
+    let padding = " ".repeat(width.saturating_sub(visible_width));
+    if let Some(rest) = message_line.strip_prefix("> ") {
+        render_tui_input_text_line(">", rest, &padding, input_palette)
+    } else {
+        format!(
+            "\x1b[{};{}m{message_line}{padding}\x1b[0m",
+            input_palette.background_code, input_palette.text_code
+        )
+    }
+}
+
 fn tui_user_message_lines(text: &str) -> Vec<String> {
     text.lines()
         .enumerate()
@@ -2331,6 +2408,7 @@ fn render_fixed_tui_layout(
     let viewport = tui_input_viewport(input, cursor_index, width);
     let status_line = status_line_for_tui(turn_status, width);
     let model_cwd_line = format_tui_model_and_cwd(app_state);
+    let input_palette = tui_input_palette();
     let content_width = width;
     let cursor_row = metrics
         .input_row
@@ -2372,16 +2450,13 @@ fn render_fixed_tui_layout(
             .get(row_offset)
             .cloned()
             .unwrap_or_default();
-        let prefix = if row_offset == 0 {
-            colorize_ansi(">", "1;36")
-        } else {
-            " ".to_string()
-        };
+        let prefix = if row_offset == 0 { ">" } else { " " };
         let line_width = UnicodeWidthStr::width(line.as_str());
         let padding = " ".repeat(content_width.saturating_sub(2 + line_width));
         frame.push_str(&format!(
-            "\x1b[{};1H\x1b[2K\x1b[48;5;238;97m{} {}{}\x1b[0m",
-            row, prefix, line, padding
+            "\x1b[{};1H\x1b[2K{}",
+            row,
+            render_tui_input_text_line(prefix, &line, &padding, input_palette)
         ));
     }
     for (index, line) in suggestion_lines.iter().enumerate() {
@@ -2408,13 +2483,7 @@ fn render_tui_content_line(line: &str, width: usize) -> String {
     let Some(message_line) = line.strip_prefix(TUI_USER_MESSAGE_MARKER) else {
         return line.to_string();
     };
-    let visible_width = UnicodeWidthStr::width(message_line);
-    let padding = " ".repeat(width.saturating_sub(visible_width));
-    if let Some(rest) = message_line.strip_prefix("> ") {
-        format!("\x1b[48;5;238m\x1b[1;36m>\x1b[97m {rest}{padding}\x1b[0m")
-    } else {
-        format!("\x1b[48;5;238;97m{message_line}{padding}\x1b[0m")
-    }
+    render_tui_content_line_with_palette(message_line, width, tui_input_palette())
 }
 
 fn max_tui_content_scroll_offset(content_line_count: usize, content_height: usize) -> usize {
@@ -2763,6 +2832,45 @@ mod tui_output_tests {
     }
 
     #[test]
+    fn tui_colorfgbg_background_code_uses_last_segment() {
+        assert_eq!(super::tui_colorfgbg_background_code("15;0"), Some(0));
+        assert_eq!(super::tui_colorfgbg_background_code("0;15;7"), Some(7));
+        assert_eq!(super::tui_colorfgbg_background_code("bad"), None);
+    }
+
+    #[test]
+    fn tui_light_background_detection_matches_common_colorfgbg_values() {
+        assert!(super::tui_background_code_is_light(7));
+        assert!(super::tui_background_code_is_light(15));
+        assert!(super::tui_background_code_is_light(10));
+        assert!(!super::tui_background_code_is_light(0));
+        assert!(!super::tui_background_code_is_light(8));
+    }
+
+    #[test]
+    fn tui_input_palette_uses_light_gray_on_light_backgrounds() {
+        let light = super::tui_input_palette_for_background_code(Some(15));
+        let dark = super::tui_input_palette_for_background_code(Some(0));
+        let fallback = super::tui_input_palette_for_background_code(None);
+
+        assert_eq!(
+            light,
+            super::TuiInputPalette {
+                background_code: "48;5;252",
+                text_code: "30",
+            }
+        );
+        assert_eq!(
+            dark,
+            super::TuiInputPalette {
+                background_code: "48;5;238",
+                text_code: "97",
+            }
+        );
+        assert_eq!(fallback, dark);
+    }
+
+    #[test]
     fn tui_context_document_uses_full_session_history_for_transcript() {
         let mut app_state = test_app_state();
         app_state.history = Some(crate::history::session::SessionHistory {
@@ -2836,6 +2944,32 @@ mod tui_output_tests {
         assert!(rendered.contains("> older user message"));
         assert!(!rendered.contains("User:"));
         assert!(rendered.contains("older assistant reply"));
+    }
+
+    #[test]
+    fn tui_input_line_uses_light_palette_on_light_backgrounds() {
+        let rendered = super::render_tui_input_text_line(
+            ">",
+            "older user message",
+            "",
+            super::tui_input_palette_for_background_code(Some(15)),
+        );
+
+        assert!(rendered.contains("\x1b[48;5;252;30m"));
+        assert!(rendered.contains("\x1b[1;36m>"));
+        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
+    }
+
+    #[test]
+    fn tui_transcript_user_messages_use_light_palette_on_light_backgrounds() {
+        let rendered = super::render_tui_content_line_with_palette(
+            "> older user message",
+            40,
+            super::tui_input_palette_for_background_code(Some(15)),
+        );
+
+        assert!(rendered.contains("\x1b[48;5;252;30m"));
+        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
     }
 
     #[test]
