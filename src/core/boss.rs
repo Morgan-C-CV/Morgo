@@ -354,6 +354,13 @@ fn verification_gap_repair_can_continue(
             || has_only_verification_evidence_gap(step))
 }
 
+fn verification_gap_repair_dispatch_allowed(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
+    verification_gap_repair_can_continue(step, metadata) && step.attempt_count < step.retry_budget
+}
+
 fn step_has_blocking_terminal_failure(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
@@ -8783,7 +8790,7 @@ impl BossCoordinator {
                 .iter()
                 .find(|step| {
                     step.status.is_terminal_failure()
-                        && verification_gap_repair_can_continue(
+                        && verification_gap_repair_dispatch_allowed(
                             step,
                             routed_step_metadata_snapshot.get(&step.id),
                         )
@@ -10159,6 +10166,11 @@ impl BossCoordinator {
         let verification_first_short_form = is_verification_first_assignment_contract(&contract);
         let verification_first_task_message =
             verification_first_short_form.then(|| build_verification_first_task_message(&contract));
+        let refresh_task = needs_refresh.then(|| {
+            verification_first_task_message
+                .clone()
+                .unwrap_or_else(|| assemble_brief_prompt(&contract.brief, &contract.state_frame))
+        });
         let message = if needs_refresh {
             format!(
                 "Boss assignment refresh for step {step_id}\n\
@@ -10167,12 +10179,7 @@ refresh_reason: {}\n\n{}",
                 refresh_reason
                     .clone()
                     .unwrap_or_else(|| "assignment contract changed".into()),
-                verification_first_task_message
-                    .clone()
-                    .unwrap_or_else(|| assemble_brief_prompt(
-                        &contract.brief,
-                        &contract.state_frame
-                    )),
+                refresh_task.clone().unwrap_or_default(),
             )
         } else {
             verification_first_task_message.clone().unwrap_or_else(|| {
@@ -10206,6 +10213,7 @@ refresh_reason: {}\n\n{}",
             "assignment_fingerprint": assignment_fingerprint,
             "stale_brief_action": if needs_refresh { "refresh" } else { "reuse" },
             "refresh_reason": refresh_reason,
+            "refresh_task": refresh_task,
             "continuation_payload": continuation_payload,
             "executor_b_stage_memory": executor_b_stage_memory,
             "shared_step_memory": contract.shared_step_memory.clone(),
@@ -21363,6 +21371,96 @@ mod tests {
                 .unwrap_or_default()
                 .contains("\"role\":\"verify\"")
         );
+    }
+
+    #[tokio::test]
+    async fn verification_repair_continuation_stays_failed_when_retry_budget_is_exhausted() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks, coordinator.clone());
+        let target_path = temp_report_path("verification-gap-terminal");
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(8);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 8,
+                    description: "verify report".into(),
+                    objective: Some(format!("verify {target_path}")),
+                    acceptance: vec![format!("verify {target_path}")],
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Failed,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-8".into()),
+                    attempt_count: 3,
+                    retry_budget: 3,
+                    last_review_summary: Some("verification evidence missing".into()),
+                    last_correction: Some("replan required: missing verification evidence".into()),
+                    stage_execution_contract: StageExecutionContract {
+                        declared_artifacts: vec![DeclaredArtifactContract {
+                            ref_id: "artifact:step8:0".into(),
+                            path: target_path.clone(),
+                            kind: "file".into(),
+                            required_actions: vec!["write_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        verifications: vec![VerificationContract {
+                            target_ref: "artifact:step8:0".into(),
+                            target_path: Some(target_path.clone()),
+                            required_actions: vec!["verify_artifact".into()],
+                            required_evidence: vec![target_path.clone()],
+                        }],
+                        required_actions: vec!["verify_artifact".into()],
+                        required_evidence: vec![target_path.clone()],
+                        ..StageExecutionContract::default()
+                    },
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: Some(ExecutorBStageMemory {
+                        continuity: Some(ExecutorBStageMemoryContinuity::VerificationFirstIsolated),
+                        ..ExecutorBStageMemory::default()
+                    }),
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+                }],
+                ..BossPlan::default()
+            });
+        }
+        {
+            let mut metadata = coordinator.routed_step_metadata.write().await;
+            metadata.insert(
+                8,
+                BossStepRoutedMetadata {
+                    step_failure_classification: Some(
+                        StepFailureClassification::VerificationRepairContinuation,
+                    ),
+                    completion_evidence_status: Some("missing_verification_evidence".into()),
+                    completion_evidence_gaps: vec![CompletionEvidenceGap {
+                        target_ref: "artifact:step8:0".into(),
+                        target_path: Some(target_path.clone()),
+                        missing_artifact_evidence: false,
+                        missing_test_evidence: false,
+                        missing_verification_evidence: true,
+                        recommended_action: "verify_artifact".into(),
+                    }],
+                    ..BossStepRoutedMetadata::default()
+                },
+            );
+        }
+
+        let message = coordinator.advance_plan(&app_state).await.expect("advance");
+        assert!(message.is_some());
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Failed);
+        assert!(!step.completed);
+        assert_eq!(coordinator.get_stage().await, BossStage::Documentation);
     }
 
     #[tokio::test]

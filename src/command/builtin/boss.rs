@@ -260,6 +260,7 @@ fn boss_plan_path(cwd: &Path) -> std::path::PathBuf {
 fn render_boss_help() -> String {
     [
         "Usage: /boss <objective>",
+        "       /boss start <objective>",
         "       /boss status",
         "       /boss report",
         "       /boss resume",
