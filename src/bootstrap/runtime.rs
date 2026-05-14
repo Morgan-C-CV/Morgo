@@ -2082,6 +2082,41 @@ fn build_tui_rendered_line(raw_line: &str, width: usize) -> TuiRenderedLine {
     }
 }
 
+fn build_tui_rendered_lines(raw_line: &str, width: usize) -> Vec<TuiRenderedLine> {
+    let Some(message_line) = raw_line.strip_prefix(TUI_USER_MESSAGE_MARKER) else {
+        return vec![build_tui_rendered_line(raw_line, width)];
+    };
+
+    let (first_prefix, continuation_prefix, content) =
+        if let Some(rest) = message_line.strip_prefix("> ") {
+            ("> ", "  ", rest)
+        } else if let Some(rest) = message_line.strip_prefix("  ") {
+            ("  ", "  ", rest)
+        } else {
+            return vec![build_tui_rendered_line(raw_line, width)];
+        };
+
+    let available_cols = width.saturating_sub(2).max(1);
+    let layout = wrap_tui_input_lines(content, available_cols);
+
+    layout
+        .lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let prefix = if index == 0 {
+                first_prefix
+            } else {
+                continuation_prefix
+            };
+            build_tui_rendered_line(
+                &format!("{TUI_USER_MESSAGE_MARKER}{prefix}{}", line.text),
+                width,
+            )
+        })
+        .collect()
+}
+
 fn build_tui_rendered_content(
     screen: &crate::interaction::cli::renderer::TuiScreen,
     width: usize,
@@ -2093,7 +2128,7 @@ fn build_tui_rendered_content(
     TuiRenderedContent {
         lines: content
             .lines()
-            .map(|line| build_tui_rendered_line(line, width))
+            .flat_map(|line| build_tui_rendered_lines(line, width))
             .collect(),
     }
 }
@@ -3071,6 +3106,38 @@ mod tui_output_tests {
         assert!(rendered.contains("> older user message"));
         assert!(!rendered.contains("User:"));
         assert!(rendered.contains("older assistant reply"));
+    }
+
+    #[test]
+    fn tui_transcript_user_messages_wrap_across_multiple_lines() {
+        let line = format!(
+            "{}> this is a long sent message that should wrap",
+            super::TUI_USER_MESSAGE_MARKER
+        );
+        let rendered = super::build_tui_rendered_lines(&line, 14);
+        let content = super::TuiRenderedContent {
+            lines: rendered.clone(),
+        };
+        let plain = rendered
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                super::render_tui_rendered_line(
+                    line,
+                    index,
+                    &TuiSelectionState::default(),
+                    &content,
+                )
+            })
+            .map(|line| strip_ansi_for_test(&line))
+            .collect::<Vec<_>>();
+
+        assert!(plain.len() > 1, "{plain:?}");
+        assert!(plain[0].starts_with("> "));
+        assert!(plain[1].starts_with("  "));
+        assert!(plain.iter().any(|line| line.contains("sent")), "{plain:?}");
+        assert!(plain.iter().any(|line| line.contains("sho")), "{plain:?}");
+        assert!(plain.iter().any(|line| line.contains("wrap")), "{plain:?}");
     }
 
     #[test]
