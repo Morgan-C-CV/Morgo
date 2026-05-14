@@ -1,6 +1,6 @@
 use crate::core::context::QueryContext;
 use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
-use crate::core::message::Message;
+use crate::core::message::{Message, MessageVisibility};
 use crate::hook::executor::{HookDecision, run_hook};
 use crate::hook::registry::HookEvent;
 use crate::service::api::streaming::{
@@ -20,6 +20,18 @@ use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 const WORKER_MAILBOX_IDLE_TIMEOUT_MS: u64 = 2_000;
+
+fn tool_scaffold_assistant(content: impl Into<String>) -> Message {
+    Message::assistant_with_visibility(content, MessageVisibility::ToolScaffold)
+}
+
+fn tool_scaffold_user(content: impl Into<String>) -> Message {
+    Message::user_with_visibility(content, MessageVisibility::ToolScaffold)
+}
+
+fn runtime_meta_assistant(content: impl Into<String>) -> Message {
+    Message::assistant_with_visibility(content, MessageVisibility::RuntimeMeta)
+}
 
 #[derive(Debug, Clone)]
 struct PreparedTurn {
@@ -1056,7 +1068,7 @@ async fn execute_tool_phase(
         message: reason, ..
     } = hook_permission_decision
     {
-        let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
+        let denial = tool_scaffold_assistant(format!("tool {tool_name} denied by hook: {reason}"));
         let permission_denied_hook = run_hook(
             &context.hook_registry,
             HookEvent::PermissionDenied {
@@ -1087,7 +1099,7 @@ async fn execute_tool_phase(
         };
     }
     if let HookDecision::Deny(reason) = pre_tool_hook.decision {
-        let denial = Message::assistant(format!("tool {tool_name} denied by hook: {reason}"));
+        let denial = tool_scaffold_assistant(format!("tool {tool_name} denied by hook: {reason}"));
         let permission_denied_hook = run_hook(
             &context.hook_registry,
             HookEvent::PermissionDenied {
@@ -1137,7 +1149,7 @@ async fn execute_tool_phase(
         message: reason, ..
     } = requested_permission_decision
     {
-        let denial = Message::assistant(format!(
+        let denial = tool_scaffold_assistant(format!(
             "tool {tool_name} denied before execution: {reason}"
         ));
         let permission_denied_hook = run_hook(
@@ -1243,7 +1255,7 @@ async fn execute_tool_phase(
                                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                                 state.messages.push(message);
                             }
-                            let tool_message = Message::assistant(format!(
+                            let tool_message = tool_scaffold_assistant(format!(
                                 "tool {tool_name} result: {} ({} chars)",
                                 report.summary,
                                 text.chars().count()
@@ -1276,7 +1288,7 @@ async fn execute_tool_phase(
                                 state: state.clone(),
                                 events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(follow_up),
+                                    tool_scaffold_user(follow_up),
                                     Continue::ToolUseFollowUp,
                                 ),
                             }
@@ -1305,11 +1317,11 @@ async fn execute_tool_phase(
                             }
                             engine_events.push(tool_notice_event(&record));
                             apply_tool_report_context(state, &report);
-                            let denial = Message::assistant(format!(
+                            let denial = tool_scaffold_assistant(format!(
                                 "tool {tool_name} denied: {}",
                                 report_detail_or_summary(&report)
                             ));
-                            let missing_tool_result = Message::assistant(format!(
+                            let missing_tool_result = tool_scaffold_assistant(format!(
                                 "tool {tool_name} result missing; synthesized denial result preserved"
                             ));
                             engine_events.push(EngineEvent::MessageCommitted(denial.clone()));
@@ -1321,7 +1333,7 @@ async fn execute_tool_phase(
                                 state: state.clone(),
                                 events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(format!(
+                                    tool_scaffold_user(format!(
                                         "tool result for {tool_name}: denied: {reason}"
                                     )),
                                     Continue::ToolUseFollowUp,
@@ -1384,7 +1396,7 @@ async fn execute_tool_phase(
                                 report_modifier: record.report_modifier.clone(),
                             });
                             apply_tool_report_context(state, &report);
-                            let approval_message = Message::assistant(format!(
+                            let approval_message = runtime_meta_assistant(format!(
                                 "approval required for {tool_name}: {}",
                                 pending_detail
                                     .clone()
@@ -1405,7 +1417,7 @@ async fn execute_tool_phase(
                         crate::tool::definition::ToolResult::Interrupted(_reason) => {
                             engine_events.push(tool_notice_event(&record));
                             apply_tool_report_context(state, &report);
-                            let interrupted = Message::assistant(format!(
+                            let interrupted = tool_scaffold_assistant(format!(
                                 "tool {tool_name} interrupted: {}",
                                 report_detail_or_summary(&report)
                             ));
@@ -1415,7 +1427,7 @@ async fn execute_tool_phase(
                                 state: state.clone(),
                                 events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(format!(
+                                    tool_scaffold_user(format!(
                                         "tool result for {tool_name}: interrupted: {}",
                                         report_detail_or_summary(&report)
                                     )),
@@ -1430,7 +1442,7 @@ async fn execute_tool_phase(
                                 state: state.clone(),
                                 events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(format!(
+                                    tool_scaffold_user(format!(
                                         "tool progress for {tool_name}: {}",
                                         report.summary
                                     )),
@@ -1441,7 +1453,7 @@ async fn execute_tool_phase(
                         crate::tool::definition::ToolResult::ResultTooLarge(_reason) => {
                             engine_events.push(tool_notice_event(&record));
                             apply_tool_report_context(state, &report);
-                            let oversized = Message::assistant(format!(
+                            let oversized = tool_scaffold_assistant(format!(
                                 "tool {tool_name} result too large: {}",
                                 report_detail_or_summary(&report)
                             ));
@@ -1451,7 +1463,7 @@ async fn execute_tool_phase(
                                 state: state.clone(),
                                 events: engine_events.into_events(),
                                 decision: TurnDecision::ContinueWith(
-                                    Message::user(format!(
+                                    tool_scaffold_user(format!(
                                         "tool result for {tool_name}: result too large: {}",
                                         report_detail_or_summary(&report)
                                     )),
@@ -1493,8 +1505,8 @@ async fn execute_tool_phase(
                 code: None,
                 service_failure: None,
             });
-            let failure = Message::assistant(format!("tool {tool_name} failed: {error}"));
-            let missing_tool_result = Message::assistant(format!(
+            let failure = tool_scaffold_assistant(format!("tool {tool_name} failed: {error}"));
+            let missing_tool_result = tool_scaffold_assistant(format!(
                 "tool {tool_name} result missing; synthesized failure result preserved"
             ));
             engine_events.push(EngineEvent::MessageCommitted(failure.clone()));
@@ -1505,7 +1517,7 @@ async fn execute_tool_phase(
                 state: state.clone(),
                 events: engine_events.into_events(),
                 decision: TurnDecision::ContinueWith(
-                    Message::user(format!("tool result for {tool_name}: failure: {error}")),
+                    tool_scaffold_user(format!("tool result for {tool_name}: failure: {error}")),
                     Continue::ToolUseFollowUp,
                 ),
             }
@@ -1742,15 +1754,9 @@ fn is_empty_discovery_record(record: &ToolExecutionRecord) -> bool {
 fn truncated_read_continuation_hint(prior_summary: Option<&str>) -> Option<String> {
     let summary = prior_summary?.trim();
     let path = extract_truncation_field(summary, "path=")?;
-    let offset = extract_truncation_field(summary, "offset=")?
-        .parse::<usize>()
-        .ok()?;
-    let returned_chars = extract_truncation_field(summary, "returned_chars=")?
-        .parse::<usize>()
-        .ok()?;
-    let total_chars = extract_truncation_field(summary, "total_chars=")?
-        .parse::<usize>()
-        .ok()?;
+    let offset = extract_truncation_usize(summary, "offset=")?;
+    let returned_chars = extract_truncation_usize(summary, "returned_chars=")?;
+    let total_chars = extract_truncation_usize(summary, "total_chars=")?;
     let next_offset = offset.saturating_add(returned_chars);
     if next_offset >= total_chars {
         return None;
@@ -1767,6 +1773,15 @@ fn extract_truncation_field<'a>(value: &'a str, key: &str) -> Option<&'a str> {
     let end = tail.find([',', ']']).unwrap_or(tail.len());
     let field = tail[..end].trim().trim_matches('.');
     (!field.is_empty()).then_some(field)
+}
+
+fn extract_truncation_usize(value: &str, key: &str) -> Option<usize> {
+    let raw = extract_truncation_field(value, key)?;
+    let digits = raw
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then_some(digits.parse::<usize>().ok())?
 }
 
 fn should_lock_prompt_only_discovery(state: &LoopState, report: &ToolExecutionReport) -> bool {
@@ -1864,14 +1879,14 @@ async fn execute_tool_batch_phase(
     let mut outcomes = match tool_result {
         Ok(outcomes) => outcomes,
         Err(error) => {
-            let failure = Message::assistant(format!("tool batch failed: {error}"));
+            let failure = tool_scaffold_assistant(format!("tool batch failed: {error}"));
             engine_events.push(EngineEvent::MessageCommitted(failure.clone()));
             state.messages.push(failure);
             return TurnOutcome {
                 state: state.clone(),
                 events: engine_events.into_events(),
                 decision: TurnDecision::ContinueWith(
-                    Message::user(format!("tool batch result: failure: {error}")),
+                    tool_scaffold_user(format!("tool batch result: failure: {error}")),
                     Continue::ToolUseFollowUp,
                 ),
             };
@@ -1902,7 +1917,7 @@ async fn execute_tool_batch_phase(
                     &text,
                     &outcome.record,
                 ));
-                let message = Message::assistant(format!(
+                let message = tool_scaffold_assistant(format!(
                     "tool {} result: {} ({} chars)",
                     outcome.tool_name,
                     outcome.record.summary,
@@ -1977,7 +1992,7 @@ async fn execute_tool_batch_phase(
                     report_modifier: outcome.record.report_modifier.clone(),
                 });
                 apply_tool_report_context(state, &report);
-                let approval_message = Message::assistant(format!(
+                let approval_message = runtime_meta_assistant(format!(
                     "approval required for {tool_name}: {}",
                     pending_detail.unwrap_or(pending_summary)
                 ));
@@ -1990,14 +2005,14 @@ async fn execute_tool_batch_phase(
                 };
             }
             crate::tool::definition::ToolResult::Denied(reason) => {
-                let message = Message::assistant(format!(
+                let message = tool_scaffold_assistant(format!(
                     "tool {} denied: {}",
                     outcome.tool_name,
                     record_detail_or_summary(&outcome.record)
                 ));
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);
-                let follow_up = Message::assistant(format!(
+                let follow_up = tool_scaffold_assistant(format!(
                     "tool {} result missing; synthesized denial result preserved: {reason}",
                     outcome.tool_name
                 ));
@@ -2005,14 +2020,14 @@ async fn execute_tool_batch_phase(
                 state.messages.push(follow_up);
             }
             crate::tool::definition::ToolResult::Interrupted(reason) => {
-                let message = Message::assistant(format!(
+                let message = tool_scaffold_assistant(format!(
                     "tool {} interrupted: {}",
                     outcome.tool_name,
                     record_detail_or_summary(&outcome.record)
                 ));
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);
-                let follow_up = Message::assistant(format!(
+                let follow_up = tool_scaffold_assistant(format!(
                     "tool {} structured failure preserved: {reason}",
                     outcome.tool_name
                 ));
@@ -2020,20 +2035,22 @@ async fn execute_tool_batch_phase(
                 state.messages.push(follow_up);
             }
             crate::tool::definition::ToolResult::Progress(progress) => {
-                let message =
-                    Message::assistant(format!("tool {} progress: {progress}", outcome.tool_name));
+                let message = tool_scaffold_assistant(format!(
+                    "tool {} progress: {progress}",
+                    outcome.tool_name
+                ));
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);
             }
             crate::tool::definition::ToolResult::ResultTooLarge(reason) => {
-                let message = Message::assistant(format!(
+                let message = tool_scaffold_assistant(format!(
                     "tool {} result too large: {}",
                     outcome.tool_name,
                     record_detail_or_summary(&outcome.record)
                 ));
                 engine_events.push(EngineEvent::MessageCommitted(message.clone()));
                 state.messages.push(message);
-                let follow_up = Message::assistant(format!(
+                let follow_up = tool_scaffold_assistant(format!(
                     "tool {} oversized result preserved: {reason}",
                     outcome.tool_name
                 ));
@@ -2051,7 +2068,7 @@ async fn execute_tool_batch_phase(
         state: state.clone(),
         events: engine_events.into_events(),
         decision: TurnDecision::ContinueWith(
-            Message::user(batch_follow_up_message(state, &report)),
+            tool_scaffold_user(batch_follow_up_message(state, &report)),
             Continue::ToolUseFollowUp,
         ),
     }
@@ -2322,13 +2339,12 @@ fn latest_visible_message(messages: &[Message]) -> Option<&Message> {
     messages
         .iter()
         .rev()
-        .find(|message| !message.text().trim().is_empty())
+        .find(|message| message.has_visible_text())
 }
 
 fn latest_visible_assistant_message(messages: &[Message]) -> Option<&Message> {
     messages.iter().rev().find(|message| {
-        matches!(message.role, crate::core::message::Role::Assistant)
-            && !message.text().trim().is_empty()
+        matches!(message.role, crate::core::message::Role::Assistant) && message.has_visible_text()
     })
 }
 

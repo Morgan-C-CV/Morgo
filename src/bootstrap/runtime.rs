@@ -1743,7 +1743,7 @@ fn tui_transcript_text(app_state: &AppState) -> String {
     let mut lines = Vec::new();
     for entry in transcript.entries {
         let text = entry.message.text();
-        if text.trim().is_empty() {
+        if !entry.message.has_visible_text() || text.trim().is_empty() {
             continue;
         }
         match entry.message.role {
@@ -2836,6 +2836,43 @@ mod tui_output_tests {
         assert!(rendered.contains("> older user message"));
         assert!(!rendered.contains("User:"));
         assert!(rendered.contains("older assistant reply"));
+    }
+
+    #[test]
+    fn tui_transcript_hides_tool_scaffold_and_legacy_runtime_noise() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: crate::core::message::Message::assistant_with_visibility(
+                        "tool Read result: Read succeeded",
+                        crate::core::message::MessageVisibility::ToolScaffold,
+                    ),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("tool batch result:\nGlob succeeded"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("older assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+
+        let transcript = super::tui_transcript_text(&app_state);
+
+        assert!(!transcript.contains("tool Read result:"));
+        assert!(!transcript.contains("tool batch result:"));
+        assert!(!transcript.contains("Glob succeeded"));
+        assert!(transcript.contains("older assistant reply"));
     }
 
     #[test]

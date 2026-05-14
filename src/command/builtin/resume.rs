@@ -72,7 +72,9 @@ impl Command for ResumeCommand {
                     .canonical_session_history_entries()
                     .into_iter()
                     .rev()
-                    .find(|entry| entry.message.role == Role::User)
+                    .find(|entry| {
+                        entry.message.role == Role::User && entry.message.has_visible_text()
+                    })
                     .map(|entry| entry.message.content.trim().to_string())
                     .filter(|text| !text.is_empty())
             })

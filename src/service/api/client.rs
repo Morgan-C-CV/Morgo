@@ -2460,10 +2460,9 @@ mod tests {
             ProviderProtocol::MessagesApi,
             ProviderCompatibilityProfileKind::MessagesApi,
         );
-        let msg = Message {
-            role: crate::core::message::Role::User,
-            content: String::new(),
-            blocks: vec![
+        let msg = Message::from_blocks(
+            crate::core::message::Role::User,
+            vec![
                 ContentBlock::Text {
                     text: "describe this".into(),
                 },
@@ -2472,7 +2471,7 @@ mod tests {
                     data: vec![1, 2, 3],
                 },
             ],
-        };
+        );
         let payload = build_request_payload_for_provider(&config, &msg).unwrap();
         let content = &payload["messages"][0]["content"];
         assert_eq!(content[0]["type"], "text");
@@ -2595,10 +2594,9 @@ mod tests {
             ProviderProtocol::OpenAICompatible,
             ProviderCompatibilityProfileKind::OpenAICompatible,
         );
-        let msg = Message {
-            role: crate::core::message::Role::User,
-            content: String::new(),
-            blocks: vec![
+        let msg = Message::from_blocks(
+            crate::core::message::Role::User,
+            vec![
                 ContentBlock::Text {
                     text: "describe this".into(),
                 },
@@ -2607,7 +2605,7 @@ mod tests {
                     data: vec![1, 2, 3],
                 },
             ],
-        };
+        );
         let payload = build_request_payload_for_provider(&config, &msg).unwrap();
         let content = &payload["messages"][0]["content"];
         assert!(content.is_array());

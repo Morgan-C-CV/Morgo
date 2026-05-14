@@ -2,7 +2,7 @@ use crate::command::types::CommandResult;
 use crate::core::attachment::load_attachment;
 use crate::core::engine::QueryEngine;
 use crate::core::events::{EngineEvent, ServiceFailureCode, ServiceFailureNotice};
-use crate::core::message::{ContentBlock, Message};
+use crate::core::message::{ContentBlock, Message, Role};
 use crate::interaction::envelope::NormalizedInput;
 use crate::interaction::router::{CommandRouter, RouteExecution};
 use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
@@ -104,11 +104,7 @@ fn build_user_message(input: &NormalizedInput) -> Message {
             }
         }
     }
-    Message {
-        role: crate::core::message::Role::User,
-        content: input.raw.clone(),
-        blocks,
-    }
+    Message::from_blocks(Role::User, blocks)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +229,7 @@ where
             crate::core::events::SessionMilestone::AssistantMessageCommitted,
         );
     }
-    let primary_text = collect_message_content(persisted_messages.clone());
+    let primary_text = collect_message_content(&persisted_messages);
 
     let mut events = runtime_events
         .into_iter()
@@ -412,7 +408,7 @@ async fn collect_stream_messages(
             }
         }
         on_update(&CliTurnOutput {
-            primary_text: collect_message_content(messages.clone()),
+            primary_text: collect_message_content(&messages),
             events: runtime_events
                 .iter()
                 .cloned()
@@ -427,10 +423,34 @@ fn service_failure_code_string(service_failure: Option<&ServiceFailureNotice>) -
     service_failure.map(|value| value.service_failure_code.as_str().to_string())
 }
 
-fn collect_message_content(messages: Vec<Message>) -> String {
+fn collect_message_content(messages: &[Message]) -> String {
     messages
-        .into_iter()
-        .map(|message| message.text())
+        .iter()
+        .filter(|message| message.has_visible_text())
+        .map(Message::text)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_message_content;
+    use crate::core::message::{Message, MessageVisibility};
+
+    #[test]
+    fn collect_message_content_only_keeps_visible_messages() {
+        let messages = vec![
+            Message::assistant_with_visibility(
+                "tool Read result: Read succeeded",
+                MessageVisibility::ToolScaffold,
+            ),
+            Message::assistant_with_visibility(
+                "approval required for Bash: command uses a pipe",
+                MessageVisibility::RuntimeMeta,
+            ),
+            Message::assistant("Final answer"),
+        ];
+
+        assert_eq!(collect_message_content(&messages), "Final answer");
+    }
 }

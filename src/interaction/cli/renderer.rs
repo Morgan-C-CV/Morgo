@@ -1,3 +1,4 @@
+use crate::core::message::is_legacy_hidden_primary_line;
 use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
@@ -189,9 +190,7 @@ fn visible_tui_primary_lines(text: &str) -> Vec<String> {
 }
 
 fn is_hidden_tui_primary_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("tool ")
-        && (trimmed.contains(" result:") || trimmed.starts_with("tool batch result:"))
+    is_legacy_hidden_primary_line(line)
 }
 
 fn panel_priority(kind: Option<PanelKind>) -> u8 {
@@ -1102,6 +1101,11 @@ mod tests {
             primary_text: [
                 "tool Read result: Read succeeded (5313 chars)",
                 "tool Grep result: Grep succeeded (0 chars)",
+                "tool batch result:",
+                "verified_target: /tmp/report.md",
+                "verification_result: verified",
+                "minimal_evidence: Read succeeded",
+                "remaining_blocker: none",
                 "",
                 "Final answer",
             ]
@@ -1113,6 +1117,11 @@ mod tests {
         assert!(rendered.contains("Final answer"));
         assert!(!rendered.contains("tool Read result:"));
         assert!(!rendered.contains("tool Grep result:"));
+        assert!(!rendered.contains("tool batch result:"));
+        assert!(!rendered.contains("verified_target:"));
+        assert!(!rendered.contains("verification_result:"));
+        assert!(!rendered.contains("minimal_evidence:"));
+        assert!(!rendered.contains("remaining_blocker:"));
     }
 
     #[test]

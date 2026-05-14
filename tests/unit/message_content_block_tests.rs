@@ -24,11 +24,7 @@ fn text_helper_returns_concatenated_text_blocks() {
 
 #[test]
 fn text_helper_on_empty_blocks_returns_empty_string() {
-    let msg = Message {
-        role: Role::User,
-        content: String::new(),
-        blocks: vec![],
-    };
+    let msg = Message::from_blocks(Role::User, vec![]);
     assert_eq!(msg.text(), "");
 }
 
@@ -40,11 +36,7 @@ fn is_text_only_true_for_pure_text_message() {
 
 #[test]
 fn is_text_only_true_for_empty_blocks() {
-    let msg = Message {
-        role: Role::User,
-        content: String::new(),
-        blocks: vec![],
-    };
+    let msg = Message::from_blocks(Role::User, vec![]);
     assert!(msg.is_text_only());
 }
 

@@ -3,7 +3,7 @@ use crate::core::events::{
     EngineEvent, RuntimeEventEnvelope, RuntimeEventKind, ServiceFailureCode, ServiceFailureNotice,
     SessionMilestone,
 };
-use crate::core::message::Message;
+use crate::core::message::{Message, MessageVisibility};
 use crate::core::query_loop::{
     QueryLoopEventSink, QueryLoopResult, QueryLoopState, QueryParams, Terminal,
     run_query_loop_with_params_and_sink,
@@ -136,10 +136,13 @@ impl StreamingTurnState {
                 self.append_history_entry(
                     "engine.persist_tool_result",
                     SessionHistoryEntry {
-                        message: Message::assistant(format!(
-                            "tool {tool_name} result: {}",
-                            detail.clone().unwrap_or_else(|| summary.clone())
-                        )),
+                        message: Message::assistant_with_visibility(
+                            format!(
+                                "tool {tool_name} result: {}",
+                                detail.clone().unwrap_or_else(|| summary.clone())
+                            ),
+                            MessageVisibility::ToolScaffold,
+                        ),
                         timestamp: None,
                         tool_refs: vec![tool_name],
                         milestone: Some(SessionMilestone::ToolResultCommitted),
@@ -286,13 +289,19 @@ impl QueryEngine {
     }
 
     pub fn has_active_turn(&self) -> bool {
-        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        let mut owner = self
+            .owner
+            .lock()
+            .expect("query engine owner should not be poisoned");
         owner.reap_finished_turn();
         owner.active_turn.is_some()
     }
 
     pub fn interrupt_active_turn(&self) -> bool {
-        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        let mut owner = self
+            .owner
+            .lock()
+            .expect("query engine owner should not be poisoned");
         owner.reap_finished_turn();
         if let Some(active_turn) = owner.active_turn.as_ref() {
             active_turn.cancellation_token.cancel();
@@ -401,7 +410,10 @@ impl QueryEngine {
             }
         });
 
-        let stream_state = Arc::new(Mutex::new(StreamingTurnState::new(context.clone(), bridge_tx)));
+        let stream_state = Arc::new(Mutex::new(StreamingTurnState::new(
+            context.clone(),
+            bridge_tx,
+        )));
         {
             let mut state = stream_state
                 .lock()
@@ -481,7 +493,10 @@ impl QueryEngine {
         &self,
         cancellation_token: CancellationToken,
     ) -> Result<ActiveTurnRegistration, QueryLoopResult> {
-        let mut owner = self.owner.lock().expect("query engine owner should not be poisoned");
+        let mut owner = self
+            .owner
+            .lock()
+            .expect("query engine owner should not be poisoned");
         owner.reap_finished_turn();
         if owner.active_turn.is_some() {
             return Err(self.owner_busy_result());
@@ -529,7 +544,8 @@ impl QueryEngine {
         *self
             .latest_app_state
             .lock()
-            .expect("query engine app state should not be poisoned") = self.context.app_state.clone();
+            .expect("query engine app state should not be poisoned") =
+            self.context.app_state.clone();
     }
 }
 
@@ -539,7 +555,9 @@ fn release_active_turn(
     finished: &Arc<AtomicBool>,
 ) {
     finished.store(true, Ordering::SeqCst);
-    let mut owner = owner.lock().expect("query engine owner should not be poisoned");
+    let mut owner = owner
+        .lock()
+        .expect("query engine owner should not be poisoned");
     if owner
         .active_turn
         .as_ref()
