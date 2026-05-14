@@ -631,11 +631,15 @@ impl TaskManager {
                     .runtime_store
                     .write()
                     .expect("task runtime store poisoned");
-                let mailbox = runtime_store.mailboxes.get_mut(id)?;
+                let mailbox = runtime_store.mailboxes.entry(id.to_string()).or_default();
                 if !mailbox.is_empty() {
                     return Some(mailbox.remove(0));
                 }
-                runtime_store.mailbox_notifiers.get(id).cloned()?
+                runtime_store
+                    .mailbox_notifiers
+                    .entry(id.to_string())
+                    .or_insert_with(|| Arc::new(Notify::new()))
+                    .clone()
             };
             notifier.notified().await;
         }
