@@ -600,6 +600,11 @@ fn heuristic_tui_suggestions(app_state: &AppState, input: &str) -> Option<Vec<Tu
             args.as_slice(),
             trailing_space,
         )),
+        "/boss" => Some(boss_command_suggestions(
+            app_state,
+            args.as_slice(),
+            trailing_space,
+        )),
         "/computer" => Some(computer_command_suggestions(
             args.as_slice(),
             trailing_space,
@@ -1069,6 +1074,89 @@ fn swarm_command_suggestions(
     )]
 }
 
+fn boss_command_suggestions(
+    app_state: &AppState,
+    args: &[&str],
+    trailing_space: bool,
+) -> Vec<TuiSuggestion> {
+    let mut base = vec![
+        heuristic_suggestion(
+            "/boss status ",
+            "status",
+            "Show current boss stage, active actors, and step progress",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/boss report ",
+            "report",
+            "Show the current boss progress report",
+            "33",
+        ),
+        heuristic_suggestion(
+            "/boss stop ",
+            "stop",
+            "Stop the active boss run",
+            "31",
+        ),
+        heuristic_suggestion(
+            "/boss resume ",
+            "resume",
+            "Restore the current boss run from disk when available",
+            "35",
+        ),
+    ];
+    let cwd = app_state.current_working_directory();
+    let plan_path = crate::core::boss::BossCoordinator::default_plan_path(
+        &resolve_config_root(&cwd).unwrap_or_else(|_| cwd.clone()),
+    );
+    base.insert(
+        0,
+        heuristic_suggestion(
+            "/boss <objective> ",
+            "<objective>",
+            format!("Start a new boss run at {}", plan_path.display()),
+            "36",
+        ),
+    );
+    base.push(heuristic_suggestion(
+        "/boss approve Y ",
+        "approve",
+        "Approve the documentation loop and move into execution",
+        "32",
+    ));
+    base.push(heuristic_suggestion(
+        "/boss doc ",
+        "doc",
+        "Finalize the documentation loop from a draft spec",
+        "35",
+    ));
+    if args.is_empty() {
+        return base;
+    }
+    if args.len() == 1 && !trailing_space {
+        return filter_suggestions(base, args[0]);
+    }
+    match args[0] {
+        "status" | "report" | "stop" | "resume" => Vec::new(),
+        "approve" => vec![
+            heuristic_suggestion("/boss approve Y ", "Y", "Accept and continue execution", "32"),
+            heuristic_suggestion(
+                "/boss approve <feedback> ",
+                "<feedback>",
+                "Send documentation feedback back to A",
+                "31",
+            ),
+        ],
+        "doc" | "documentation" => vec![heuristic_suggestion(
+            "/boss doc <spec> ",
+            "<spec>",
+            "Finalize documentation using a draft spec",
+            "35",
+        )],
+        _ => base,
+    }
+}
+
 fn computer_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<TuiSuggestion> {
     let base = vec![
         heuristic_suggestion(
@@ -1410,6 +1498,7 @@ fn default_command_priority(command: &CommandMetadata) -> i32 {
         "help" => 2000,
         "clear" => 1950,
         // Most frequent "do work" commands come next.
+        "boss" => 1925,
         "model" => 1900,
         "plan" => 1850,
         "tasks" => 1800,
@@ -7040,6 +7129,8 @@ mod tests {
     use crate::bootstrap::RuntimeBootstrap;
     use crate::history::session::SessionStore;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
+    use crate::command::builtin::register_builtin_commands;
+    use crate::command::coding::register_coding_commands;
     use crate::command::registry::CommandRegistry;
     use crate::cost::tracker::CostTracker;
     use crate::interaction::dispatcher::NotificationDispatcher;
@@ -7385,5 +7476,28 @@ mod tests {
             Some(stale.id.as_str()),
             Some(current.id.as_str())
         ));
+    }
+
+    #[test]
+    fn boss_command_is_in_top_level_suggestions() {
+        let mut app_state = test_app_state();
+        app_state.command_registry = Some(Arc::new(
+            register_coding_commands(register_builtin_commands(CommandRegistry::new())),
+        ));
+        let suggestions = super::tui_command_suggestions(&app_state, "/");
+        assert!(suggestions.iter().any(|suggestion| suggestion.label == "/boss"));
+    }
+
+    #[test]
+    fn boss_heuristic_suggestions_include_core_controls() {
+        let mut app_state = test_app_state();
+        app_state.command_registry = Some(Arc::new(
+            register_coding_commands(register_builtin_commands(CommandRegistry::new())),
+        ));
+        let suggestions = super::heuristic_tui_suggestions(&app_state, "/boss ")
+            .expect("boss suggestions");
+        assert!(suggestions.iter().any(|suggestion| suggestion.label == "status"));
+        assert!(suggestions.iter().any(|suggestion| suggestion.label == "report"));
+        assert!(suggestions.iter().any(|suggestion| suggestion.label == "stop"));
     }
 }

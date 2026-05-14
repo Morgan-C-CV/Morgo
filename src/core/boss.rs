@@ -4959,6 +4959,17 @@ impl BossCoordinator {
         *auto = Some(app_state);
     }
 
+    pub async fn bind_app_state(
+        &self,
+        app_state: Arc<crate::state::app_state::AppState>,
+    ) {
+        {
+            let mut auto = self.auto_advance_app_state.write().await;
+            *auto = Some(app_state.clone());
+        }
+        self.bootstrap_actor_registry_with_app_state(&app_state).await;
+    }
+
     pub async fn current_runtime_key(&self) -> Option<String> {
         self.runtime_key.read().await.clone()
     }
@@ -5171,6 +5182,77 @@ impl BossCoordinator {
         }
 
         Ok(coordinator)
+    }
+
+    /// Bind a planning file path to the current coordinator without replacing its state.
+    pub async fn configure_planning_file(&self, path: &std::path::Path) {
+        let mut status = self.status.write().await;
+        status.planning_file = Some(path.to_string_lossy().into_owned());
+    }
+
+    /// Persist the current plan to the configured planning file, if one is bound.
+    pub async fn persist_current_plan(&self) -> anyhow::Result<()> {
+        self.persist_plan_if_configured().await
+    }
+
+    /// Restore plan/session/stage state from disk into the existing coordinator instance.
+    pub async fn restore_or_init_in_place(
+        &self,
+        path: &std::path::Path,
+        app_state: &Arc<crate::state::app_state::AppState>,
+    ) -> anyhow::Result<()> {
+        self.configure_planning_file(path).await;
+        {
+            let mut auto = self.auto_advance_app_state.write().await;
+            *auto = Some(app_state.clone());
+        }
+
+        if path.exists() {
+            let loaded_plan = load_plan(path).await?;
+            let mut stage = BossStage::Documentation;
+            if loaded_plan.accepted_by_user {
+                let all_completed =
+                    !loaded_plan.steps.is_empty() && loaded_plan.steps.iter().all(|step| step.completed);
+                stage = if all_completed {
+                    BossStage::Completed
+                } else {
+                    BossStage::Execution
+                };
+            }
+            let total_steps = Some(loaded_plan.steps.len());
+            let current_step = if loaded_plan.accepted_by_user {
+                loaded_plan
+                    .steps
+                    .iter()
+                    .find(|step| !step.completed)
+                    .map(|step| step.id)
+            } else {
+                None
+            };
+
+            {
+                let mut status = self.status.write().await;
+                status.stage = stage;
+                status.current_step = current_step;
+                status.total_steps = total_steps;
+            }
+            {
+                let mut plan_guard = self.plan.write().await;
+                *plan_guard = Some(loaded_plan.clone());
+            }
+            {
+                let mut session_guard = self.session.write().await;
+                *session_guard = Some(
+                    loaded_plan
+                        .session_snapshot
+                        .clone()
+                        .unwrap_or_else(|| BossSession::from_plan_id(&loaded_plan.plan_id, stage)),
+                );
+            }
+        }
+
+        self.bootstrap_actor_registry_with_app_state(app_state).await;
+        Ok(())
     }
 
     pub async fn get_stage(&self) -> BossStage {
@@ -6490,6 +6572,82 @@ impl BossCoordinator {
             *session_guard = Some(BossSession::from_plan_id(&plan_id, BossStage::Execution));
         }
         self.content_evidence_targets.write().await.clear();
+    }
+
+    /// Seed a new boss plan in Documentation stage so the user-visible `/boss`
+    /// workflow can run the A draft -> B review -> user approval loop first.
+    pub async fn seed_documentation_plan_for_task(&self, task: &str) {
+        let plan_id = format!(
+            "boss-task-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let default_stage_execution_contract = StageExecutionContract {
+            review_mode: Some(ReviewMode::IndependentReview),
+            task_profile: Some(TaskProfile::IndependentReview),
+            requires_source_evidence: Some(false),
+            ..StageExecutionContract::default()
+        };
+        let plan = BossPlan {
+            plan_id: plan_id.clone(),
+            task_description: task.to_string(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: vec![],
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: task.to_string(),
+                objective: Some(task.to_string()),
+                acceptance: seed_step_acceptance(task),
+                requires_approval: false,
+                status: BossPlanStepStatus::Pending,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: default_stage_execution_contract,
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: false,
+            auto_sequence: true,
+            session_snapshot: None,
+        };
+        {
+            let mut plan_guard = self.plan.write().await;
+            *plan_guard = Some(plan);
+        }
+        {
+            let mut status = self.status.write().await;
+            status.stage = BossStage::Documentation;
+            status.current_step = Some(0);
+            status.total_steps = Some(1);
+            status.lism_sample_emitted = false;
+        }
+        {
+            let mut session_guard = self.session.write().await;
+            *session_guard = Some(BossSession::from_plan_id(&plan_id, BossStage::Documentation));
+        }
+        self.content_evidence_targets.write().await.clear();
+    }
+
+    pub async fn has_loaded_plan(&self) -> bool {
+        self.plan.read().await.is_some()
+    }
+
+    pub async fn has_active_run(&self) -> bool {
+        self.plan.read().await.is_some() && self.get_stage().await != BossStage::Completed
     }
 
     /// Stable run identifier derived from plan_id, or a timestamp fallback.

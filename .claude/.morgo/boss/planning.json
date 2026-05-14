@@ -1,0 +1,100 @@
+{
+  "plan_id": "boss-task-1778793676925",
+  "task_description": "write a report",
+  "document_spec": "Designer A review session for plan boss-task-1778793676925. Stay idle until the coordinator sends the actual review/spec content. No tools are available; base review decisions only on text supplied by the coordinator.\n<boss-step-context>\nplan_id: boss-task-1778793676925\nobjective: Review and approve boss plan steps as Designer A. Use only the text provided in-session; do not inspect files.\nparent_session_id: test-session\n</boss-step-context>\nstream error: provider request failed: error sending request for url (http://localhost/v1/messages): client error (Connect): tcp connect error: Connection refused (os error 61)\n",
+  "pseudo_code": "",
+  "draft_spec": "Designer A review session for plan boss-task-1778793676925. Stay idle until the coordinator sends the actual review/spec content. No tools are available; base review decisions only on text supplied by the coordinator.\n<boss-step-context>\nplan_id: boss-task-1778793676925\nobjective: Review and approve boss plan steps as Designer A. Use only the text provided in-session; do not inspect files.\nparent_session_id: test-session\n</boss-step-context>\nstream error: provider request failed: error sending request for url (http://localhost/v1/messages): client error (Connect): tcp connect error: Connection refused (os error 61)\n",
+  "review_feedback": "objective: write a report\nstep_id: 0\nplan_version: boss-task-1778793676925:steps=1\nstep_revision: step-0-attempt-0\nacceptance:\n  - Task completed successfully.\nallowed_tools: Read, Edit, Glob, Grep, LS, Bash\npermission_scope: lism_policy=force-on inherit_context=false workspace_capability=inherited_runtime_scope boss_actor_role=executor_b\nparent_session_id: test-session\nplan_id: boss-task-1778793676925\nstep_id: 0\nstatus: Pending\nreview_mode: independent_review\nstage_execution_contract:\n  - review_mode=independent_review\nopen_items:\n  - Task completed successfully.\nallowed_actions: implement\nrequired_output: return a unified diff or file edits\nstream error: provider request failed: error sending request for url (http://localhost/v1/messages): client error (Connect): tcp connect error: Connection refused (os error 61)\n",
+  "revision_notes": "",
+  "finalized": true,
+  "documentation_feedback": [],
+  "steps": [
+    {
+      "id": 0,
+      "description": "write a report",
+      "objective": "write a report",
+      "acceptance": [
+        "Task completed successfully."
+      ],
+      "requires_approval": false,
+      "status": "Failed",
+      "completed": false,
+      "result_diff": "/var/folders/w8/8ck6wkbx4xd571_cpcswy4xw0000gn/T/task-1.log",
+      "worker_task_id": "task-1",
+      "attempt_count": 0,
+      "retry_budget": 3,
+      "last_review_summary": "inspect task output for task-1",
+      "last_correction": "inspect task output for task-1",
+      "stage_execution_contract": {
+        "review_mode": "independent_review",
+        "task_profile": "independent_review",
+        "requires_source_evidence": false,
+        "declared_artifacts": [],
+        "verifications": [],
+        "tests": [],
+        "content_evidence_targets": [],
+        "required_actions": [],
+        "required_evidence": []
+      },
+      "stage_continuation_context": {
+        "repair_intent": {
+          "failed_target": null,
+          "verified_facts": [
+            "failure_reason: inspect task output for task-1",
+            "modification_direction: Close the reported evidence gap before claiming completion.",
+            "required_evidence_targets: none"
+          ],
+          "next_action": "inspect task output for task-1",
+          "continuity_mode": "repair"
+        },
+        "failed_target": null,
+        "verified_facts": [
+          "failure_reason: inspect task output for task-1",
+          "modification_direction: Close the reported evidence gap before claiming completion.",
+          "required_evidence_targets: none"
+        ],
+        "next_action": "inspect task output for task-1",
+        "continuity_mode": "repair"
+      },
+      "executor_b_stage_memory": null,
+      "review_task_id": null,
+      "tool_execution_records": []
+    }
+  ],
+  "accepted_by_user": false,
+  "auto_sequence": true,
+  "session_snapshot": {
+    "plan_id": "boss-task-1778793676925",
+    "stage": "Documentation",
+    "designer_a": {
+      "actor_id": "boss-boss-task-1778793676925-a",
+      "session_id": "task-0",
+      "role": "DesignerA",
+      "status": "Active",
+      "task_id": "task-0",
+      "last_snapshot": null,
+      "lineage_depth": 0,
+      "mailbox_id": null,
+      "cancel_id": null,
+      "last_assignment_fingerprint": null,
+      "last_assignment_plan_version": null,
+      "last_assignment_step_revision": null
+    },
+    "executor_b": {
+      "actor_id": "boss-boss-task-1778793676925-b",
+      "session_id": "task-1",
+      "role": "ExecutorB",
+      "status": "Active",
+      "task_id": "task-1",
+      "last_snapshot": null,
+      "lineage_depth": 0,
+      "mailbox_id": null,
+      "cancel_id": null,
+      "last_assignment_fingerprint": "91071875461058e4",
+      "last_assignment_plan_version": "boss-task-1778793676925:steps=1",
+      "last_assignment_step_revision": "step-0-attempt-0"
+    },
+    "active_children": [],
+    "budget_snapshot": null
+  }
+}

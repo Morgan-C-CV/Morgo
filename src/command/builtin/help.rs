@@ -116,7 +116,7 @@ impl Command for HelpCommand {
 fn is_coding_command(command: &CommandMetadata) -> bool {
     match command.name.as_str() {
         "help" | "permissions" | "resume" | "tasks" | "plan" | "status" | "session" | "model"
-        | "compact" => true,
+        | "compact" | "boss" => true,
         "plugins" | "swarm" | "LisM" | "UM" | "skills" | "computer" => false,
         _ => command.source == CommandSource::Coding,
     }

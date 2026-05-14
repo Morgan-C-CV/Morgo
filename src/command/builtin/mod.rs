@@ -1,3 +1,4 @@
+pub mod boss;
 pub mod clear;
 pub mod compact;
 pub mod computer;
@@ -23,6 +24,7 @@ use crate::command::registry::CommandRegistry;
 use std::sync::Arc;
 
 use self::um::UMCommand;
+use boss::BossCommand;
 use clear::ClearCommand;
 use compact::CompactCommand;
 use computer::ComputerCommand;
@@ -46,6 +48,7 @@ use tasks::TasksCommand;
 pub fn register_builtin_commands(registry: CommandRegistry) -> CommandRegistry {
     registry
         .register(Arc::new(HelpCommand))
+        .register(Arc::new(BossCommand))
         .register(Arc::new(LisMCommand))
         .register(Arc::new(UMCommand))
         .register(Arc::new(CostCommand))
