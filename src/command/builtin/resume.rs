@@ -61,11 +61,6 @@ impl Command for ResumeCommand {
                 args.to_string(),
             )));
         }
-        if matches!(app_state.surface, crate::bootstrap::InteractionSurface::Cli)
-            && app_state.session_mode == crate::bootstrap::SessionMode::Interactive
-        {
-            return Ok(CommandResult::SystemTrap(SystemTrapAction::OpenResumePicker));
-        }
         let current_id = &app_state.active_session_id;
         let cwd = app_state.current_working_directory();
         let permission_mode = match app_state.permission_context.mode() {

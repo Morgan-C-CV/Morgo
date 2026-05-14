@@ -730,7 +730,6 @@ mod tests {
         let session_id = SessionId("session-housekeeping".into());
         let snapshot = SessionSnapshot {
             session_id: session_id.clone(),
-            parent_session_id: None,
             surface: InteractionSurface::Cli,
             session_mode: SessionMode::Interactive,
             cwd: ".".into(),

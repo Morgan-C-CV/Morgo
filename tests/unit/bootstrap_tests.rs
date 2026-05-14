@@ -15,6 +15,10 @@ use rust_agent::bootstrap::{
     UserAccessDecision, execute_runtime_shutdown_with_deadline, is_tui_exit_input,
     runtime_shutdown_timeout, tui_clear_screen_prefix,
 };
+use rust_agent::command::builtin::clear::ClearCommand;
+use rust_agent::command::builtin::resume::ResumeCommand;
+use rust_agent::command::builtin::session::SessionCommand;
+use rust_agent::command::types::{Command, CommandResult, SystemTrapAction};
 use rust_agent::core::message::Message;
 use rust_agent::history::resume::{RestoreRequest, RestoreSource, resolve_session_state};
 use rust_agent::history::session::{
@@ -551,6 +555,10 @@ impl SessionStore for FlakySessionStore {
     ) -> Result<(), SessionStoreWriteError> {
         self.inner.save_model_level_override(session_id, level)
     }
+
+    fn list_sessions(&self) -> Vec<rust_agent::history::session::SessionSummary> {
+        self.inner.list_sessions()
+    }
 }
 
 #[test]
@@ -670,6 +678,7 @@ fn persist_resolved_session_state_retries_transient_store_write_failures() {
     let history = app_state.history.clone().unwrap_or_default();
     let resolved = rust_agent::history::resume::ResolvedSessionState {
         snapshot,
+        parent_session_id: None,
         history,
         restored_session: None,
         client_type: rust_agent::bootstrap::ClientType::Cli,
@@ -2894,6 +2903,7 @@ fn persist_resolved_session_state_commits_all_fields_in_one_record_write() {
 
     let resolved = rust_agent::history::resume::ResolvedSessionState {
         snapshot: snapshot.clone(),
+        parent_session_id: None,
         history: history.clone(),
         restored_session: None,
         client_type: rust_agent::bootstrap::ClientType::RemoteControl,
@@ -3008,6 +3018,7 @@ fn update_record_preserves_existing_fields_when_mutating_one_section() {
         &session_id,
         PersistedSessionRecord {
             snapshot: snapshot.clone(),
+            parent_session_id: None,
             history: history.clone(),
             task_list: Some(task_list.clone()),
             plan_state: Some(rust_agent::plan::types::PlanState::default()),
@@ -3015,6 +3026,7 @@ fn update_record_preserves_existing_fields_when_mutating_one_section() {
             nested_memory_lineage: Some(vec!["session:update-preserve".into()]),
             lifecycle_status: SessionLifecycleStatus::Active,
             model_level_override: None,
+            title: None,
         },
     );
 
@@ -4176,6 +4188,7 @@ fn minimal_persisted_record(session_id: &SessionId) -> PersistedSessionRecord {
             last_turn_at: None,
             prompt_seed: None,
         },
+        parent_session_id: None,
         history: Default::default(),
         task_list: None,
         plan_state: None,
@@ -4183,7 +4196,123 @@ fn minimal_persisted_record(session_id: &SessionId) -> PersistedSessionRecord {
         nested_memory_lineage: None,
         lifecycle_status: SessionLifecycleStatus::Active,
         model_level_override: None,
+        title: None,
     }
+}
+
+#[tokio::test]
+async fn clear_command_returns_new_session_trap() {
+    let app_state = shutdown_test_app_state_with_store(
+        Arc::new(InMemorySessionStore::default()),
+        Arc::new(TaskManager::default()),
+    );
+
+    let result = ClearCommand
+        .execute(
+            &rust_agent::interaction::envelope::NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/new",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("clear command should succeed");
+
+    assert_eq!(result, CommandResult::SystemTrap(SystemTrapAction::NewSession));
+}
+
+#[tokio::test]
+async fn resume_command_with_session_id_returns_resume_session_trap() {
+    let app_state = shutdown_test_app_state_with_store(
+        Arc::new(InMemorySessionStore::default()),
+        Arc::new(TaskManager::default()),
+    );
+
+    let result = ResumeCommand
+        .execute(
+            &rust_agent::interaction::envelope::NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/resume session-42",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("resume command should succeed");
+
+    assert_eq!(
+        result,
+        CommandResult::SystemTrap(SystemTrapAction::ResumeSession("session-42".into()))
+    );
+}
+
+#[tokio::test]
+async fn resume_command_without_args_keeps_cli_summary_output() {
+    let app_state = shutdown_test_app_state_with_store(
+        Arc::new(InMemorySessionStore::default()),
+        Arc::new(TaskManager::default()),
+    );
+
+    let result = ResumeCommand
+        .execute(
+            &rust_agent::interaction::envelope::NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/resume",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("resume command should succeed");
+
+    let text = result
+        .to_plain_text()
+        .expect("resume command should return summary text");
+    assert!(text.contains("Resume summary:"), "{text}");
+    assert!(text.contains("Current Session ID: shutdown-session"), "{text}");
+}
+
+#[tokio::test]
+async fn session_command_surfaces_parent_id_from_session_listing() {
+    let store = Arc::new(InMemorySessionStore::default());
+    let app_state = shutdown_test_app_state_with_store(
+        store.clone(),
+        Arc::new(TaskManager::default()),
+    );
+    let session_id = app_state.current_session_id();
+
+    store
+        .save_full_record(
+            &session_id,
+            PersistedSessionRecord {
+                snapshot: app_state.session.clone().expect("session snapshot"),
+                parent_session_id: Some(SessionId("parent-xyz".into())),
+                history: app_state.history.clone().unwrap_or_default(),
+                task_list: None,
+                plan_state: None,
+                external_memory_entries: None,
+                nested_memory_lineage: None,
+                lifecycle_status: SessionLifecycleStatus::Active,
+                model_level_override: None,
+                title: Some("Active session".into()),
+            },
+        )
+        .expect("save full record");
+
+    let result = SessionCommand
+        .execute(
+            &rust_agent::interaction::envelope::NormalizedInput::from_raw(
+                InteractionSurface::Cli,
+                "/session",
+            ),
+            &app_state,
+        )
+        .await
+        .expect("session command should succeed");
+
+    let text = result
+        .to_plain_text()
+        .expect("session command should return plain text");
+    assert!(text.contains("Parent Session ID: parent-xyz"), "{text}");
+    assert!(text.contains("use /resume to switch sessions"), "{text}");
 }
 
 // ── T18.1.D: teammate registry tests ─────────────────────────────────────────

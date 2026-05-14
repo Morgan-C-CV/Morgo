@@ -280,6 +280,10 @@ fn tui_is_clear_command(input: &str) -> bool {
     )
 }
 
+fn tui_is_resume_picker_command(input: &str) -> bool {
+    matches!(input.trim(), "/resume" | "resume" | "/continue" | "continue")
+}
+
 struct TuiRawModeGuard;
 
 impl TuiRawModeGuard {
@@ -3738,6 +3742,14 @@ mod tui_output_tests {
         assert!(!super::tui_is_clear_command("/help"));
     }
 
+    #[test]
+    fn tui_resume_picker_command_detection_matches_resume_aliases() {
+        assert!(super::tui_is_resume_picker_command("/resume"));
+        assert!(super::tui_is_resume_picker_command("/continue"));
+        assert!(super::tui_is_resume_picker_command("resume"));
+        assert!(!super::tui_is_resume_picker_command("/session"));
+    }
+
     fn strip_ansi_for_test(text: &str) -> String {
         strip_ansi_text(text)
     }
@@ -4954,6 +4966,7 @@ impl RuntimeBootstrap {
 
                             let line = input.trim().to_string();
                             let is_clear_command = tui_is_clear_command(&line);
+                            let is_resume_picker_command = tui_is_resume_picker_command(&line);
                             input.clear();
                             cursor_index = 0;
                             selected_suggestion = None;
@@ -4981,8 +4994,16 @@ impl RuntimeBootstrap {
                                 break;
                             }
 
-                            let dispatch = self
-                                .handle_tui_input_with_loading(
+                            let dispatch = if is_resume_picker_command {
+                                CliDispatchOutcome {
+                                    output: CliTurnOutput {
+                                        primary_text: String::new(),
+                                        events: vec![],
+                                    },
+                                    system_trap: Some(SystemTrapAction::OpenResumePicker),
+                                }
+                            } else {
+                                self.handle_tui_input_with_loading(
                                     router,
                                     engine,
                                     &app_state,
@@ -5021,7 +5042,8 @@ impl RuntimeBootstrap {
                                         }
                                     },
                                 )
-                                .await?;
+                                .await?
+                            };
                             match dispatch.system_trap.clone() {
                                 Some(SystemTrapAction::NewSession) => {
                                     let new_session_id =
@@ -6662,6 +6684,8 @@ mod tests {
         resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
         terminal_tail_stalled, tui_input_suggestions,
     };
+    use crate::bootstrap::RuntimeBootstrap;
+    use crate::history::session::SessionStore;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
     use crate::cost::tracker::CostTracker;
@@ -6865,6 +6889,97 @@ mod tests {
             suggestions
                 .iter()
                 .all(|suggestion| suggestion.submit_on_enter)
+        );
+    }
+
+    #[test]
+    fn open_resume_picker_excludes_active_session_and_preserves_order() {
+        let runtime = RuntimeBootstrap::from_cli(BootstrapCli::default());
+        let store = Arc::new(crate::history::session::InMemorySessionStore::default());
+        let active_session = crate::history::session::SessionId("active-session".into());
+        store
+            .save(
+                crate::history::session::SessionSnapshot {
+                    session_id: active_session.clone(),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/active".into(),
+                    last_turn_at: Some("300".into()),
+                    prompt_seed: None,
+                },
+                crate::history::session::SessionHistory::default(),
+            )
+            .expect("save active session");
+        store
+            .save_full_record(
+                &crate::history::session::SessionId("older-session".into()),
+                crate::history::session::PersistedSessionRecord {
+                    snapshot: crate::history::session::SessionSnapshot {
+                        session_id: crate::history::session::SessionId("older-session".into()),
+                        surface: InteractionSurface::Cli,
+                        session_mode: SessionMode::Interactive,
+                        cwd: "/tmp/older".into(),
+                        last_turn_at: Some("100".into()),
+                        prompt_seed: None,
+                    },
+                    parent_session_id: Some(crate::history::session::SessionId(
+                        "parent-1".into(),
+                    )),
+                    history: crate::history::session::SessionHistory {
+                        entries: vec![crate::history::session::SessionHistoryEntry {
+                            message: crate::core::message::Message::user("older preview"),
+                            timestamp: None,
+                            tool_refs: vec![],
+                            milestone: None,
+                        }],
+                    },
+                    task_list: None,
+                    plan_state: None,
+                    external_memory_entries: None,
+                    nested_memory_lineage: None,
+                    lifecycle_status: crate::history::session::SessionLifecycleStatus::Active,
+                    model_level_override: None,
+                    title: Some("Older".into()),
+                },
+            )
+            .expect("save older session");
+        store
+            .save(
+                crate::history::session::SessionSnapshot {
+                    session_id: crate::history::session::SessionId("newer-session".into()),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/newer".into(),
+                    last_turn_at: Some("200".into()),
+                    prompt_seed: None,
+                },
+                crate::history::session::SessionHistory {
+                    entries: vec![crate::history::session::SessionHistoryEntry {
+                        message: crate::core::message::Message::assistant("newer preview"),
+                        timestamp: None,
+                        tool_refs: vec![],
+                        milestone: None,
+                    }],
+                },
+            )
+            .expect("save newer session");
+
+        let mut app_state = test_app_state();
+        app_state.active_session_id = active_session.0.clone();
+        app_state.session_store = Some(store);
+
+        let picker = runtime.open_resume_picker(&app_state);
+        assert_eq!(picker.sessions.len(), 2);
+        assert_eq!(picker.sessions[0].session_id.0, "newer-session");
+        assert_eq!(picker.sessions[1].session_id.0, "older-session");
+        assert_eq!(picker.sessions[0].preview.as_deref(), Some("newer preview"));
+        assert_eq!(picker.sessions[1].title.as_deref(), Some("Older"));
+        assert_eq!(
+            picker.sessions[1]
+                .parent_session_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
+            Some("parent-1")
         );
     }
 

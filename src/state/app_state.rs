@@ -409,11 +409,10 @@ impl AppState {
             return Err(SessionPersistFailure::MissingSessionStore);
         };
         let session_id = resolved.snapshot.session_id.clone();
-        let history = self.canonical_session_history_for(&session_id, Some(&resolved.history));
         let record = PersistedSessionRecord {
             snapshot: resolved.snapshot.clone(),
             parent_session_id: resolved.parent_session_id.clone(),
-            history,
+            history: resolved.history.clone(),
             task_list: session_store.load_task_list(&session_id),
             plan_state: session_store.load_plan_state(&session_id),
             external_memory_entries: Some(self.permission_context.external_memory_entries()),

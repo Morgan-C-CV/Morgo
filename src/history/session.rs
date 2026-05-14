@@ -209,6 +209,7 @@ pub trait SessionStore: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct InMemorySessionStore {
     sessions: Arc<RwLock<HashMap<SessionId, (SessionSnapshot, SessionHistory)>>>,
+    persisted_records: Arc<RwLock<HashMap<SessionId, PersistedSessionRecord>>>,
     task_lists: Arc<RwLock<HashMap<SessionId, TaskListSnapshot>>>,
     plan_states: Arc<RwLock<HashMap<SessionId, PlanState>>>,
     external_memory_entries: Arc<RwLock<HashMap<SessionId, Vec<String>>>>,
@@ -258,7 +259,13 @@ impl SessionStore for InMemorySessionStore {
             .sessions
             .write()
             .map_err(|_| SessionStoreWriteError::lock_poisoned("save.sessions"))?;
-        sessions.insert(snapshot.session_id.clone(), (snapshot, history));
+        let session_id = snapshot.session_id.clone();
+        sessions.insert(session_id.clone(), (snapshot, history));
+        drop(sessions);
+        let mut persisted_records = self.persisted_records.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save.persisted_records")
+        })?;
+        persisted_records.remove(&session_id);
         Ok(())
     }
 
@@ -280,6 +287,11 @@ impl SessionStore for InMemorySessionStore {
             (record.snapshot.clone(), record.history.clone()),
         );
         drop(sessions);
+        let mut persisted_records = self.persisted_records.write().map_err(|_| {
+            SessionStoreWriteError::lock_poisoned("save_full_record.persisted_records")
+        })?;
+        persisted_records.insert(session_id.clone(), record.clone());
+        drop(persisted_records);
 
         let mut task_lists = self
             .task_lists
@@ -478,6 +490,11 @@ impl SessionStore for InMemorySessionStore {
             .read()
             .map(|sessions| sessions.clone())
             .unwrap_or_default();
+        let persisted_records = self
+            .persisted_records
+            .read()
+            .map(|records| records.clone())
+            .unwrap_or_default();
         let lifecycle_statuses = self
             .lifecycle_statuses
             .read()
@@ -486,18 +503,25 @@ impl SessionStore for InMemorySessionStore {
         let mut summaries = sessions
             .into_iter()
             .map(|(session_id, (snapshot, history))| SessionSummary {
-                session_id,
-                parent_session_id: None,
+                parent_session_id: persisted_records
+                    .get(&session_id)
+                    .and_then(|record| record.parent_session_id.clone()),
                 cwd: snapshot.cwd.clone(),
                 surface: snapshot.surface,
                 session_mode: snapshot.session_mode,
                 last_turn_at: snapshot.last_turn_at.clone(),
-                title: None,
-                preview: summarize_history_preview(&history),
+                title: persisted_records
+                    .get(&session_id)
+                    .and_then(|record| record.title.clone()),
+                preview: persisted_records
+                    .get(&session_id)
+                    .map(|record| summarize_history_preview(&record.history))
+                    .unwrap_or_else(|| summarize_history_preview(&history)),
                 lifecycle_status: lifecycle_statuses
                     .get(&snapshot.session_id)
                     .copied()
                     .unwrap_or_default(),
+                session_id,
             })
             .collect::<Vec<_>>();
         sort_session_summaries(&mut summaries);
@@ -1083,5 +1107,149 @@ mod tests {
             Some("parent-a")
         );
         assert_eq!(sessions[0].preview.as_deref(), Some("newer preview"));
+    }
+
+    #[test]
+    fn in_memory_session_plain_save_clears_stale_persisted_lineage_metadata() {
+        let store = InMemorySessionStore::default();
+        let session_id = SessionId("session-stale-lineage".into());
+        store
+            .save_full_record(
+                &session_id,
+                PersistedSessionRecord {
+                    snapshot: SessionSnapshot {
+                        session_id: session_id.clone(),
+                        surface: InteractionSurface::Cli,
+                        session_mode: SessionMode::Interactive,
+                        cwd: "/tmp/stale".into(),
+                        last_turn_at: Some("100".into()),
+                        prompt_seed: None,
+                    },
+                    parent_session_id: Some(SessionId("parent-old".into())),
+                    history: SessionHistory {
+                        entries: vec![SessionHistoryEntry {
+                            message: Message::user("old preview"),
+                            timestamp: None,
+                            tool_refs: Vec::new(),
+                            milestone: None,
+                        }],
+                    },
+                    task_list: None,
+                    plan_state: None,
+                    external_memory_entries: None,
+                    nested_memory_lineage: None,
+                    lifecycle_status: SessionLifecycleStatus::Active,
+                    model_level_override: None,
+                    title: Some("Old title".into()),
+                },
+            )
+            .expect("save full record");
+
+        store
+            .save(
+                SessionSnapshot {
+                    session_id: session_id.clone(),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/fresh".into(),
+                    last_turn_at: Some("200".into()),
+                    prompt_seed: None,
+                },
+                SessionHistory {
+                    entries: vec![SessionHistoryEntry {
+                        message: Message::assistant("fresh preview"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    }],
+                },
+            )
+            .expect("save fresh session");
+
+        let sessions = store.list_sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].parent_session_id, None);
+        assert_eq!(sessions[0].title, None);
+        assert_eq!(sessions[0].preview.as_deref(), Some("fresh preview"));
+    }
+
+    #[test]
+    fn file_backed_session_list_sorts_and_preserves_parent_title_and_preview() {
+        let root = std::env::temp_dir().join(format!(
+            "rust-agent-session-list-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let store = FileBackedSessionStore::new(root.clone());
+
+        let session_a = SessionId("session-a".into());
+        store
+            .save_full_record(
+                &session_a,
+                PersistedSessionRecord {
+                    snapshot: SessionSnapshot {
+                        session_id: session_a.clone(),
+                        surface: InteractionSurface::Cli,
+                        session_mode: SessionMode::Interactive,
+                        cwd: "/tmp/a".into(),
+                        last_turn_at: Some("100".into()),
+                        prompt_seed: None,
+                    },
+                    parent_session_id: Some(SessionId("parent-a".into())),
+                    history: SessionHistory {
+                        entries: vec![SessionHistoryEntry {
+                            message: Message::user("older preview"),
+                            timestamp: None,
+                            tool_refs: Vec::new(),
+                            milestone: None,
+                        }],
+                    },
+                    task_list: None,
+                    plan_state: None,
+                    external_memory_entries: None,
+                    nested_memory_lineage: None,
+                    lifecycle_status: SessionLifecycleStatus::Active,
+                    model_level_override: None,
+                    title: Some("Alpha".into()),
+                },
+            )
+            .expect("save session a");
+
+        let session_b = SessionId("session-b".into());
+        store
+            .save(
+                SessionSnapshot {
+                    session_id: session_b.clone(),
+                    surface: InteractionSurface::Cli,
+                    session_mode: SessionMode::Interactive,
+                    cwd: "/tmp/b".into(),
+                    last_turn_at: Some("200".into()),
+                    prompt_seed: None,
+                },
+                SessionHistory {
+                    entries: vec![SessionHistoryEntry {
+                        message: Message::assistant("newer preview"),
+                        timestamp: None,
+                        tool_refs: Vec::new(),
+                        milestone: None,
+                    }],
+                },
+            )
+            .expect("save session b");
+
+        let sessions = store.list_sessions();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id.0, "session-b");
+        assert_eq!(sessions[1].session_id.0, "session-a");
+        assert_eq!(sessions[0].preview.as_deref(), Some("newer preview"));
+        assert_eq!(sessions[1].title.as_deref(), Some("Alpha"));
+        assert_eq!(
+            sessions[1].parent_session_id.as_ref().map(|id| id.0.as_str()),
+            Some("parent-a")
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup session list store");
     }
 }
