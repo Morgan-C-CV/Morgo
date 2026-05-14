@@ -1406,32 +1406,33 @@ fn suggestion_match_score(suggestion: &TuiSuggestion, query: &str) -> i32 {
 
 fn default_command_priority(command: &CommandMetadata) -> i32 {
     match command.name.as_str() {
-        // First-tier: orientation and immediate session controls.
+        // Keep only the universal entry points at the very front.
         "help" => 2000,
-        "status" => 1950,
-        "clear" => 1900,
-        "resume" => 1850,
-        "session" => 1800,
-        // Second-tier: core coding workflow and session shaping.
-        "model" => 1750,
-        "plan" => 1700,
-        "tasks" => 1650,
+        "clear" => 1950,
+        // Most frequent "do work" commands come next.
+        "model" => 1900,
+        "plan" => 1850,
+        "tasks" => 1800,
+        "diff" => 1750,
+        "review" => 1700,
+        "context" => 1650,
         "compact" => 1600,
-        "diff" => 1550,
-        "review" => 1500,
-        "context" => 1450,
-        "commit" => 1400,
-        // Third-tier: safety and configuration controls.
+        "commit" => 1550,
+        // Session/status controls remain visible but no longer dominate the top.
+        "status" => 1500,
+        "resume" => 1450,
+        "session" => 1400,
+        // Safety and configuration controls.
         "permissions" => 1350,
         "config" => 1300,
         "cost" => 1250,
         "doctor" => 1200,
-        // Fourth-tier: advanced orchestration and integrations.
+        // Advanced orchestration and integrations.
         "swarm" => 1150,
         "plugins" => 1100,
         "skills" => 1050,
         "mcp" => 1000,
-        // Fifth-tier: niche/system toggles.
+        // Niche/system toggles.
         "computer" => 900,
         "LisM" | "UM" => 850,
         _ => match command.source {
@@ -4130,12 +4131,13 @@ mod tui_output_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(labels[0], "/help");
-        assert_eq!(labels[1], "/status");
-        assert!(labels[..5].contains(&"/clear"));
-        assert!(labels[..5].contains(&"/resume"));
-        assert!(labels[..8].contains(&"/model"));
-        assert!(labels[..8].contains(&"/plan"));
-        assert!(labels[..10].contains(&"/tasks"));
+        assert_eq!(labels[1], "/clear");
+        assert!(labels[..6].contains(&"/model"));
+        assert!(labels[..6].contains(&"/plan"));
+        assert!(labels[..6].contains(&"/tasks"));
+        assert!(labels[..8].contains(&"/diff"));
+        assert!(labels[..8].contains(&"/review"));
+        assert!(labels[..10].contains(&"/context") || labels[..10].contains(&"/compact"));
     }
 
     #[test]
