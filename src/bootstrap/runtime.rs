@@ -409,10 +409,12 @@ struct TuiRenderedContent {
 #[derive(Debug, Clone, Copy)]
 struct TuiLayoutMetrics {
     content_height: usize,
+    separator_row: usize,
     status_row: usize,
     model_row: usize,
     gap_row: usize,
     input_row: usize,
+    suggestion_row: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2027,6 +2029,16 @@ fn render_tui_input_text_line(
     )
 }
 
+fn render_tui_bottom_panel_separator(width: usize) -> String {
+    colorize_ansi(&"─".repeat(width), "2;36")
+}
+
+fn render_tui_bottom_panel_meta_line(content: &str, width: usize) -> String {
+    let visible_width = tui_visible_width(content);
+    let padding = " ".repeat(width.saturating_sub(visible_width));
+    format!("{}{}", colorize_ansi(content, "2;37"), padding)
+}
+
 fn render_tui_content_line_with_palette(
     message_line: &str,
     width: usize,
@@ -2132,7 +2144,7 @@ fn tui_layout_metrics(
     suggestions: &[TuiSuggestion],
 ) -> TuiLayoutMetrics {
     const INPUT_BOX_HEIGHT: usize = 4;
-    const BOTTOM_PANEL_FIXED_ROWS: usize = 6;
+    const BOTTOM_PANEL_FIXED_ROWS: usize = 5;
     let suggestion_count = if input.starts_with('/') {
         suggestions.len().max(1)
     } else if !suggestions.is_empty() {
@@ -2140,15 +2152,19 @@ fn tui_layout_metrics(
     } else {
         0
     };
-    let bottom_reserved_height = BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_count;
     let height = terminal_rows.max(3);
+    let bottom_reserved_height =
+        BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_count;
     let content_height = height.saturating_sub(bottom_reserved_height);
+    let separator_row = content_height.saturating_add(1);
     TuiLayoutMetrics {
         content_height,
-        status_row: content_height.saturating_add(1).min(height),
-        model_row: content_height.saturating_add(2).min(height),
-        gap_row: content_height.saturating_add(3).min(height),
-        input_row: content_height.saturating_add(4).min(height),
+        separator_row,
+        status_row: separator_row.saturating_add(1),
+        model_row: separator_row.saturating_add(2),
+        gap_row: separator_row.saturating_add(3),
+        input_row: separator_row.saturating_add(4),
+        suggestion_row: separator_row.saturating_add(8),
     }
 }
 
@@ -2721,9 +2737,13 @@ fn render_fixed_tui_layout(
     frame.push_str(tui_clear_screen_prefix());
 
     for (row_index, line) in visible_lines.iter().enumerate() {
+        let row = row_index + 1;
+        if row > height {
+            break;
+        }
         frame.push_str(&format!(
             "\x1b[{};1H\x1b[2K{}",
-            row_index + 1,
+            row,
             render_tui_rendered_line(
                 line,
                 clamped_scroll_top + row_index,
@@ -2732,17 +2752,24 @@ fn render_fixed_tui_layout(
             )
         ));
     }
-    for row_index in visible_lines.len() + 1..=metrics.content_height {
-        frame.push_str(&format!("\x1b[{};1H\x1b[2K", row_index));
+    for row in visible_lines.len() + 1..=metrics.content_height.min(height) {
+        frame.push_str(&format!("\x1b[{};1H\x1b[2K", row));
     }
 
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K{}",
-        metrics.status_row, status_line
+        metrics.separator_row,
+        render_tui_bottom_panel_separator(width)
     ));
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K{}",
-        metrics.model_row, model_cwd_line
+        metrics.status_row,
+        render_tui_bottom_panel_meta_line(&strip_ansi_text(&status_line), width)
+    ));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.model_row,
+        render_tui_bottom_panel_meta_line(&strip_ansi_text(&model_cwd_line), width)
     ));
     frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
     for row_offset in 0..4 {
@@ -2762,18 +2789,17 @@ fn render_fixed_tui_layout(
         ));
     }
     for (index, line) in suggestion_lines.iter().enumerate() {
-        let row = metrics
-            .input_row
-            .saturating_add(4)
-            .saturating_add(index)
-            .min(height);
+        let row = metrics.suggestion_row.saturating_add(index).min(height);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row, line));
     }
-    let suggestion_end_row = metrics
-        .input_row
-        .saturating_add(4)
-        .saturating_add(suggestion_lines.len())
-        .saturating_sub(1);
+    let suggestion_end_row = if suggestion_lines.is_empty() {
+        metrics.suggestion_row.saturating_sub(1)
+    } else {
+        metrics
+            .suggestion_row
+            .saturating_add(suggestion_lines.len())
+            .saturating_sub(1)
+    };
     for row in suggestion_end_row.saturating_add(1)..=height {
         frame.push_str(&format!("\x1b[{};1H\x1b[2K", row));
     }
@@ -3110,7 +3136,7 @@ mod tui_output_tests {
 
         let status_pos = rendered.find("Worked for 2m 37s").expect("worked status");
         let model_pos = rendered
-            .find("default-model")
+            .rfind("default-model · ~/MProject/LearnCCfromCC")
             .expect("model and cwd line should render");
         let input_pos = rendered.find(">").expect("input prompt should render");
 
@@ -3588,7 +3614,17 @@ mod tui_output_tests {
     fn tui_initial_screen_includes_startup_card_and_ready_text() {
         let app_state = test_app_state();
         let screen = super::build_initial_tui_screen(&app_state);
-        let rendered = strip_ansi_for_test(&super::render_tui_screen_output(&screen));
+        let rendered = strip_ansi_for_test(&super::render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            None,
+            0,
+            TuiTurnStatus::Idle,
+            0,
+            &TuiSelectionState::default(),
+        ));
 
         assert!(rendered.contains(">_ Morgo"));
         assert!(rendered.contains(tui_startup_greeting(&app_state.active_session_id)));
