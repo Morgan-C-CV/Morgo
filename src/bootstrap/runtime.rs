@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1724,36 +1726,98 @@ fn tui_startup_model_label(app_state: &AppState) -> String {
     }
 }
 
+const TUI_STARTUP_GREETINGS: [&str; 8] = [
+    "ready when you are",
+    "what are we fixing today?",
+    "repo open, tools warm",
+    "point me at the next bug",
+    "steady hands, sharp diffs",
+    "let's ship something tidy",
+    "coffee not required",
+    "code first, fuss later",
+];
+
+const TUI_STARTUP_FACES: [&str; 8] = [
+    "(•‿•)",
+    "(^_^)",
+    "(>ω<)",
+    "(=^･ω･^=)",
+    "(˶ᵔ ᵕ ᵔ˶)",
+    "(•̀ᴗ•́)و",
+    "(｡•̀ᴗ-)✧",
+    "(≧▽≦)",
+];
+
+fn tui_startup_variant_index(session_id: &str, salt: &str, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    salt.hash(&mut hasher);
+    (hasher.finish() as usize) % count
+}
+
+fn tui_startup_greeting(session_id: &str) -> &'static str {
+    TUI_STARTUP_GREETINGS
+        [tui_startup_variant_index(session_id, "startup-greeting", TUI_STARTUP_GREETINGS.len())]
+}
+
+fn tui_startup_face(session_id: &str) -> &'static str {
+    TUI_STARTUP_FACES
+        [tui_startup_variant_index(session_id, "startup-face", TUI_STARTUP_FACES.len())]
+}
+
+fn tui_visible_width(text: &str) -> usize {
+    let stripped = strip_ansi_text(text);
+    UnicodeWidthStr::width(stripped.as_str())
+}
+
+fn tui_box_edge_content(left: &str, right: &str, width: usize) -> String {
+    let left_width = tui_visible_width(left);
+    let right_width = tui_visible_width(right);
+    let gap = width.saturating_sub(left_width.saturating_add(right_width));
+    format!("{left}{}{right}", " ".repeat(gap))
+}
+
 fn tui_box_line(content: &str, width: usize) -> String {
-    let visible_width = UnicodeWidthStr::width(content);
+    let visible_width = tui_visible_width(content);
     let padding = " ".repeat(width.saturating_sub(visible_width));
     format!("│ {content}{padding} │")
 }
 
 fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
+    let title = colorize_ansi(">_ Morgo", "1;34");
+    let greeting = colorize_ansi(tui_startup_greeting(&app_state.active_session_id), "90");
+    let face = colorize_ansi(tui_startup_face(&app_state.active_session_id), "1;36");
     let model_value = tui_startup_model_label(app_state);
     let directory_value = shorten_home_path(&app_state.current_working_directory());
     let model_line = format!("model:     {model_value}   /model to change");
     let directory_line = format!("directory: {directory_value}");
     let content_width = [
-        UnicodeWidthStr::width(">_ Morgo"),
+        tui_visible_width(&title) + tui_visible_width(&face) + 1,
+        tui_visible_width(&greeting),
         0,
-        UnicodeWidthStr::width(model_line.as_str()),
-        UnicodeWidthStr::width(directory_line.as_str()),
-        43usize,
+        0,
+        tui_visible_width(model_line.as_str()),
+        tui_visible_width(directory_line.as_str()),
+        49usize,
     ]
     .into_iter()
     .max()
-    .unwrap_or(43);
+    .unwrap_or(49);
+    let title_line = tui_box_edge_content(&title, &face, content_width);
     let top = format!("╭{}╮", "─".repeat(content_width + 2));
     let bottom = format!("╰{}╯", "─".repeat(content_width + 2));
 
     vec![
         top,
-        tui_box_line(">_ Morgo", content_width),
+        tui_box_line(&title_line, content_width),
+        tui_box_line(&greeting, content_width),
         tui_box_line("", content_width),
         tui_box_line(&model_line, content_width),
         tui_box_line(&directory_line, content_width),
+        tui_box_line("", content_width),
         bottom,
     ]
 }
@@ -2829,7 +2893,7 @@ mod tui_output_tests {
         render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
         selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_terminal_program_is_ide,
+        tui_startup_face, tui_startup_greeting, tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -3473,16 +3537,30 @@ mod tui_output_tests {
 
     #[test]
     fn tui_initial_screen_includes_startup_card_and_ready_text() {
-        let screen = super::build_initial_tui_screen(&test_app_state());
+        let app_state = test_app_state();
+        let screen = super::build_initial_tui_screen(&app_state);
         let rendered = strip_ansi_for_test(&super::render_tui_screen_output(&screen));
 
         assert!(rendered.contains(">_ Morgo"));
+        assert!(rendered.contains(tui_startup_greeting(&app_state.active_session_id)));
+        assert!(rendered.contains(tui_startup_face(&app_state.active_session_id)));
         assert!(rendered.contains("model:     default-model   /model to change"));
         assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
         assert!(rendered.contains("Morgo is ready for coding tasks."));
         assert!(
             rendered.contains("Ask me to inspect code, edit files, or run verification commands.")
         );
+    }
+
+    #[test]
+    fn tui_startup_variants_are_stable_per_session() {
+        let session_id = "stable-session-id";
+
+        assert_eq!(
+            tui_startup_greeting(session_id),
+            tui_startup_greeting(session_id)
+        );
+        assert_eq!(tui_startup_face(session_id), tui_startup_face(session_id));
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
