@@ -396,6 +396,7 @@ struct TuiRenderedLine {
     source_text: String,
     source_cells: Vec<TuiSourceCell>,
     rendered_cells: Vec<TuiCell>,
+    wrapped_continuation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2128,8 +2129,11 @@ fn parse_tui_styled_cells(line: &str, source_cell_count: usize) -> Vec<TuiCell> 
     cells
 }
 
-fn build_tui_rendered_line(raw_line: &str, width: usize) -> TuiRenderedLine {
-    let source_text = tui_selection_source_line(raw_line);
+fn build_tui_rendered_line_with_source(
+    raw_line: &str,
+    width: usize,
+    source_text: String,
+) -> TuiRenderedLine {
     let source_cells = tui_source_cells(&source_text);
     let styled_line = render_tui_content_line(raw_line, width);
     let rendered_cells = parse_tui_styled_cells(&styled_line, source_cells.len());
@@ -2137,7 +2141,12 @@ fn build_tui_rendered_line(raw_line: &str, width: usize) -> TuiRenderedLine {
         source_text,
         source_cells,
         rendered_cells,
+        wrapped_continuation: false,
     }
+}
+
+fn build_tui_rendered_line(raw_line: &str, width: usize) -> TuiRenderedLine {
+    build_tui_rendered_line_with_source(raw_line, width, tui_selection_source_line(raw_line))
 }
 
 fn build_tui_rendered_lines(raw_line: &str, width: usize) -> Vec<TuiRenderedLine> {
@@ -2167,10 +2176,18 @@ fn build_tui_rendered_lines(raw_line: &str, width: usize) -> Vec<TuiRenderedLine
             } else {
                 continuation_prefix
             };
-            build_tui_rendered_line(
+            let source_text = if index == 0 {
+                format!("{prefix}{}", line.text)
+            } else {
+                line.text.clone()
+            };
+            let mut rendered_line = build_tui_rendered_line_with_source(
                 &format!("{TUI_USER_MESSAGE_MARKER}{prefix}{}", line.text),
                 width,
-            )
+                source_text,
+            );
+            rendered_line.wrapped_continuation = index > 0;
+            rendered_line
         })
         .collect()
 }
@@ -2432,11 +2449,13 @@ fn shift_selection_for_scroll(
 
 fn selected_text(content: &TuiRenderedContent, selection: &TuiSelectionState) -> Option<String> {
     let (start, end) = tui_selection_bounds(content, selection)?;
-    let mut lines = Vec::new();
+    let mut selected = String::new();
     for line_index in start.line..=end.line {
         let line = content.lines.get(line_index)?;
         if line.source_cells.is_empty() {
-            lines.push(String::new());
+            if !line.wrapped_continuation && !selected.is_empty() {
+                selected.push('\n');
+            }
             continue;
         }
         let start_unit = if line_index == start.line {
@@ -2453,9 +2472,12 @@ fn selected_text(content: &TuiRenderedContent, selection: &TuiSelectionState) ->
             .iter()
             .map(|cell| cell.ch)
             .collect::<String>();
-        lines.push(selected_line);
+        if line_index > start.line && !line.wrapped_continuation {
+            selected.push('\n');
+        }
+        selected.push_str(&selected_line);
     }
-    Some(lines.join("\n"))
+    Some(selected)
 }
 
 fn osc52_copy_sequence(text: &str) -> String {
@@ -3196,6 +3218,37 @@ mod tui_output_tests {
         assert!(plain.iter().any(|line| line.contains("sent")), "{plain:?}");
         assert!(plain.iter().any(|line| line.contains("sho")), "{plain:?}");
         assert!(plain.iter().any(|line| line.contains("wrap")), "{plain:?}");
+    }
+
+    #[test]
+    fn tui_wrapped_transcript_selection_preserves_single_message_text() {
+        let line = format!(
+            "{}> this is a long sent message that should wrap",
+            super::TUI_USER_MESSAGE_MARKER
+        );
+        let rendered_lines = super::build_tui_rendered_lines(&line, 14);
+        let content = super::TuiRenderedContent {
+            lines: rendered_lines.clone(),
+        };
+        let last_line = rendered_lines.len().saturating_sub(1);
+        let last_unit = rendered_lines[last_line]
+            .source_cells
+            .len()
+            .saturating_sub(1);
+        let selection = TuiSelectionState {
+            anchor: Some(TuiDocumentPosition { line: 0, unit: 0 }),
+            focus: Some(TuiDocumentPosition {
+                line: last_line,
+                unit: last_unit,
+            }),
+            mode: TuiSelectionMode::Char,
+            dragging: false,
+        };
+
+        assert_eq!(
+            selected_text(&content, &selection).as_deref(),
+            Some("> this is a long sent message that should wrap")
+        );
     }
 
     #[test]
@@ -4876,7 +4929,11 @@ impl RuntimeBootstrap {
         cursor_index: usize,
         selection: &TuiSelectionState,
     ) {
-        let mut screen = tui_content_screen(app_state, document);
+        let mut screen = if document.blocks.is_empty() {
+            build_initial_tui_screen(app_state)
+        } else {
+            tui_content_screen(app_state, document)
+        };
         screen.prompt = vec![
             format!(
                 "{} {}",
