@@ -1748,6 +1748,17 @@ const TUI_STARTUP_FACES: [&str; 8] = [
     "(≧▽≦)",
 ];
 
+const TUI_STARTUP_FACE_FRAMES: [[&str; 4]; 8] = [
+    ["(•‿•)", "(•◡•)", "(•ᴗ•)", "(•‿•)"],
+    ["(^_^)", "(^.^)", "(^-^)", "(^_^ )"],
+    ["(>ω<)", "(>▽<)", "(>‿<)", "(>ω<)"],
+    ["(=^･ω･^=)", "(=^･^=)", "(=^･o･^=)", "(=^･ω･^=)"],
+    ["(˶ᵔ ᵕ ᵔ˶)", "(˶ᵔ ᗜ ᵔ˶)", "(˶ᵔ ᴗ ᵔ˶)", "(˶ᵔ ᵕ ᵔ˶)"],
+    ["(•̀ᴗ•́)و", "(•̀▽•́)و", "(•̀ ᴗ •́)و", "(•̀ᴗ•́)و"],
+    ["(｡•̀ᴗ-)✧", "(｡•ᴗ-)✧", "(｡•‿-)✧", "(｡•̀ᴗ-)✧"],
+    ["(≧▽≦)", "(≧◡≦)", "(≧ᴗ≦)", "(≧▽≦)"],
+];
+
 fn tui_startup_variant_index(session_id: &str, salt: &str, count: usize) -> usize {
     if count == 0 {
         return 0;
@@ -1766,6 +1777,21 @@ fn tui_startup_greeting(session_id: &str) -> &'static str {
 fn tui_startup_face(session_id: &str) -> &'static str {
     TUI_STARTUP_FACES
         [tui_startup_variant_index(session_id, "startup-face", TUI_STARTUP_FACES.len())]
+}
+
+fn tui_startup_face_frame(session_id: &str) -> &'static str {
+    let base_face = tui_startup_face(session_id);
+    let face_index = TUI_STARTUP_FACES
+        .iter()
+        .position(|face| *face == base_face)
+        .unwrap_or(0);
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let frame_index =
+        ((elapsed / 900) as usize + face_index) % TUI_STARTUP_FACE_FRAMES[face_index].len();
+    TUI_STARTUP_FACE_FRAMES[face_index][frame_index]
 }
 
 fn tui_visible_width(text: &str) -> usize {
@@ -1789,11 +1815,21 @@ fn tui_box_line(content: &str, width: usize) -> String {
 fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
     let title = colorize_ansi(">_ Morgo", "1;34");
     let greeting = colorize_ansi(tui_startup_greeting(&app_state.active_session_id), "90");
-    let face = colorize_ansi(tui_startup_face(&app_state.active_session_id), "1;36");
+    let face = colorize_ansi(tui_startup_face_frame(&app_state.active_session_id), "1;36");
     let model_value = tui_startup_model_label(app_state);
     let directory_value = shorten_home_path(&app_state.current_working_directory());
-    let model_line = format!("model:     {model_value}   /model to change");
-    let directory_line = format!("directory: {directory_value}");
+    let model_line = format!(
+        "{}{}     {}",
+        colorize_ansi("model", "1;34"),
+        colorize_ansi(":", "2;36"),
+        colorize_ansi(&format!("{model_value}   /model to change"), "2;37")
+    );
+    let directory_line = format!(
+        "{}{} {}",
+        colorize_ansi("directory", "1;34"),
+        colorize_ansi(":", "2;36"),
+        colorize_ansi(&directory_value, "2;37")
+    );
     let content_width = [
         tui_visible_width(&title) + tui_visible_width(&face) + 1,
         tui_visible_width(&greeting),
@@ -2893,7 +2929,8 @@ mod tui_output_tests {
         render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
         selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_startup_face, tui_startup_greeting, tui_terminal_program_is_ide,
+        tui_startup_face, tui_startup_face_frame, tui_startup_greeting,
+        tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::registry::CommandRegistry;
@@ -3561,6 +3598,20 @@ mod tui_output_tests {
             tui_startup_greeting(session_id)
         );
         assert_eq!(tui_startup_face(session_id), tui_startup_face(session_id));
+    }
+
+    #[test]
+    fn tui_startup_face_animation_stays_within_same_character_family() {
+        let session_id = "stable-session-id";
+        let base_face = tui_startup_face(session_id);
+        let animated_face = tui_startup_face_frame(session_id);
+
+        assert!(!animated_face.is_empty());
+        assert!(
+            [base_face, animated_face]
+                .iter()
+                .all(|face| face.starts_with('(') && face.ends_with(')'))
+        );
     }
 
     fn strip_ansi_for_test(text: &str) -> String {
@@ -4576,6 +4627,8 @@ impl RuntimeBootstrap {
 
             let refresh_interval = if active_turn_started_at.is_some() {
                 Duration::from_millis(200)
+            } else if current_document.blocks.is_empty() {
+                Duration::from_millis(900)
             } else {
                 Duration::from_secs(60)
             };
