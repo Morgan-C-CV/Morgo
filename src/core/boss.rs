@@ -960,7 +960,21 @@ fn runtime_evidence_refs_from_tool_records(step: &BossPlanStep) -> Vec<String> {
 }
 
 fn runtime_content_evidence_section(step: &BossPlanStep) -> Option<String> {
-    let target_path = primary_declared_artifact_path(step)?;
+    let mut target_paths = step
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind != "directory")
+        .map(|artifact| artifact.path.clone())
+        .collect::<Vec<_>>();
+    if target_paths.is_empty() {
+        if let Some(target_path) = primary_declared_artifact_path(step) {
+            target_paths.push(target_path);
+        }
+    }
+    if target_paths.is_empty() {
+        return None;
+    }
     let mut lines = Vec::new();
 
     for record in &step.tool_execution_records {
@@ -970,7 +984,10 @@ fn runtime_content_evidence_section(step: &BossPlanStep) -> Option<String> {
         let Some(path) = observable_path_local(record) else {
             continue;
         };
-        if path != target_path {
+        if !target_paths
+            .iter()
+            .any(|target_path| evidence_path_scope_matches(&path, target_path))
+        {
             continue;
         }
         let Some(detail) = record.detail.as_deref() else {
@@ -4441,6 +4458,145 @@ fn append_restricted_verifier_runtime_records(
     }
 }
 
+fn restricted_verifier_file_detail(content: &str) -> String {
+    if content.chars().count() <= 4_000 {
+        content.to_string()
+    } else {
+        let head = trim_runtime_excerpt(content, 2_000);
+        let tail = single_line_runtime_tail_excerpt(content, 2_000);
+        format!("{head}\n[trimmed middle of restricted verifier read]\n{tail}")
+    }
+}
+
+fn append_local_restricted_verifier_record(
+    step: &mut BossPlanStep,
+    tool_name: &str,
+    path: &str,
+    summary: &str,
+    detail: String,
+) {
+    let observable_key = if tool_name == "ArtifactVerify" {
+        "target_path"
+    } else {
+        "file_path"
+    };
+    append_step_runtime_record(
+        step,
+        ToolExecutionRecord {
+            tool_name: tool_name.into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: summary.into(),
+            detail: Some(detail),
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(observable_input_json(json!({
+                observable_key: path,
+                "source": "restricted_verifier_local",
+            }))),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        },
+    );
+}
+
+fn append_local_restricted_verifier_evidence(
+    step: &mut BossPlanStep,
+    targets: &[String],
+) -> anyhow::Result<String> {
+    let mut lines = Vec::new();
+    let mut evidence_refs = Vec::new();
+
+    for artifact in step.stage_execution_contract.declared_artifacts.clone() {
+        if artifact.kind != "directory" {
+            continue;
+        }
+        let path = Path::new(&artifact.path);
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => metadata,
+            _ => continue,
+        };
+        let entries = std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        entry
+                            .metadata()
+                            .ok()
+                            .map(|metadata| format!("{name}:{} bytes", metadata.len()))
+                    })
+                    .take(20)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if entries.is_empty() {
+            continue;
+        }
+        let detail = format!(
+            "directory exists and is non-empty; entries={}",
+            entries.join(" | ")
+        );
+        lines.push(format!(
+            "verification:{} kind=directory entries={} modified={:?}",
+            artifact.path,
+            entries.len(),
+            metadata.modified().ok()
+        ));
+        push_unique_evidence_ref(
+            &mut evidence_refs,
+            &format!("verification:{}", artifact.path),
+        );
+        append_local_restricted_verifier_record(
+            step,
+            "ArtifactVerify",
+            &artifact.path,
+            "restricted verifier confirmed declared directory exists and is non-empty",
+            detail,
+        );
+    }
+
+    for target in targets {
+        let path = Path::new(target);
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        let content = std::fs::read_to_string(path).unwrap_or_else(|_| {
+            format!(
+                "[restricted verifier read non-UTF8 or binary file; size={} bytes]",
+                metadata.len()
+            )
+        });
+        let detail = restricted_verifier_file_detail(&content);
+        lines.push(format!(
+            "read:{target} bytes={} head={} tail={}",
+            metadata.len(),
+            single_line_runtime_excerpt(&content, 200),
+            single_line_runtime_tail_excerpt(&content, 200)
+        ));
+        push_unique_evidence_ref(&mut evidence_refs, &format!("read:{target}"));
+        append_local_restricted_verifier_record(
+            step,
+            "Read",
+            target,
+            "restricted verifier read declared target file",
+            detail,
+        );
+    }
+
+    if lines.is_empty() {
+        anyhow::bail!("local restricted verifier found no readable target evidence");
+    }
+
+    append_restricted_verifier_runtime_records(step, &lines.join("\n"), &evidence_refs);
+    Ok(lines.join("\n"))
+}
+
 fn append_artifact_verification_runtime_records(
     step: &mut BossPlanStep,
     status: &str,
@@ -4860,14 +5016,14 @@ fn review_decision_requests_restricted_verification(
     decision: &crate::core::boss_actor_runtime::ReviewDecision,
     completion_gate_closed: bool,
 ) -> bool {
-    if completion_gate_closed {
-        return false;
-    }
     match decision {
         crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence { .. } => true,
-        crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => correction
-            .as_deref()
-            .is_some_and(missing_evidence_action_mentions_review_gap),
+        crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => {
+            correction
+                .as_deref()
+                .is_some_and(missing_evidence_action_mentions_review_gap)
+                && !completion_gate_closed
+        }
         _ => false,
     }
 }
@@ -4925,16 +5081,6 @@ fn restricted_verifier_read_refs(output: &str, allowed_targets: &[String]) -> Ve
     refs
 }
 
-fn push_unique_review_target(targets: &mut Vec<String>, value: &str) {
-    let value = normalize_review_verifier_target(value);
-    if value.is_empty() {
-        return;
-    }
-    if !value.is_empty() && !targets.iter().any(|target| target == &value) {
-        targets.push(value);
-    }
-}
-
 fn normalize_review_verifier_target(value: &str) -> String {
     normalize_review_verifier_target_with_cwd(value, std::env::current_dir().ok().as_deref())
 }
@@ -4971,6 +5117,32 @@ fn normalize_review_verifier_target_with_cwd(value: &str, cwd: Option<&Path>) ->
     }
 
     normalized
+}
+
+fn concrete_path_tokens_from_review_text(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
+        })
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, ':' | '.' | ',' | ';')))
+        .filter(|token| !token.trim().is_empty())
+        .filter(|token| {
+            token.starts_with('/')
+                || token.starts_with("./")
+                || token.starts_with("../")
+                || token.starts_with('$')
+                || token.contains('/')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn push_review_verifier_target(targets: &mut Vec<String>, step: &BossPlanStep, value: &str) {
+    let normalized = normalize_review_verifier_target(value);
+    if normalized.is_empty() {
+        return;
+    }
+    push_readable_verification_target(targets, step, &normalized);
 }
 
 impl BossCoordinator {
@@ -5758,12 +5930,6 @@ impl BossCoordinator {
         if app_state.active_model_runtime.is_none() {
             anyhow::bail!("active model runtime not available for restricted verifier");
         }
-        let tasks = app_state
-            .permission_context
-            .task_manager
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("task manager not available for restricted verifier"))?
-            .clone();
         let (step, metadata) = self
             .refresh_routed_metadata_for_review(step_id)
             .await
@@ -5772,6 +5938,25 @@ impl BossCoordinator {
         if targets.is_empty() {
             anyhow::bail!("restricted verifier has no concrete target");
         }
+        if let Ok(output) = {
+            let mut plan_guard = self.plan.write().await;
+            if let Some(step) = plan_guard
+                .as_mut()
+                .and_then(|plan| plan.steps.iter_mut().find(|step| step.id == step_id))
+            {
+                append_local_restricted_verifier_evidence(step, &targets)
+            } else {
+                anyhow::bail!("review step {step_id} not found")
+            }
+        } {
+            return Ok(output);
+        }
+        let tasks = app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("task manager not available for restricted verifier"))?
+            .clone();
         let task = format!(
             "Restricted review verification for boss step {step_id}.\n\
              You are verify_child. Do not spawn agents or broaden the task.\n\
@@ -5832,25 +6017,37 @@ impl BossCoordinator {
         decision: &crate::core::boss_actor_runtime::ReviewDecision,
     ) -> Vec<String> {
         let mut targets = Vec::new();
+        for target in verification_gap_required_targets(step, metadata) {
+            push_review_verifier_target(&mut targets, step, &target);
+        }
+        for artifact in &step.stage_execution_contract.declared_artifacts {
+            push_review_verifier_target(&mut targets, step, &artifact.path);
+        }
         if let crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
             missing_evidence,
             ..
         } = decision
         {
             for item in missing_evidence {
-                push_unique_review_target(&mut targets, item);
+                for token in concrete_path_tokens_from_review_text(item) {
+                    push_review_verifier_target(&mut targets, step, &token);
+                }
             }
         }
         if targets.is_empty() {
             for target in verification_gap_required_targets(step, metadata) {
-                push_unique_review_target(&mut targets, &target);
+                push_review_verifier_target(&mut targets, step, &target);
             }
         }
         if targets.is_empty() {
             for expectation in
                 extract_artifact_expectations(&current_task_contract_text(step.objective()))
             {
-                push_unique_review_target(&mut targets, &expectation.path.display().to_string());
+                push_review_verifier_target(
+                    &mut targets,
+                    step,
+                    &expectation.path.display().to_string(),
+                );
             }
         }
         targets
@@ -9557,12 +9754,8 @@ impl BossCoordinator {
                                         review_summary,
                                     ))
                                     .await?;
-                                    let plan_complete = self
-                                        .plan
-                                        .read()
-                                        .await
-                                        .as_ref()
-                                        .is_some_and(|plan| {
+                                    let plan_complete =
+                                        self.plan.read().await.as_ref().is_some_and(|plan| {
                                             plan.steps.iter().all(|step| step.completed)
                                         });
                                     if plan_complete {
@@ -16892,9 +17085,10 @@ mod tests {
         assert!(prompt.contains("No tools are available"));
         assert!(prompt.contains("Use only the review package below"));
         assert!(prompt.contains("Treat prose-only claims as weak evidence"));
-        assert!(prompt.contains(
-            "Coordinator-provided inline excerpts and historical reference material"
-        ));
+        assert!(
+            prompt
+                .contains("Coordinator-provided inline excerpts and historical reference material")
+        );
         assert!(!prompt.contains("Coordinator verdict:"));
         assert!(prompt.contains("Summary: worker prose says files were read"));
         assert!(prompt.contains("\"verdict\""));
@@ -16987,7 +17181,11 @@ mod tests {
         assert!(summary.contains("Completion evidence status: sufficient"));
         assert!(summary.contains("Worker structured report:"));
         assert!(summary.contains("\"review_mode\": \"independent_review\""));
-        assert!(summary.contains("Tool dispatch summary: 1. tool=Write kind=Success summary=Write succeeded"));
+        assert!(
+            summary.contains(
+                "Tool dispatch summary: 1. tool=Write kind=Success summary=Write succeeded"
+            )
+        );
     }
 
     #[test]
@@ -17039,9 +17237,136 @@ mod tests {
         assert!(review_decision_requests_restricted_verification(
             &decision, false
         ));
-        assert!(!review_decision_requests_restricted_verification(
+        assert!(review_decision_requests_restricted_verification(
             &decision, true
         ));
+    }
+
+    #[test]
+    fn restricted_verifier_targets_prefer_typed_contract_over_review_prose() {
+        let target_dir = "/tmp/rustagent-review-targets";
+        let readme = format!("{target_dir}/README.md");
+        let coordinator = BossCoordinator::new();
+        let step = BossPlanStep {
+            id: 0,
+            description: "create static site".into(),
+            objective: Some(format!("create site in {target_dir}")),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:step0:0".into(),
+                        path: target_dir.into(),
+                        kind: "directory".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: Vec::new(),
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:step0:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: Vec::new(),
+                    },
+                ],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+        let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary: "need listing".into(),
+            audited_items: Vec::new(),
+            evidence_used: Vec::new(),
+            missing_evidence: vec![format!(
+                "Directory listing of {target_dir} and content evidence for {readme}"
+            )],
+            weak_evidence_used: Vec::new(),
+            required_next_action: Some("restricted_verification".into()),
+        };
+
+        let targets = coordinator.restricted_verifier_targets(&step, None, &decision);
+
+        assert_eq!(targets, vec![readme]);
+        assert!(
+            targets
+                .iter()
+                .all(|target| !target.contains("Directory listing"))
+        );
+    }
+
+    #[test]
+    fn runtime_content_evidence_includes_declared_child_file_when_primary_is_directory() {
+        let target_dir = "/tmp/rustagent-review-content";
+        let readme = format!("{target_dir}/README.md");
+        let step = BossPlanStep {
+            id: 0,
+            description: "create static site".into(),
+            objective: Some(format!("create site in {target_dir}")),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                declared_artifacts: vec![
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:step0:0".into(),
+                        path: target_dir.into(),
+                        kind: "directory".into(),
+                        required_actions: Vec::new(),
+                        required_evidence: Vec::new(),
+                    },
+                    DeclaredArtifactContract {
+                        ref_id: "artifact:step0:1".into(),
+                        path: readme.clone(),
+                        kind: "file".into(),
+                        required_actions: Vec::new(),
+                        required_evidence: Vec::new(),
+                    },
+                ],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Read".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "read README".into(),
+                detail: Some("# RustAgent\n\n## Boss Mode\ncontent".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({ "file_path": readme }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        let section = runtime_content_evidence_section(&step).expect("content evidence");
+
+        assert!(section.contains("read:/tmp/rustagent-review-content/README.md"));
+        assert!(section.contains("RustAgent"));
     }
 
     #[test]

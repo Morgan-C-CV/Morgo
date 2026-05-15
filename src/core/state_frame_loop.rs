@@ -5371,7 +5371,10 @@ mod tests {
 
         assert_eq!(decision.decision, DecisionKind::Done);
         assert!(decision.next_action.is_none());
-        assert_eq!(decision.state_patch.accepted_summary_add, vec!["artifact ready"]);
+        assert_eq!(
+            decision.state_patch.accepted_summary_add,
+            vec!["artifact ready"]
+        );
     }
 
     #[test]
