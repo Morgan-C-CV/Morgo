@@ -7031,6 +7031,17 @@ fn t25_recent_content_preserved_after_trim() {
     );
 }
 
+/// T25.4.1: UTF-8 payloads trim safely without splitting multibyte characters.
+#[test]
+fn t25_trim_handles_multibyte_utf8_tail() {
+    let threshold = 8usize;
+    let keep = 4usize;
+    let payload = "前缀中文🙂尾巴中文🙂";
+    let result = trim_context_payload(payload, threshold, keep);
+    let expected_tail: String = payload.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+    assert!(result.contains(&expected_tail));
+}
+
 /// T25.5: trim_context_payload does not modify BossPlan or session_snapshot.
 #[tokio::test]
 async fn t25_trim_does_not_persist_to_plan_or_snapshot() {
@@ -7140,6 +7151,15 @@ async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
     );
 
     let _ = std::fs::remove_file(&plan_path);
+}
+
+/// T25.2.6: summarize-path tail splitting stays UTF-8 safe for multibyte content.
+#[test]
+fn t25_2_summarize_tail_split_handles_multibyte_utf8() {
+    let payload = "老上下文🙂".repeat(10) + "最新尾巴中文🙂";
+    let result = trim_context_payload(&payload, 8, 4);
+    let expected_tail: String = payload.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    assert!(result.contains(&expected_tail));
 }
 
 /// T25.2.6 production path: ask_b_session with oversized payload.

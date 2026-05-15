@@ -10543,24 +10543,25 @@ refresh_reason: {}\n\n{}",
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("active model runtime not available"))?;
 
-        let original_chars = message.len();
-        let message = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
+        let original_chars = message.chars().count();
+        let message = if original_chars > B_CONTEXT_TRIM_THRESHOLD {
             trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS)
         } else {
             message
         };
+        let sent_chars = message.chars().count();
         {
             let mut guard = self.status.write().await;
             guard.last_a_dispatch_message = Some(message.clone());
             guard.last_step_metrics = Some(BossStepMetrics {
-                compression_strategy: if original_chars == message.len() {
+                compression_strategy: if original_chars == sent_chars {
                     CompressionStrategy::None
                 } else {
                     CompressionStrategy::Trimmed
                 },
                 context_mode: ContextMode::Brief,
                 original_chars,
-                sent_chars: message.len(),
+                sent_chars,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
                 cache_prefix_instability: false,
@@ -10808,11 +10809,9 @@ refresh_reason: {}\n\n{}",
 
         // Compress outbound payload before sending — does not modify BossPlan or session_snapshot.
         // Prefer LLM summarize via stateless provider call; fall back to character-truncation trim if unavailable.
-        let original_chars = message.len();
-        let (message, compression_strategy) = if message.len() > B_CONTEXT_TRIM_THRESHOLD {
-            let split = message.len().saturating_sub(B_CONTEXT_KEEP_CHARS);
-            let old_part = &message[..split];
-            let recent_tail = &message[split..];
+        let original_chars = message.chars().count();
+        let (message, compression_strategy) = if original_chars > B_CONTEXT_TRIM_THRESHOLD {
+            let (old_part, recent_tail) = split_payload_tail(&message, B_CONTEXT_KEEP_CHARS);
             match self.summarize_context_stateless(app_state, old_part).await {
                 Ok(summary) => (
                     assemble_summarized_payload(&summary, recent_tail),
@@ -11084,24 +11083,35 @@ pub const B_CONTEXT_TRIM_THRESHOLD: usize = 80_000;
 /// Default number of characters to keep (tail window) when trimming.
 pub const B_CONTEXT_KEEP_CHARS: usize = 40_000;
 
+fn split_payload_tail(payload: &str, keep_chars: usize) -> (&str, &str) {
+    let total_chars = payload.chars().count();
+    if keep_chars >= total_chars {
+        return ("", payload);
+    }
+    let split_char_index = total_chars - keep_chars;
+    let split_byte_index = payload
+        .char_indices()
+        .nth(split_char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or(payload.len());
+    payload.split_at(split_byte_index)
+}
+
 /// Trim an outbound B context payload to at most `keep_chars` characters.
 ///
-/// If `payload.len() <= threshold`, returns the payload unchanged.
+/// If `payload.chars().count() <= threshold`, returns the payload unchanged.
 /// Otherwise, keeps the last `keep_chars` characters and prepends a fixed notice line
 /// so the provider knows earlier context was omitted.
 ///
 /// This operates only on the runtime payload string — it never touches BossPlan,
 /// session_snapshot, or any persisted state.
 pub fn trim_context_payload(payload: &str, threshold: usize, keep_chars: usize) -> String {
-    if payload.len() <= threshold {
+    let total_chars = payload.chars().count();
+    if total_chars <= threshold || keep_chars >= total_chars {
         return payload.to_string();
     }
-    let omitted = payload.len().saturating_sub(keep_chars);
-    let tail = if keep_chars >= payload.len() {
-        payload
-    } else {
-        &payload[payload.len() - keep_chars..]
-    };
+    let (_, tail) = split_payload_tail(payload, keep_chars);
+    let omitted = total_chars.saturating_sub(tail.chars().count());
     format!("[trimmed earlier context: {omitted} chars omitted]\n{tail}")
 }
 
