@@ -16858,7 +16858,7 @@ mod tests {
     fn step_review_trim_preserves_protocol_header() {
         let summary = format!("old context\n{}\nRECENT_REVIEW_TAIL", "x".repeat(1_000));
         let prompt = build_step_review_prompt(0, &summary, None);
-        let trimmed = trim_step_review_prompt(&prompt, 2_200, 250).expect("trim review prompt");
+        let trimmed = trim_step_review_prompt(&prompt, 3_000, 250).expect("trim review prompt");
 
         assert!(trimmed.len() < prompt.len());
         assert!(trimmed.contains("Return exactly one JSON object"));
@@ -16872,7 +16872,7 @@ mod tests {
     fn step_review_trim_handles_multibyte_tail() {
         let summary = format!("{}最新尾巴中文🙂", "旧上下文🙂".repeat(200));
         let prompt = build_step_review_prompt(3, &summary, None);
-        let trimmed = trim_step_review_prompt(&prompt, 2_200, 120).expect("trim review prompt");
+        let trimmed = trim_step_review_prompt(&prompt, 3_000, 120).expect("trim review prompt");
 
         assert!(trimmed.contains("Return exactly one JSON object"));
         assert!(trimmed.contains("Review package:"));
