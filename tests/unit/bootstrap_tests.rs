@@ -4221,7 +4221,10 @@ async fn clear_command_returns_new_session_trap() {
         .await
         .expect("clear command should succeed");
 
-    assert_eq!(result, CommandResult::SystemTrap(SystemTrapAction::NewSession));
+    assert_eq!(
+        result,
+        CommandResult::SystemTrap(SystemTrapAction::NewSession)
+    );
 }
 
 #[tokio::test]
@@ -4270,16 +4273,17 @@ async fn resume_command_without_args_keeps_cli_summary_output() {
         .to_plain_text()
         .expect("resume command should return summary text");
     assert!(text.contains("Resume summary:"), "{text}");
-    assert!(text.contains("Current Session ID: shutdown-session"), "{text}");
+    assert!(
+        text.contains("Current Session ID: shutdown-session"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
 async fn session_command_surfaces_parent_id_from_session_listing() {
     let store = Arc::new(InMemorySessionStore::default());
-    let app_state = shutdown_test_app_state_with_store(
-        store.clone(),
-        Arc::new(TaskManager::default()),
-    );
+    let app_state =
+        shutdown_test_app_state_with_store(store.clone(), Arc::new(TaskManager::default()));
     let session_id = app_state.current_session_id();
 
     store

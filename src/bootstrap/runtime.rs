@@ -281,7 +281,10 @@ fn tui_is_clear_command(input: &str) -> bool {
 }
 
 fn tui_is_resume_picker_command(input: &str) -> bool {
-    matches!(input.trim(), "/resume" | "resume" | "/continue" | "continue")
+    matches!(
+        input.trim(),
+        "/resume" | "resume" | "/continue" | "continue"
+    )
 }
 
 struct TuiRawModeGuard;
@@ -506,12 +509,7 @@ fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggesti
                 (rank, label, suggestion)
             }),
     );
-    suggestions.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    });
+    suggestions.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     suggestions
         .into_iter()
         .map(|(_, _, suggestion)| suggestion)
@@ -1092,12 +1090,7 @@ fn boss_command_suggestions(
             "Show the current boss progress report",
             "33",
         ),
-        heuristic_suggestion(
-            "/boss stop ",
-            "stop",
-            "Stop the active boss run",
-            "31",
-        ),
+        heuristic_suggestion("/boss stop ", "stop", "Stop the active boss run", "31"),
         heuristic_suggestion(
             "/boss resume ",
             "resume",
@@ -1139,7 +1132,12 @@ fn boss_command_suggestions(
     match args[0] {
         "status" | "report" | "stop" | "resume" => Vec::new(),
         "approve" => vec![
-            heuristic_suggestion("/boss approve Y ", "Y", "Accept and continue execution", "32"),
+            heuristic_suggestion(
+                "/boss approve Y ",
+                "Y",
+                "Accept and continue execution",
+                "32",
+            ),
             heuristic_suggestion(
                 "/boss approve <feedback> ",
                 "<feedback>",
@@ -2302,10 +2300,12 @@ fn tui_resume_picker_screen(
             })
             .collect::<Vec<_>>()
     };
-    screen.panels.push(crate::interaction::cli::renderer::TuiPanelSection {
-        title: "Resume Session".into(),
-        lines,
-    });
+    screen
+        .panels
+        .push(crate::interaction::cli::renderer::TuiPanelSection {
+            title: "Resume Session".into(),
+            lines,
+        });
     screen.footer = vec![
         "Enter: resume selected session".into(),
         "Esc: cancel".into(),
@@ -2367,8 +2367,7 @@ fn tui_layout_metrics(
     const BOTTOM_PANEL_FIXED_ROWS: usize = 5;
     let suggestion_height = tui_visible_suggestion_count(terminal_rows, input, suggestions);
     let height = terminal_rows.max(3);
-    let bottom_reserved_height =
-        BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_height;
+    let bottom_reserved_height = BOTTOM_PANEL_FIXED_ROWS + INPUT_BOX_HEIGHT + suggestion_height;
     let content_height = height.saturating_sub(bottom_reserved_height);
     let separator_row = content_height.saturating_add(1);
     TuiLayoutMetrics {
@@ -2383,7 +2382,10 @@ fn tui_layout_metrics(
     }
 }
 
-fn max_tui_suggestion_scroll_offset(suggestion_count: usize, visible_suggestion_count: usize) -> usize {
+fn max_tui_suggestion_scroll_offset(
+    suggestion_count: usize,
+    visible_suggestion_count: usize,
+) -> usize {
     suggestion_count.saturating_sub(visible_suggestion_count)
 }
 
@@ -2430,7 +2432,8 @@ fn tui_suggestion_viewport(
     if suggestion_count == 0 || visible_suggestion_count == 0 {
         return (0, 0);
     }
-    let start = clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
+    let start =
+        clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
     let end = start
         .saturating_add(visible_suggestion_count)
         .min(suggestion_count);
@@ -2455,11 +2458,8 @@ fn tui_move_suggestion_selection_down(
         return (next_selected, 0);
     }
 
-    let mut next_scroll_top = clamp_tui_suggestion_scroll_top(
-        scroll_top,
-        suggestion_count,
-        visible_suggestion_count,
-    );
+    let mut next_scroll_top =
+        clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
     let selected = next_selected.expect("selected suggestion should exist");
     if selected == 0 {
         next_scroll_top = 0;
@@ -2502,11 +2502,8 @@ fn tui_move_suggestion_selection_up(
         return (next_selected, 0);
     }
 
-    let mut next_scroll_top = clamp_tui_suggestion_scroll_top(
-        scroll_top,
-        suggestion_count,
-        visible_suggestion_count,
-    );
+    let mut next_scroll_top =
+        clamp_tui_suggestion_scroll_top(scroll_top, suggestion_count, visible_suggestion_count);
     let selected = next_selected.expect("selected suggestion should exist");
     if next_scroll_top > 0 && selected == next_scroll_top {
         next_scroll_top = next_scroll_top.saturating_sub(1);
@@ -3477,12 +3474,14 @@ mod tui_output_tests {
             footer: vec![],
         };
         let suggestions = (1..=12)
-            .map(|index| super::heuristic_suggestion(
-                format!("/cmd{index} "),
-                format!("cmd{index}"),
-                format!("detail {index}"),
-                "36",
-            ))
+            .map(|index| {
+                super::heuristic_suggestion(
+                    format!("/cmd{index} "),
+                    format!("cmd{index}"),
+                    format!("detail {index}"),
+                    "36",
+                )
+            })
             .collect::<Vec<_>>();
 
         let rendered = strip_ansi_for_test(&render_fixed_tui_layout(
@@ -3508,14 +3507,12 @@ mod tui_output_tests {
         let mut selected = Some(2);
         let mut scroll_top = 0;
 
-        (selected, scroll_top) =
-            tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
+        (selected, scroll_top) = tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
 
         assert_eq!(selected, Some(3));
         assert_eq!(scroll_top, 1);
 
-        (selected, scroll_top) =
-            tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
+        (selected, scroll_top) = tui_move_suggestion_selection_down(selected, scroll_top, 10, 4);
 
         assert_eq!(selected, Some(4));
         assert_eq!(scroll_top, 2);
@@ -4084,11 +4081,10 @@ mod tui_output_tests {
         assert!(rendered.contains(">_ Morgo"));
         assert!(rendered.contains(tui_startup_greeting(&app_state.active_session_id)));
         let face_family = super::tui_startup_face(&app_state.active_session_id);
-        let animated_faces = super::TUI_STARTUP_FACE_FRAMES
-            [super::TUI_STARTUP_FACES
-                .iter()
-                .position(|face| *face == face_family)
-                .unwrap_or(0)];
+        let animated_faces = super::TUI_STARTUP_FACE_FRAMES[super::TUI_STARTUP_FACES
+            .iter()
+            .position(|face| *face == face_family)
+            .unwrap_or(0)];
         assert!(animated_faces.iter().any(|face| rendered.contains(face)));
         assert!(rendered.contains("model:     default-model   /model to change"));
         assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
@@ -5342,7 +5338,8 @@ impl RuntimeBootstrap {
                                     resume_picker = None;
                                     continue;
                                 }
-                                let session_id = picker.sessions[picker.selected].session_id.0.clone();
+                                let session_id =
+                                    picker.sessions[picker.selected].session_id.0.clone();
                                 let resumed_id =
                                     self.switch_to_session_id(&mut app_state, engine, &session_id)?;
                                 current_document = render_turn_document(&CliTurnOutput {
@@ -5481,7 +5478,9 @@ impl RuntimeBootstrap {
                                     let new_session_id =
                                         self.create_new_session(&mut app_state, engine)?;
                                     current_document = render_turn_document(&CliTurnOutput {
-                                        primary_text: format!("Started new session {new_session_id}."),
+                                        primary_text: format!(
+                                            "Started new session {new_session_id}."
+                                        ),
                                         events: vec![],
                                     });
                                 }
@@ -5489,8 +5488,11 @@ impl RuntimeBootstrap {
                                     resume_picker = Some(self.open_resume_picker(&app_state));
                                 }
                                 Some(SystemTrapAction::ResumeSession(session_id)) => {
-                                    let resumed_id = self
-                                        .switch_to_session_id(&mut app_state, engine, &session_id)?;
+                                    let resumed_id = self.switch_to_session_id(
+                                        &mut app_state,
+                                        engine,
+                                        &session_id,
+                                    )?;
                                     current_document = render_turn_document(&CliTurnOutput {
                                         primary_text: format!("Resumed session {resumed_id}."),
                                         events: vec![],
@@ -7127,12 +7129,12 @@ mod tests {
         terminal_tail_stalled, tui_input_suggestions,
     };
     use crate::bootstrap::RuntimeBootstrap;
-    use crate::history::session::SessionStore;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
     use crate::command::coding::register_coding_commands;
     use crate::command::registry::CommandRegistry;
     use crate::cost::tracker::CostTracker;
+    use crate::history::session::SessionStore;
     use crate::interaction::dispatcher::NotificationDispatcher;
     use crate::interaction::telegram::gateway::TelegramGateway;
     use crate::security::audit::AuditLog;
@@ -7366,9 +7368,7 @@ mod tests {
                         last_turn_at: Some("100".into()),
                         prompt_seed: None,
                     },
-                    parent_session_id: Some(crate::history::session::SessionId(
-                        "parent-1".into(),
-                    )),
+                    parent_session_id: Some(crate::history::session::SessionId("parent-1".into())),
                     history: crate::history::session::SessionHistory {
                         entries: vec![crate::history::session::SessionHistoryEntry {
                             message: crate::core::message::Message::user("older preview"),
@@ -7481,23 +7481,39 @@ mod tests {
     #[test]
     fn boss_command_is_in_top_level_suggestions() {
         let mut app_state = test_app_state();
-        app_state.command_registry = Some(Arc::new(
-            register_coding_commands(register_builtin_commands(CommandRegistry::new())),
-        ));
+        app_state.command_registry = Some(Arc::new(register_coding_commands(
+            register_builtin_commands(CommandRegistry::new()),
+        )));
         let suggestions = super::tui_command_suggestions(&app_state, "/");
-        assert!(suggestions.iter().any(|suggestion| suggestion.label == "/boss"));
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.label == "/boss")
+        );
     }
 
     #[test]
     fn boss_heuristic_suggestions_include_core_controls() {
         let mut app_state = test_app_state();
-        app_state.command_registry = Some(Arc::new(
-            register_coding_commands(register_builtin_commands(CommandRegistry::new())),
-        ));
-        let suggestions = super::heuristic_tui_suggestions(&app_state, "/boss ")
-            .expect("boss suggestions");
-        assert!(suggestions.iter().any(|suggestion| suggestion.label == "status"));
-        assert!(suggestions.iter().any(|suggestion| suggestion.label == "report"));
-        assert!(suggestions.iter().any(|suggestion| suggestion.label == "stop"));
+        app_state.command_registry = Some(Arc::new(register_coding_commands(
+            register_builtin_commands(CommandRegistry::new()),
+        )));
+        let suggestions =
+            super::heuristic_tui_suggestions(&app_state, "/boss ").expect("boss suggestions");
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.label == "status")
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.label == "report")
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.label == "stop")
+        );
     }
 }

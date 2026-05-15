@@ -3317,8 +3317,10 @@ fn validate_decision_for_frame(
     decision: &crate::core::state_frame::StateDecision,
 ) -> Result<(), RepairNeeded> {
     if !requires_readonly_audit_contract(frame) {
-        if !matches!(decision.decision, DecisionKind::CallTool | DecisionKind::Reject)
-            && decision.next_action.is_some()
+        if !matches!(
+            decision.decision,
+            DecisionKind::CallTool | DecisionKind::Reject
+        ) && decision.next_action.is_some()
         {
             return Err(RepairNeeded {
                 reason: format!(

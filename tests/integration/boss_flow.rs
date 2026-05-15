@@ -5755,6 +5755,180 @@ async fn t22_1b_review_fn_uses_a_verdict_when_a_responds_reject() {
 }
 
 #[tokio::test]
+async fn t22_1b_review_fn_reformats_prose_verdict_once() {
+    let task_manager = Arc::new(TaskManager::default());
+    let session_id = "t22-1b-a-prose-reformat";
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                "这一步看起来已经满足要求，可以接受。".into(),
+            )],
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                r#"{"verdict":"accept","summary":"step output satisfies the review package","audited_items":["step 0"],"evidence_used":["runtime evidence"],"missing_evidence":[],"weak_evidence_used":["prose response"],"required_next_action":null,"correction":null,"reason":null}"#.into(),
+            )],
+        ],
+    );
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for A prose reformat")]),
+        "t22_1b_a_prose_reformat.json",
+    )
+    .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-prose-reformat".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    coordinator
+        .on_review_event(0, false, "Step output looks good", None)
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "reformatted prose ACCEPT must complete the step"
+    );
+    assert!(step.completed);
+
+    let dispatch = coordinator
+        .status
+        .read()
+        .await
+        .last_a_dispatch_message
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        dispatch.contains("Convert the previous Designer A review response"),
+        "second stateless call must be the reformat prompt"
+    );
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t22_1b_review_fn_falls_back_when_prose_reformat_fails() {
+    let task_manager = Arc::new(TaskManager::default());
+    let session_id = "t22-1b-a-prose-reformat-fails";
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                "这一步看起来已经满足要求，可以接受。".into(),
+            )],
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                "仍然不是 JSON".into(),
+            )],
+        ],
+    );
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for A failed prose reformat")]),
+        "t22_1b_a_prose_reformat_fails.json",
+    )
+    .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-prose-reformat-fails".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    coordinator
+        .on_review_event(0, true, "Step output looks good", None)
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "failed reformat must fall back to coordinator accepted hint"
+    );
+    assert!(step.completed);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
+async fn t22_1b_review_fn_falls_back_when_prose_reformat_returns_invalid_typed_verdict() {
+    let task_manager = Arc::new(TaskManager::default());
+    let session_id = "t22-1b-a-prose-reformat-invalid-typed";
+    let app_state = app_state_with_scripted_active_model(
+        session_id,
+        task_manager.clone(),
+        vec![
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                "这一步看起来已经满足要求，可以接受。".into(),
+            )],
+            vec![rust_agent::service::api::streaming::StreamEvent::TextDelta(
+                r#"{"verdict":"looks_good","summary":"not a valid typed verdict","audited_items":[],"evidence_used":[],"missing_evidence":[],"weak_evidence_used":[],"required_next_action":null,"correction":null,"reason":null}"#.into(),
+            )],
+        ],
+    );
+
+    let (coordinator, plan_path) = coordinator_with_plan(
+        boss_plan(vec![boss_step(0, "Step for invalid typed reformat")]),
+        "t22_1b_a_prose_reformat_invalid_typed.json",
+    )
+    .await;
+    {
+        let mut guard = coordinator.auto_advance_app_state.write().await;
+        *guard = Some(app_state.clone());
+    }
+    coordinator
+        .bootstrap_actor_registry_with_app_state(&app_state)
+        .await;
+
+    {
+        let mut guard = coordinator.plan.write().await;
+        let plan = guard.as_mut().unwrap();
+        plan.steps[0].worker_task_id = Some("b-task-prose-reformat-invalid-typed".into());
+        plan.steps[0].status = BossPlanStepStatus::Running;
+    }
+
+    coordinator
+        .on_review_event(0, true, "Step output looks good", None)
+        .await
+        .unwrap();
+
+    let guard = coordinator.plan.read().await;
+    let step = &guard.as_ref().unwrap().steps[0];
+    assert_eq!(
+        step.status,
+        BossPlanStepStatus::Completed,
+        "invalid typed reformat verdict must fall back to coordinator accepted hint"
+    );
+    assert!(step.completed);
+
+    let _ = std::fs::remove_file(plan_path);
+}
+
+#[tokio::test]
 async fn r0_single_step_task_event_completed_routes_through_review_gate() {
     let tmp = std::env::temp_dir().join("r0_single_step_task_event_review_gate");
     let task_manager = Arc::new(TaskManager::new_with_output_root(&tmp));
@@ -7038,7 +7212,14 @@ fn t25_trim_handles_multibyte_utf8_tail() {
     let keep = 4usize;
     let payload = "前缀中文🙂尾巴中文🙂";
     let result = trim_context_payload(payload, threshold, keep);
-    let expected_tail: String = payload.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+    let expected_tail: String = payload
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     assert!(result.contains(&expected_tail));
 }
 
@@ -7158,7 +7339,14 @@ async fn t25_2_summarize_does_not_persist_to_plan_or_snapshot() {
 fn t25_2_summarize_tail_split_handles_multibyte_utf8() {
     let payload = "老上下文🙂".repeat(10) + "最新尾巴中文🙂";
     let result = trim_context_payload(&payload, 8, 4);
-    let expected_tail: String = payload.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let expected_tail: String = payload
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     assert!(result.contains(&expected_tail));
 }
 

@@ -262,9 +262,10 @@ impl SessionStore for InMemorySessionStore {
         let session_id = snapshot.session_id.clone();
         sessions.insert(session_id.clone(), (snapshot, history));
         drop(sessions);
-        let mut persisted_records = self.persisted_records.write().map_err(|_| {
-            SessionStoreWriteError::lock_poisoned("save.persisted_records")
-        })?;
+        let mut persisted_records = self
+            .persisted_records
+            .write()
+            .map_err(|_| SessionStoreWriteError::lock_poisoned("save.persisted_records"))?;
         persisted_records.remove(&session_id);
         Ok(())
     }
@@ -796,7 +797,9 @@ impl SessionStore for FileBackedSessionStore {
         let nested_memory_lineage = record
             .as_ref()
             .and_then(|record| record.nested_memory_lineage.clone());
-        let model_level_override = record.as_ref().and_then(|record| record.model_level_override);
+        let model_level_override = record
+            .as_ref()
+            .and_then(|record| record.model_level_override);
         let title = record.as_ref().and_then(|record| record.title.clone());
         let lifecycle_status = self.load_lifecycle_status(&session_id);
         self.write_record(
@@ -1103,7 +1106,10 @@ mod tests {
         assert_eq!(sessions[0].session_id.0, "session-b");
         assert_eq!(sessions[1].session_id.0, "session-a");
         assert_eq!(
-            sessions[1].parent_session_id.as_ref().map(|id| id.0.as_str()),
+            sessions[1]
+                .parent_session_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
             Some("parent-a")
         );
         assert_eq!(sessions[0].preview.as_deref(), Some("newer preview"));
@@ -1246,7 +1252,10 @@ mod tests {
         assert_eq!(sessions[0].preview.as_deref(), Some("newer preview"));
         assert_eq!(sessions[1].title.as_deref(), Some("Alpha"));
         assert_eq!(
-            sessions[1].parent_session_id.as_ref().map(|id| id.0.as_str()),
+            sessions[1]
+                .parent_session_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
             Some("parent-a")
         );
 

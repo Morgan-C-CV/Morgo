@@ -251,9 +251,9 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
             message,
             detail.as_deref(),
         ))),
-        SurfaceItem::RuntimeNotice { kind, message, .. } => Some(RenderBlock::Panel(
-            render_notice_panel(kind, message),
-        )),
+        SurfaceItem::RuntimeNotice { kind, message, .. } => {
+            Some(RenderBlock::Panel(render_notice_panel(kind, message)))
+        }
         SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::ToolResult { .. }
         | SurfaceItem::AssistantDelta { .. } => None,
@@ -617,7 +617,10 @@ fn render_generic_tool_result_lines(
 ) -> Vec<String> {
     let mut lines = vec![format!("Tool: {tool_name}")];
     if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
-        lines.push(format!("Summary: {}", truncate_for_tui(summary, MAX_TOOL_DETAIL_WIDTH)));
+        lines.push(format!(
+            "Summary: {}",
+            truncate_for_tui(summary, MAX_TOOL_DETAIL_WIDTH)
+        ));
     }
 
     let preview_source = detail.unwrap_or(content);
@@ -932,7 +935,11 @@ mod tests {
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
         assert!(rendered.contains("[Tool result]"));
         assert!(rendered.contains("Tool: Bash"));
-        assert!(rendered.contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
+        assert!(
+            rendered.contains(
+                "Command: cargo test --package agent --lib -- interaction::cli::renderer"
+            )
+        );
         assert!(rendered.contains("Exit code: 0"));
         assert!(rendered.contains("line-1"));
         assert!(rendered.contains("..."));

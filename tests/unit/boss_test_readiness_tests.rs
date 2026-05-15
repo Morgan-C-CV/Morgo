@@ -1,7 +1,7 @@
 use rust_agent::core::boss_test_readiness::{
-    BossAdmissionDenyReason, BossRollbackPolicy, BossRollbackTrigger,
-    BossTestAdmissionPolicy, BossTestAllowlist, BossTestReadinessGate, BossTestRunOutcome,
-    BossTestSampleRecord, evaluate_rollback_triggers,
+    BossAdmissionDenyReason, BossRollbackPolicy, BossRollbackTrigger, BossTestAdmissionPolicy,
+    BossTestAllowlist, BossTestReadinessGate, BossTestRunOutcome, BossTestSampleRecord,
+    evaluate_rollback_triggers,
 };
 
 // ── BossTestAllowlist ─────────────────────────────────────────────────────────

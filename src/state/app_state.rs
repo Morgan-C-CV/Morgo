@@ -533,7 +533,10 @@ impl AppState {
                 );
                 self.permission_context.set_pending_approval(None);
                 emit_audit(decision);
-                Ok(CommandResult::Message(prepend_notice(allow_notice, message)))
+                Ok(CommandResult::Message(prepend_notice(
+                    allow_notice,
+                    message,
+                )))
             }
             "ExitPlanMode" => {
                 let message = crate::state::plan_mode::apply_exit_plan_mode(
@@ -542,7 +545,10 @@ impl AppState {
                 )?;
                 self.permission_context.set_pending_approval(None);
                 emit_audit(decision);
-                Ok(CommandResult::Message(prepend_notice(allow_notice, message)))
+                Ok(CommandResult::Message(prepend_notice(
+                    allow_notice,
+                    message,
+                )))
             }
             tool_name => {
                 let registry_result = self.runtime_tool_registry.as_ref().ok_or_else(|| {
@@ -566,12 +572,10 @@ impl AppState {
                     ToolResult::PendingApproval { message, .. } => Ok(CommandResult::Message(
                         prepend_notice(allow_notice, format!("approval still required: {message}")),
                     )),
-                    ToolResult::Interrupted(reason) => {
-                        Ok(CommandResult::Message(prepend_notice(
-                            allow_notice,
-                            format!("Interrupted: {reason}"),
-                        )))
-                    }
+                    ToolResult::Interrupted(reason) => Ok(CommandResult::Message(prepend_notice(
+                        allow_notice,
+                        format!("Interrupted: {reason}"),
+                    ))),
                     ToolResult::Progress(progress) => Ok(CommandResult::Message(prepend_notice(
                         allow_notice,
                         progress,

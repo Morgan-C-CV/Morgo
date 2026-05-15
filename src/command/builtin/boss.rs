@@ -147,17 +147,17 @@ async fn resume(
     }
     let coordinator = boss;
     let payload = if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
-        coordinator.report_progress(task_manager).await?.format_report()
+        coordinator
+            .report_progress(task_manager)
+            .await?
+            .format_report()
     } else {
         "Boss resumed, but no task manager is attached.".into()
     };
     Ok(CommandResult::Message(payload))
 }
 
-async fn stop(
-    boss: &Arc<BossCoordinator>,
-    app_state: &AppState,
-) -> anyhow::Result<CommandResult> {
+async fn stop(boss: &Arc<BossCoordinator>, app_state: &AppState) -> anyhow::Result<CommandResult> {
     let Some(task_manager) = app_state.permission_context.task_manager.as_ref() else {
         return Ok(CommandResult::Message(
             "Boss stop unavailable: task manager not attached.".into(),
@@ -179,7 +179,9 @@ async fn stop(
             stop.killed_task_ids.join(", "),
             stop.stages
         ))),
-        _ => Ok(CommandResult::Message("Unexpected boss stop response.".into())),
+        _ => Ok(CommandResult::Message(
+            "Unexpected boss stop response.".into(),
+        )),
     }
 }
 
@@ -188,15 +190,8 @@ async fn approve(
     app_state: &AppState,
     args: &str,
 ) -> anyhow::Result<CommandResult> {
-    let payload = args
-        .strip_prefix("approve")
-        .unwrap_or(args)
-        .trim();
-    let approved_input = if payload.is_empty() {
-        "Y"
-    } else {
-        payload
-    };
+    let payload = args.strip_prefix("approve").unwrap_or(args).trim();
+    let approved_input = if payload.is_empty() { "Y" } else { payload };
     let approved = boss.handle_user_approval(approved_input).await?;
     if approved {
         let _ = boss.advance_plan(&Arc::new(app_state.clone())).await;
@@ -220,7 +215,8 @@ async fn documentation(
         .trim();
     let draft = if draft.is_empty() { "" } else { draft };
     boss.bind_app_state(Arc::new(app_state.clone())).await;
-    boss.finalize_documentation_loop(draft, "", "", draft, "").await?;
+    boss.finalize_documentation_loop(draft, "", "", draft, "")
+        .await?;
     let payload = if let Some(task_manager) = app_state.permission_context.task_manager.as_ref() {
         boss.report_progress(task_manager).await?.format_report()
     } else {
@@ -296,10 +292,8 @@ mod tests {
     fn test_app_state() -> AppState {
         let boss = Arc::new(BossCoordinator::new());
         let task_manager = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
-        let dispatcher =
-            NotificationDispatcher::new(TelegramGateway::default()).with_boss_coordinator(
-                boss.clone(),
-            );
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(boss.clone());
         AppState {
             surface: InteractionSurface::Cli,
             session_mode: SessionMode::Interactive,

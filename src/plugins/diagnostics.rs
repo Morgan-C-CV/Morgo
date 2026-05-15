@@ -2,9 +2,7 @@ use crate::plugins::types::{
     PluginCapability, PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity,
     PluginLifecycleState, PluginLoadResult,
 };
-use crate::skills::visibility::{
-    SkillActivationDecision, SkillVisibilityResult,
-};
+use crate::skills::visibility::{SkillActivationDecision, SkillVisibilityResult};
 
 // ── Capability block reasons ──────────────────────────────────────────────────
 

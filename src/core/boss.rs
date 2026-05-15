@@ -4567,6 +4567,42 @@ fn build_step_review_prompt(step_id: usize, summary: &str, correction: Option<&s
     )
 }
 
+fn trim_step_review_prompt(
+    prompt: &str,
+    threshold: usize,
+    keep_chars: usize,
+) -> anyhow::Result<String> {
+    const REVIEW_PACKAGE_MARKER: &str = "Review package:\n";
+    let total_chars = prompt.chars().count();
+    if total_chars <= threshold || keep_chars >= total_chars {
+        return Ok(prompt.to_string());
+    }
+
+    let Some((protocol_head, review_package)) = prompt.split_once(REVIEW_PACKAGE_MARKER) else {
+        anyhow::bail!("review prompt missing Review package marker");
+    };
+    let preserved_head = format!("{protocol_head}{REVIEW_PACKAGE_MARKER}");
+    let preserved_head_chars = preserved_head.chars().count();
+    if preserved_head_chars >= threshold {
+        anyhow::bail!(
+            "review prompt protocol head exceeds trim threshold ({preserved_head_chars} chars)"
+        );
+    }
+
+    let notice_budget = 80usize;
+    let max_tail_chars = keep_chars
+        .min(threshold.saturating_sub(preserved_head_chars + notice_budget))
+        .max(1);
+    let (_, tail) = split_payload_tail(review_package, max_tail_chars);
+    let omitted = review_package
+        .chars()
+        .count()
+        .saturating_sub(tail.chars().count());
+    Ok(format!(
+        "{preserved_head}[trimmed earlier review package context: {omitted} chars omitted]\n{tail}"
+    ))
+}
+
 fn review_summary_has_unresolved_completion_blocker(summary: &str) -> bool {
     let active_summary = summary
         .split("Historical attempts (stale")
@@ -4628,6 +4664,53 @@ fn review_correction_only_restates_stale_blocker(correction: Option<&str>) -> bo
                     | "source_evidence_missing"
             )
         })
+}
+
+fn review_decision_is_invalid_non_json(
+    decision: &crate::core::boss_actor_runtime::ReviewDecision,
+) -> bool {
+    matches!(
+        decision,
+        crate::core::boss_actor_runtime::ReviewDecision::Correct {
+            correction: Some(correction),
+            ..
+        } if correction.starts_with(
+            "Designer A returned an invalid non-JSON review verdict"
+        )
+    )
+}
+
+fn review_decision_is_invalid_protocol(
+    decision: &crate::core::boss_actor_runtime::ReviewDecision,
+) -> bool {
+    matches!(
+        decision,
+        crate::core::boss_actor_runtime::ReviewDecision::Correct {
+            correction: Some(correction),
+            ..
+        } if correction.starts_with("Designer A returned an invalid")
+    )
+}
+
+fn short_utf8_excerpt(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let (_, tail) = split_payload_tail(text, max_chars);
+    format!("[trimmed earlier excerpt]\n{tail}")
+}
+
+fn build_review_reformat_prompt(raw_response: &str, summary: &str) -> String {
+    format!(
+        "Convert the previous Designer A review response into exactly one JSON object.\n\
+         Do not add prose before or after the JSON. Preserve the review intent, but use only the allowed typed verdict schema.\n\
+         Allowed schema:\n\
+         {{\"verdict\":\"accept|reject|replan_step|request_missing_evidence|escalate_context\",\"summary\":\"short verdict basis\",\"audited_items\":[\"...\"],\"evidence_used\":[\"runtime evidence refs only\"],\"missing_evidence\":[\"specific missing target or evidence ref\"],\"weak_evidence_used\":[\"prose-only claims, if any\"],\"required_next_action\":null|\"restricted_verification|worker_correction|replan_step|escalate_context\",\"correction\":null|\"concrete correction for reject\",\"reason\":null|\"reason for replan/escalation\"}}\n\n\
+         Previous review response excerpt:\n{}\n\n\
+         Original review package excerpt:\n{}",
+        short_utf8_excerpt(raw_response, 4_000),
+        short_utf8_excerpt(summary, 4_000)
+    )
 }
 
 fn guard_review_reject_against_closed_gate(
@@ -4966,15 +5049,13 @@ impl BossCoordinator {
         *auto = Some(app_state);
     }
 
-    pub async fn bind_app_state(
-        &self,
-        app_state: Arc<crate::state::app_state::AppState>,
-    ) {
+    pub async fn bind_app_state(&self, app_state: Arc<crate::state::app_state::AppState>) {
         {
             let mut auto = self.auto_advance_app_state.write().await;
             *auto = Some(app_state.clone());
         }
-        self.bootstrap_actor_registry_with_app_state(&app_state).await;
+        self.bootstrap_actor_registry_with_app_state(&app_state)
+            .await;
     }
 
     pub async fn current_runtime_key(&self) -> Option<String> {
@@ -5218,8 +5299,8 @@ impl BossCoordinator {
             let loaded_plan = load_plan(path).await?;
             let mut stage = BossStage::Documentation;
             if loaded_plan.accepted_by_user {
-                let all_completed =
-                    !loaded_plan.steps.is_empty() && loaded_plan.steps.iter().all(|step| step.completed);
+                let all_completed = !loaded_plan.steps.is_empty()
+                    && loaded_plan.steps.iter().all(|step| step.completed);
                 stage = if all_completed {
                     BossStage::Completed
                 } else {
@@ -5258,7 +5339,8 @@ impl BossCoordinator {
             }
         }
 
-        self.bootstrap_actor_registry_with_app_state(app_state).await;
+        self.bootstrap_actor_registry_with_app_state(app_state)
+            .await;
         Ok(())
     }
 
@@ -6644,7 +6726,10 @@ impl BossCoordinator {
         }
         {
             let mut session_guard = self.session.write().await;
-            *session_guard = Some(BossSession::from_plan_id(&plan_id, BossStage::Documentation));
+            *session_guard = Some(BossSession::from_plan_id(
+                &plan_id,
+                BossStage::Documentation,
+            ));
         }
         self.content_evidence_targets.write().await.clear();
     }
@@ -10538,6 +10623,28 @@ refresh_reason: {}\n\n{}",
         message: String,
         summary: &str,
     ) -> anyhow::Result<crate::core::boss_actor_runtime::ReviewDecision> {
+        let response = self.ask_a_review_stateless_raw(app_state, message).await?;
+        let decision = Self::parse_a_review_decision(&response, summary);
+        if !review_decision_is_invalid_non_json(&decision) {
+            return Ok(decision);
+        }
+
+        let reformat_prompt = build_review_reformat_prompt(&response, summary);
+        let reformatted = self
+            .ask_a_review_stateless_raw(app_state, reformat_prompt)
+            .await?;
+        let reformatted_decision = Self::parse_a_review_decision(&reformatted, summary);
+        if review_decision_is_invalid_protocol(&reformatted_decision) {
+            anyhow::bail!("stateless review reformat returned invalid review verdict");
+        }
+        Ok(reformatted_decision)
+    }
+
+    async fn ask_a_review_stateless_raw(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        message: String,
+    ) -> anyhow::Result<String> {
         let runtime = app_state
             .active_model_runtime
             .as_ref()
@@ -10545,7 +10652,7 @@ refresh_reason: {}\n\n{}",
 
         let original_chars = message.chars().count();
         let message = if original_chars > B_CONTEXT_TRIM_THRESHOLD {
-            trim_context_payload(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS)
+            trim_step_review_prompt(&message, B_CONTEXT_TRIM_THRESHOLD, B_CONTEXT_KEEP_CHARS)?
         } else {
             message
         };
@@ -10584,7 +10691,7 @@ refresh_reason: {}\n\n{}",
         if response.trim().is_empty() {
             anyhow::bail!("stateless review returned empty response");
         }
-        Ok(Self::parse_a_review_decision(&response, summary))
+        Ok(response)
     }
 
     /// Parse A's LLM response text into a structured review decision.
@@ -16740,6 +16847,42 @@ mod tests {
         assert!(prompt.contains("\"verdict\""));
         assert!(prompt.contains("request_missing_evidence"));
         assert!(prompt.contains("required_next_action"));
+    }
+
+    #[test]
+    fn step_review_trim_preserves_protocol_header() {
+        let summary = format!("old context\n{}\nRECENT_REVIEW_TAIL", "x".repeat(1_000));
+        let prompt = build_step_review_prompt(0, &summary, None);
+        let trimmed = trim_step_review_prompt(&prompt, 2_200, 250).expect("trim review prompt");
+
+        assert!(trimmed.len() < prompt.len());
+        assert!(trimmed.contains("Return exactly one JSON object"));
+        assert!(trimmed.contains("No tools are available"));
+        assert!(trimmed.contains("Review package:"));
+        assert!(trimmed.contains("[trimmed earlier review package context:"));
+        assert!(trimmed.contains("RECENT_REVIEW_TAIL"));
+    }
+
+    #[test]
+    fn step_review_trim_handles_multibyte_tail() {
+        let summary = format!("{}最新尾巴中文🙂", "旧上下文🙂".repeat(200));
+        let prompt = build_step_review_prompt(3, &summary, None);
+        let trimmed = trim_step_review_prompt(&prompt, 2_200, 120).expect("trim review prompt");
+
+        assert!(trimmed.contains("Return exactly one JSON object"));
+        assert!(trimmed.contains("Review package:"));
+        assert!(trimmed.contains("新尾巴中文🙂") || trimmed.contains("尾巴中文🙂"));
+    }
+
+    #[test]
+    fn step_review_trim_rejects_oversized_protocol_head() {
+        let prompt = build_step_review_prompt(0, "tiny package", None);
+        let err = trim_step_review_prompt(&prompt, 10, 5).expect_err("protocol head too large");
+        assert!(
+            err.to_string()
+                .contains("protocol head exceeds trim threshold"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

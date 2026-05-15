@@ -125,7 +125,9 @@ pub async fn handle_cli_input(
     app_state: &AppState,
     raw: impl Into<String>,
 ) -> anyhow::Result<CliTurnOutput> {
-    Ok(handle_cli_input_dispatch(router, engine, app_state, raw).await?.output)
+    Ok(handle_cli_input_dispatch(router, engine, app_state, raw)
+        .await?
+        .output)
 }
 
 pub async fn handle_cli_input_streaming<F>(
@@ -138,9 +140,11 @@ pub async fn handle_cli_input_streaming<F>(
 where
     F: FnMut(&CliTurnOutput),
 {
-    Ok(handle_cli_input_dispatch_streaming(router, engine, app_state, raw, on_update)
-        .await?
-        .output)
+    Ok(
+        handle_cli_input_dispatch_streaming(router, engine, app_state, raw, on_update)
+            .await?
+            .output,
+    )
 }
 
 pub async fn handle_normalized_input(
@@ -149,9 +153,11 @@ pub async fn handle_normalized_input(
     app_state: &AppState,
     input: NormalizedInput,
 ) -> anyhow::Result<CliTurnOutput> {
-    Ok(handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {})
-        .await?
-        .output)
+    Ok(
+        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {})
+            .await?
+            .output,
+    )
 }
 
 pub async fn handle_normalized_input_streaming<F>(
@@ -164,9 +170,11 @@ pub async fn handle_normalized_input_streaming<F>(
 where
     F: FnMut(&CliTurnOutput),
 {
-    Ok(handle_normalized_input_dispatch_streaming(router, engine, app_state, input, on_update)
-        .await?
-        .output)
+    Ok(
+        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, on_update)
+            .await?
+            .output,
+    )
 }
 
 pub async fn handle_cli_input_dispatch(
