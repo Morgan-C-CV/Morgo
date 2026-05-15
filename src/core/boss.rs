@@ -1017,6 +1017,40 @@ fn runtime_content_evidence_section(step: &BossPlanStep) -> Option<String> {
     }
 }
 
+fn runtime_execution_evidence_section(step: &BossPlanStep) -> Option<String> {
+    let mut lines = Vec::new();
+
+    for record in &step.tool_execution_records {
+        if record.tool_name != "Bash" || record.kind != ToolExecutionOutcomeKind::Success {
+            continue;
+        }
+        let command = observable_bash_command_local(record)
+            .map(|command| trim_runtime_excerpt(&command, 160))
+            .unwrap_or_else(|| "unknown command".into());
+        let detail = record
+            .detail
+            .as_deref()
+            .map(|detail| {
+                format!(
+                    "head={} tail={}",
+                    single_line_runtime_excerpt(detail, 200),
+                    single_line_runtime_tail_excerpt(detail, 200)
+                )
+            })
+            .unwrap_or_else(|| "no captured output".into());
+        lines.push(format!("- bash command={command} {detail}"));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Current runtime execution evidence:\n{}",
+            lines.join("\n")
+        ))
+    }
+}
+
 fn collect_report_heading_lines(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
@@ -4687,6 +4721,8 @@ fn build_step_review_summary(
         "Acceptance:".to_string(),
         summarize_acceptance_items(step),
         runtime_section,
+        runtime_execution_evidence_section(step)
+            .unwrap_or_else(|| "Current runtime execution evidence:\n- none supplied".to_string()),
         runtime_content_evidence_section(step)
             .unwrap_or_else(|| "Current runtime content evidence:\n- none supplied".to_string()),
         "Current worker prose/report:".to_string(),
@@ -17367,6 +17403,52 @@ mod tests {
 
         assert!(section.contains("read:/tmp/rustagent-review-content/README.md"));
         assert!(section.contains("RustAgent"));
+    }
+
+    #[test]
+    fn runtime_execution_evidence_includes_successful_bash_output_excerpt() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "run demo".into(),
+            objective: Some("run demo.py".into()),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Bash".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Bash succeeded".into(),
+                detail: Some("full-context path\nlism path\nstdout ok".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "command": "python3 demo.py"
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+        };
+
+        let section = runtime_execution_evidence_section(&step).expect("execution evidence");
+
+        assert!(section.contains("Current runtime execution evidence"));
+        assert!(section.contains("python3 demo.py"));
+        assert!(section.contains("full-context path"));
     }
 
     #[test]
