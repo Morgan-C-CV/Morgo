@@ -26,7 +26,7 @@ use crate::core::state_frame::{
     ActorRole, CompletionEvidenceGap, CompletionEvidenceStatus, DeclaredArtifactContract,
     ReviewMode, StageExecutionContract, TaskProfile, TestContract, VerificationContract,
 };
-use crate::core::state_frame_loop::{DecisionLoopConfig, StateFrameToolRuntime};
+use crate::core::state_frame_loop::{DecisionLoopConfig, LoopUsage, StateFrameToolRuntime};
 use crate::core::state_frame_model_router::ModelTier;
 use crate::core::state_frame_orchestrator::{
     StepFailureClassification, StepOutcome, StepRuntimeResolutionContext,
@@ -4545,6 +4545,47 @@ fn build_step_review_summary(
         sections.push(stale_summary);
     }
     sections.join("\n")
+}
+
+fn build_state_frame_worker_review_summary(step: &BossPlanStep, usage: &LoopUsage) -> String {
+    let completion_status = usage
+        .completion_evidence_status
+        .as_ref()
+        .map(|status| status.as_str().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let worker_report = usage
+        .worker_report
+        .as_ref()
+        .and_then(|report| serde_json::to_string_pretty(report).ok())
+        .unwrap_or_else(|| "none supplied".into());
+    let tool_summary = if usage.tool_execution_records.is_empty() {
+        "none supplied".into()
+    } else {
+        usage
+            .tool_execution_records
+            .iter()
+            .enumerate()
+            .map(|(idx, record)| {
+                format!(
+                    "{}. tool={} kind={:?} summary={}",
+                    idx + 1,
+                    record.tool_name,
+                    record.kind,
+                    record.summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    build_step_review_summary(
+        step,
+        "LisM StateFrame worker",
+        &[
+            ("Completion evidence status", completion_status.as_str()),
+            ("Worker structured report", worker_report.as_str()),
+            ("Tool dispatch summary", tool_summary.as_str()),
+        ],
+    )
 }
 
 fn build_step_review_prompt(step_id: usize, summary: &str, correction: Option<&str>) -> String {
@@ -9426,7 +9467,7 @@ impl BossCoordinator {
                         }
 
                         match outcome {
-                            StepOutcome::Completed { .. } => {
+                            StepOutcome::Completed { usage, .. } => {
                                 let metadata_snapshot = self
                                     .routed_step_metadata
                                     .read()
@@ -9504,41 +9545,48 @@ impl BossCoordinator {
                                             step_id, reason
                                         )));
                                     }
-                                    step.completed = true;
-                                    step.status = BossPlanStepStatus::Completed;
-                                }
-                                if let Some(path) = self.status.read().await.planning_file.clone() {
-                                    self.save_plan_with_session(std::path::Path::new(&path))
-                                        .await?;
-                                }
-                                let next_step = self
-                                    .plan
-                                    .read()
-                                    .await
-                                    .as_ref()
-                                    .and_then(|p| next_unfinished_step_id(p));
-                                self.update_current_step(next_step).await;
-                                if next_step.is_none() {
-                                    if self.get_stage().await != BossStage::Completed {
-                                        self.transition_to(BossStage::Completed).await?;
+                                    let review_summary =
+                                        build_state_frame_worker_review_summary(step, &usage);
+                                    step.completed = false;
+                                    step.status = BossPlanStepStatus::Reviewing;
+                                    step.last_review_summary = Some(review_summary.clone());
+                                    clear_step_continuation_context(step);
+                                    drop(plan_guard);
+                                    Box::pin(self.trigger_review_for_completed_step(
+                                        step_id,
+                                        review_summary,
+                                    ))
+                                    .await?;
+                                    let plan_complete = self
+                                        .plan
+                                        .read()
+                                        .await
+                                        .as_ref()
+                                        .is_some_and(|plan| {
+                                            plan.steps.iter().all(|step| step.completed)
+                                        });
+                                    if plan_complete {
+                                        if self.get_stage().await != BossStage::Completed {
+                                            self.transition_to(BossStage::Completed).await?;
+                                        }
+                                        let run_id = self.current_run_id().await;
+                                        let lism_enabled = effective_lism_enabled(
+                                            self.lism_policy().await,
+                                            app_state.permission_context.lism_enabled(),
+                                        );
+                                        self.emit_lism_sample_once(
+                                            &run_id,
+                                            lism_enabled,
+                                            BossTestRunOutcome::Completed,
+                                            0,
+                                        )
+                                        .await;
                                     }
-                                    let run_id = self.current_run_id().await;
-                                    let lism_enabled = effective_lism_enabled(
-                                        self.lism_policy().await,
-                                        app_state.permission_context.lism_enabled(),
-                                    );
-                                    self.emit_lism_sample_once(
-                                        &run_id,
-                                        lism_enabled,
-                                        BossTestRunOutcome::Completed,
-                                        0,
-                                    )
-                                    .await;
+                                    return Ok(Some(format!(
+                                        "LisM executed boss step {} and routed it through review.",
+                                        step_id
+                                    )));
                                 }
-                                return Ok(Some(format!(
-                                    "LisM executed boss step {} to completion.",
-                                    step_id
-                                )));
                             }
                             StepOutcome::Failed {
                                 reason,

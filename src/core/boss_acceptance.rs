@@ -96,6 +96,14 @@ fn is_artifact_scope_boundary(line: &str) -> bool {
         || trimmed.starts_with("参考样本")
         || trimmed.starts_with("建议核验路径")
         || trimmed.starts_with("实现摘录")
+        || trimmed.starts_with("stage_execution_contract:")
+        || trimmed.starts_with("target_artifacts:")
+        || trimmed.starts_with("relevant_file_handles:")
+        || trimmed.starts_with("allowed_tools:")
+        || trimmed.starts_with("permission_scope:")
+        || trimmed.starts_with("open_items:")
+        || trimmed.starts_with("allowed_actions:")
+        || trimmed.starts_with("required_output:")
 }
 
 fn line_requires_artifact_output(line: &str) -> bool {
@@ -144,6 +152,9 @@ fn relative_artifact_tokens(line: &str) -> Vec<PathBuf> {
     }) {
         let token = clean_path_token(raw);
         if token.is_empty() || token.starts_with('/') {
+            continue;
+        }
+        if token.contains('=') {
             continue;
         }
         let lowered = token.to_lowercase();
@@ -403,6 +414,34 @@ mod tests {
         assert_eq!(expectations.len(), 1);
         assert_eq!(expectations[0].kind, BossArtifactKind::Directory);
         assert_eq!(expectations[0].path, PathBuf::from("/tmp/agent-site"));
+    }
+
+    #[test]
+    fn ignores_generated_stage_execution_contract_ref_tokens() {
+        let text = "\
+任务目标：
+- 目标目录：/tmp/agent-site
+- 输出一个简短 README，说明如何打开与查看。
+
+stage_execution_contract:
+  - declared_artifact ref=/tmp/agent-site path=/tmp/agent-site kind=directory required_actions=create, write required_evidence=/tmp/agent-site
+  - declared_artifact ref=/tmp/agent-site/README.md path=/tmp/agent-site/README.md kind=file required_actions=create, write required_evidence=/tmp/agent-site/README.md";
+
+        let expectations = extract_artifact_expectations(text);
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::Directory
+                && item.path == PathBuf::from("/tmp/agent-site")
+        }));
+        assert!(expectations.iter().any(|item| {
+            item.kind == BossArtifactKind::File
+                && item.path == PathBuf::from("/tmp/agent-site/README.md")
+        }));
+        assert!(
+            expectations
+                .iter()
+                .all(|item| { !item.path.to_string_lossy().contains("ref=/tmp/agent-site") }),
+            "generated ref= token leaked into expectations: {expectations:?}"
+        );
     }
 
     #[test]

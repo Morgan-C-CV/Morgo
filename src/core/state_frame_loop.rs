@@ -278,6 +278,15 @@ fn build_state_decision_repair_prompt(reason: &str, raw_json: &str) -> String {
 }
 
 fn append_runtime_contract_facts(frame: &mut StateFrame) {
+    if artifact_write_contract_active(frame)
+        && frame.stage_execution_contract.task_profile == Some(TaskProfile::IndependentReview)
+    {
+        frame.stage_execution_contract.task_profile = Some(TaskProfile::CodeChange);
+        push_unique(
+            &mut frame.recent_evidence,
+            "decision_feedback: category=durable_artifact_profile_corrected recoverable=true recommended_next_action=use_artifact_write_contract seq=1 summary=durable create/write artifacts require code_change execution semantics, not independent_review prose closure".into(),
+        );
+    }
     if let Some(task_profile) = frame.stage_execution_contract.task_profile {
         push_unique(
             &mut frame.recent_evidence,
@@ -353,6 +362,30 @@ fn completion_contract_requirement(frame: &StateFrame, field_name: &str) -> bool
         }
         _ => false,
     }
+}
+
+fn artifact_write_contract_active(frame: &StateFrame) -> bool {
+    let action_requires_write = |action: &str| {
+        matches!(
+            action,
+            "create" | "write" | "write_file" | "edit_file" | "create_file"
+        )
+    };
+    frame
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .any(|artifact| {
+            artifact
+                .required_actions
+                .iter()
+                .any(|action| action_requires_write(action))
+        })
+        || frame
+            .stage_execution_contract
+            .required_actions
+            .iter()
+            .any(|action| action_requires_write(action))
 }
 
 fn completion_contract_refs(frame: &StateFrame, field_name: &str) -> Vec<String> {
@@ -1526,6 +1559,19 @@ fn independent_review_has_runtime_success(usage: &LoopUsage) -> bool {
 }
 
 fn independent_review_runtime_success_satisfies(frame: &StateFrame, usage: &LoopUsage) -> bool {
+    if artifact_write_contract_active(frame) {
+        let target_paths = declared_target_paths(frame);
+        if target_paths.is_empty() {
+            return false;
+        }
+        return usage.tool_execution_records.iter().any(|record| {
+            record.kind == ToolExecutionOutcomeKind::Success
+                && matches!(record.tool_name.as_str(), "Write" | "Edit" | "Bash")
+                && observable_path_from_input(record.observable_input.as_ref())
+                    .as_deref()
+                    .is_some_and(|path| path_matches_target_scope(path, &target_paths))
+        });
+    }
     if !completion_contract_requirement(frame, "verification_evidence") {
         return independent_review_has_runtime_success(usage);
     }
@@ -1574,6 +1620,9 @@ fn independent_review_can_close_with_refs(
         && !missing_source_evidence_targets(frame, evidence_refs).is_empty()
     {
         return false;
+    }
+    if artifact_write_contract_active(frame) {
+        return independent_review_runtime_success_satisfies(frame, usage);
     }
     if !completion_contract_requirement(frame, "verification_evidence") {
         return true;
@@ -4073,7 +4122,7 @@ fn classify_tool_outcome(
             Some("request_approval_or_adjust_permission_scope".into());
         return outcome;
     }
-    if lowered.contains("old_string not found") {
+    if lowered.contains("old_string not found") || lowered.contains("string to replace not found") {
         outcome.kind = ToolOutcomeKind::UserError;
         outcome.recoverable = true;
         outcome.recommended_next_action = Some("read_before_edit".into());
@@ -4546,6 +4595,50 @@ pub async fn run_decision_loop_with_tools(
                         ),
                     );
                     frame.state = AgentState::Executing;
+                    continue;
+                }
+                if artifact_write_contract_active(&frame)
+                    && total_usage.tool_dispatch_success_count == 0
+                    && !missing_artifact_evidence_refs(&frame).is_empty()
+                {
+                    let missing_refs = missing_artifact_evidence_refs(&frame);
+                    if count_decision_feedback(&frame, "no_tool_done_missing_artifact") >= 1 {
+                        total_usage.recovery_attempted = true;
+                        total_usage.recovery_tier = Some("decision_feedback".into());
+                        total_usage.recovery_outcome = Some("no_progress_escalation".into());
+                        total_usage.terminal_blocker_kind =
+                            Some("no_tool_done_missing_artifact".into());
+                        finalize_worker_usage_report(&frame, &mut total_usage);
+                        return Ok(LoopOutcome::NoProgress {
+                            last_state: frame.state,
+                            reason: format!(
+                                "done repeated without runtime tool evidence for required artifacts: {}",
+                                missing_refs.join("|")
+                            ),
+                            usage: total_usage,
+                        });
+                    }
+                    push_decision_feedback(
+                        &mut frame,
+                        "no_tool_done_missing_artifact",
+                        true,
+                        "use_call_tool_write_artifact",
+                        &format!(
+                            "artifact create/write contract cannot be closed by prose-only done; call Write or Bash for missing refs {}",
+                            missing_refs.join("|")
+                        ),
+                    );
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("decision_feedback".into());
+                    total_usage.recovery_outcome = Some("feedback_injected".into());
+                    let block = CompletionGateBlock {
+                        status: CompletionEvidenceStatus::MissingArtifactEvidence,
+                        required_action: "write_artifact".into(),
+                        reason: "completion gate blocked done because required artifact create/write evidence is missing".into(),
+                        missing_evidence_refs: missing_refs,
+                    };
+                    inject_completion_gate_block(&mut frame, &block);
+                    record_completion_gate_recovery(&frame, &mut total_usage, &block);
                     continue;
                 }
                 if let Err(block) = enforce_completion_gate(&mut frame, &mut total_usage) {
@@ -5679,6 +5772,168 @@ mod tests {
             ),
             "once runtime obligations are cleared, normal independent-review closure may resume"
         );
+    }
+
+    #[test]
+    fn durable_artifact_contract_corrects_independent_review_profile() {
+        let mut frame = make_clean_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.review_mode = Some(ReviewMode::IndependentReview);
+        frame.stage_execution_contract.task_profile = Some(TaskProfile::IndependentReview);
+        push_completion_contract_with_refs(&mut frame, &["artifact:contract:0"], &[], &[]);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            "/tmp/static-site/README.md",
+            "file",
+        );
+
+        append_runtime_contract_facts(&mut frame);
+
+        assert_eq!(
+            frame.stage_execution_contract.task_profile,
+            Some(TaskProfile::CodeChange)
+        );
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.starts_with("decision_feedback: category=durable_artifact_profile_corrected ")
+        }));
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .any(|line| line == "fact: task_profile code_change")
+        );
+    }
+
+    #[test]
+    fn durable_artifact_done_without_tools_gets_repair_feedback_then_no_progress() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target = unique_temp_path("no_tool_done_missing_artifact");
+        let done_json = r#"{"state":"done","decision":"done","state_patch":{"accepted_summary_add":["created target artifact"]}}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(done_json.into())],
+            vec![StreamEvent::TextDelta(done_json.into())],
+        ]);
+        let mut frame = make_clean_frame();
+        frame.open_items.clear();
+        frame.allowed_actions = vec!["write_file".into()];
+        frame.allowed_tools = vec!["Write".into()];
+        push_completion_contract_with_refs(&mut frame, &["artifact:contract:0"], &[], &[]);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            target.to_str().expect("temp path should be utf-8"),
+            "file",
+        );
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                None,
+            ))
+            .expect("loop should not error");
+        let _ = std::fs::remove_file(&target);
+
+        match outcome {
+            LoopOutcome::NoProgress { reason, usage, .. } => {
+                assert!(reason.contains("done repeated without runtime tool evidence"));
+                assert_eq!(
+                    usage.terminal_blocker_kind.as_deref(),
+                    Some("no_tool_done_missing_artifact")
+                );
+                assert_eq!(usage.recovery_tier.as_deref(), Some("decision_feedback"));
+                assert!(
+                    usage
+                        .worker_report
+                        .expect("worker report")
+                        .completion_evidence_gaps
+                        .iter()
+                        .any(|gap| {
+                            gap.target_ref == "artifact:contract:0" && gap.missing_artifact_evidence
+                        })
+                );
+            }
+            other => {
+                panic!("expected NoProgress for repeated prose-only artifact done, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn durable_artifact_done_feedback_can_recover_with_write_tool() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target = unique_temp_path("done_feedback_write_recovery");
+        let initial_done = r#"{"state":"done","decision":"done","state_patch":{"accepted_summary_add":["created target artifact"]}}"#;
+        let write_json = format!(
+            r##"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Write","args":{{"file_path":"{}","content":"# Site\n"}}}}}}"##,
+            target.display()
+        );
+        let final_done = r#"{"state":"done","decision":"done"}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(initial_done.into())],
+            vec![StreamEvent::TextDelta(write_json.into())],
+            vec![StreamEvent::TextDelta(final_done.into())],
+        ]);
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+        permissions.add_always_allow_rule("Write");
+        let tool_runtime = StateFrameToolRuntime {
+            registry: ToolRegistry::new().register(Arc::new(FileWriteTool)),
+            permissions,
+            cwd: test_runtime_paths().0,
+            config_root: test_runtime_paths().1,
+        };
+        let mut frame = make_clean_frame();
+        frame.open_items.clear();
+        frame.allowed_actions = vec!["write_file".into()];
+        frame.allowed_tools = vec!["Write".into()];
+        push_completion_contract_with_refs(&mut frame, &["artifact:contract:0"], &[], &[]);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:0",
+            target.to_str().expect("temp path should be utf-8"),
+            "file",
+        );
+
+        let outcome = rt
+            .block_on(run_decision_loop_with_tools(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    ..DecisionLoopConfig::default()
+                },
+                Some(tool_runtime),
+            ))
+            .expect("loop should not error");
+        let content = std::fs::read_to_string(&target).expect("Write should create artifact");
+        let _ = std::fs::remove_file(&target);
+        assert_eq!(content, "# Site\n");
+
+        match outcome {
+            LoopOutcome::Done { usage, .. } => {
+                assert_eq!(usage.tool_dispatch_success_count, 1);
+                assert_eq!(
+                    usage
+                        .completion_evidence_status
+                        .as_ref()
+                        .map(|status| status.as_str()),
+                    Some("sufficient")
+                );
+                assert!(
+                    usage
+                        .worker_report
+                        .expect("worker report")
+                        .completion_evidence_gaps
+                        .is_empty()
+                );
+            }
+            other => panic!("expected Done after Write recovery, got {other:?}"),
+        }
     }
 
     fn verification_repair_tool_runtime() -> StateFrameToolRuntime {
