@@ -81,6 +81,7 @@ pub struct LoopUsage {
     pub recovery_outcome: Option<String>,
     pub terminal_blocker_kind: Option<String>,
     pub last_recovery_attempt: Option<RecoveryAttempt>,
+    pub accepted_summary: Vec<String>,
     pub worker_report: Option<WorkerStructuredReport>,
     pub completion_evidence_status: Option<CompletionEvidenceStatus>,
 }
@@ -2226,6 +2227,7 @@ fn finalize_worker_usage_report(frame: &StateFrame, usage: &mut LoopUsage) {
     let completion = evaluate_completion_evidence(frame, usage);
     let evidence_refs = collect_evidence_refs(frame, Some(usage));
     let report = build_worker_structured_report_with_refs(frame, usage, completion, evidence_refs);
+    usage.accepted_summary = frame.accepted_summary.clone();
     usage.completion_evidence_status = Some(report.completion_evidence_status.clone());
     usage.worker_report = Some(report);
 }

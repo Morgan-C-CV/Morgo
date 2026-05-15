@@ -4750,6 +4750,16 @@ fn build_state_frame_worker_review_summary(step: &BossPlanStep, usage: &LoopUsag
         .as_ref()
         .and_then(|report| serde_json::to_string_pretty(report).ok())
         .unwrap_or_else(|| "none supplied".into());
+    let accepted_summary = if usage.accepted_summary.is_empty() {
+        "none supplied".into()
+    } else {
+        usage
+            .accepted_summary
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let tool_summary = if usage.tool_execution_records.is_empty() {
         "none supplied".into()
     } else {
@@ -4774,6 +4784,7 @@ fn build_state_frame_worker_review_summary(step: &BossPlanStep, usage: &LoopUsag
         "LisM StateFrame worker",
         &[
             ("Completion evidence status", completion_status.as_str()),
+            ("Worker accepted summary", accepted_summary.as_str()),
             ("Worker structured report", worker_report.as_str()),
             ("Tool dispatch summary", tool_summary.as_str()),
         ],
@@ -5121,6 +5132,59 @@ fn normalize_review_verifier_target(value: &str) -> String {
     normalize_review_verifier_target_with_cwd(value, std::env::current_dir().ok().as_deref())
 }
 
+fn path_has_file_extension(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension))
+        .is_some_and(|extension| {
+            !extension.is_empty()
+                && extension
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        })
+}
+
+fn review_verifier_target_is_concrete_path_with_cwd(value: &str, cwd: Option<&Path>) -> bool {
+    let normalized = normalize_required_evidence_target(value);
+    if normalized.is_empty() || normalized.contains(char::is_whitespace) {
+        return false;
+    }
+    let path = Path::new(&normalized);
+    if path.is_absolute() {
+        return path_has_file_extension(&normalized)
+            || cwd
+                .map(|_| path.exists())
+                .unwrap_or(false);
+    }
+    if normalized.starts_with("~/") || normalized.starts_with('$') {
+        return false;
+    }
+
+    let Some(cwd) = cwd else {
+        return normalized.starts_with("./")
+            || normalized.starts_with("../")
+            || normalized.starts_with("src/")
+            || normalized.starts_with("RustAgent/")
+            || path_has_file_extension(&normalized);
+    };
+    if normalize_review_verifier_target_with_cwd(&normalized, Some(cwd)) != normalized {
+        return true;
+    }
+    if cwd.join(path).exists() {
+        return true;
+    }
+    normalized.starts_with("./")
+        || normalized.starts_with("../")
+        || normalized.starts_with("src/")
+        || normalized.starts_with("RustAgent/")
+        || path_has_file_extension(&normalized)
+}
+
+fn review_verifier_target_is_concrete_path(value: &str) -> bool {
+    review_verifier_target_is_concrete_path_with_cwd(value, std::env::current_dir().ok().as_deref())
+}
+
 fn normalize_review_verifier_target_with_cwd(value: &str, cwd: Option<&Path>) -> String {
     let normalized = normalize_required_evidence_target(value);
     if normalized.is_empty() {
@@ -5160,7 +5224,11 @@ fn concrete_path_tokens_from_review_text(value: &str) -> Vec<String> {
         .split(|ch: char| {
             ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
         })
-        .map(|token| token.trim_matches(|ch: char| matches!(ch, ':' | '.' | ',' | ';')))
+        .map(|token| {
+            token
+                .trim_matches(|ch: char| matches!(ch, ':' | ',' | ';'))
+                .trim_end_matches('.')
+        })
         .filter(|token| !token.trim().is_empty())
         .filter(|token| {
             token.starts_with('/')
@@ -5169,13 +5237,26 @@ fn concrete_path_tokens_from_review_text(value: &str) -> Vec<String> {
                 || token.starts_with('$')
                 || token.contains('/')
         })
+        .filter(|token| review_verifier_target_is_concrete_path(token))
         .map(str::to_string)
         .collect()
 }
 
 fn push_review_verifier_target(targets: &mut Vec<String>, step: &BossPlanStep, value: &str) {
     let normalized = normalize_review_verifier_target(value);
-    if normalized.is_empty() {
+    let declared_target = step
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .any(|artifact| artifact.path == normalized)
+        || step
+            .stage_execution_contract
+            .content_evidence_targets
+            .iter()
+            .any(|target| normalize_required_evidence_target(target) == normalized);
+    if normalized.is_empty()
+        || (!declared_target && !review_verifier_target_is_concrete_path(&normalized))
+    {
         return;
     }
     push_readable_verification_target(targets, step, &normalized);
@@ -17190,6 +17271,12 @@ mod tests {
 
         let usage = LoopUsage {
             completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            accepted_summary: vec![
+                "现状：已完成安全审查摘要。".into(),
+                "主要风险：列出 runtime/test、yes/no 等决策风险。".into(),
+                "证据来源：基于提供的 runtime config excerpt。".into(),
+                "下一步建议：按风险优先级处理。".into(),
+            ],
             worker_report: Some(WorkerStructuredReport {
                 worker_state: AgentState::Done,
                 last_tool_action: Some("Write".into()),
@@ -17215,6 +17302,11 @@ mod tests {
         assert!(summary.contains("Current runtime evidence:"));
         assert!(summary.contains(&format!("write:{target}")));
         assert!(summary.contains("Completion evidence status: sufficient"));
+        assert!(summary.contains("Worker accepted summary:"));
+        assert!(summary.contains("现状：已完成安全审查摘要。"));
+        assert!(summary.contains("主要风险：列出 runtime/test、yes/no 等决策风险。"));
+        assert!(summary.contains("证据来源：基于提供的 runtime config excerpt。"));
+        assert!(summary.contains("下一步建议：按风险优先级处理。"));
         assert!(summary.contains("Worker structured report:"));
         assert!(summary.contains("\"review_mode\": \"independent_review\""));
         assert!(
@@ -17222,6 +17314,26 @@ mod tests {
                 "Tool dispatch summary: 1. tool=Write kind=Success summary=Write succeeded"
             )
         );
+    }
+
+    #[test]
+    fn review_verifier_ignores_prose_slash_tokens() {
+        let tokens = concrete_path_tokens_from_review_text(
+            "runtime/test yes/no TUI/Telegram resume/deny /ensure_connected NotReviewed/Denied/Stale",
+        );
+
+        assert!(tokens.is_empty(), "unexpected prose targets: {tokens:?}");
+    }
+
+    #[test]
+    fn review_verifier_keeps_concrete_paths() {
+        let text = "/private/tmp/x/report.md RustAgent/Agent/src/core/boss.rs src/tool/definition.rs ../docs/30-boss-mode-and-dual-agent-workflow.md";
+        let tokens = concrete_path_tokens_from_review_text(text);
+
+        assert!(tokens.contains(&"/private/tmp/x/report.md".to_string()));
+        assert!(tokens.contains(&"RustAgent/Agent/src/core/boss.rs".to_string()));
+        assert!(tokens.contains(&"src/tool/definition.rs".to_string()));
+        assert!(tokens.contains(&"../docs/30-boss-mode-and-dual-agent-workflow.md".to_string()));
     }
 
     #[test]
