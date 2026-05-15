@@ -923,15 +923,17 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
     normalized.insert("state".into(), Value::String(state.to_string()));
     normalized.insert("decision".into(), Value::String(decision.to_string()));
 
-    if let Some(next_action) = root
-        .get("next_action")
-        .cloned()
-        .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
-    {
-        normalized.insert(
-            "next_action".into(),
-            normalize_next_action_value(next_action),
-        );
+    if matches!(decision, "call_tool" | "reject") {
+        if let Some(next_action) = root
+            .get("next_action")
+            .cloned()
+            .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
+        {
+            normalized.insert(
+                "next_action".into(),
+                normalize_next_action_value(next_action),
+            );
+        }
     }
     if let Some(items) = needed_context {
         normalized.insert("needed_context".into(), Value::Array(items.clone()));
@@ -1031,6 +1033,28 @@ mod tests {
         let next_action = decision.next_action.expect("next action");
         assert_eq!(next_action.action_type, "invoke_parsing_tool");
         assert_eq!(next_action.args, Value::Object(Map::new()));
+    }
+
+    #[test]
+    fn done_with_extra_next_action_preserves_summary_without_repair() {
+        let decision = validate_state_decision(
+            r#"{
+                "state":"done",
+                "decision":"done",
+                "next_action":{"action_type":"SendMessage","args":{}},
+                "state_patch":{"accepted_summary_add":["现状：保留有效审计结论。","主要风险：不要因多余 next_action 触发重写。","证据来源：StateDecision normalization。","下一步建议：直接完成。"]}
+            }"#,
+        )
+        .expect("done next_action should be ignored");
+
+        assert_eq!(decision.state, AgentState::Done);
+        assert_eq!(decision.decision, DecisionKind::Done);
+        assert!(decision.next_action.is_none());
+        assert_eq!(decision.state_patch.accepted_summary_add.len(), 4);
+        assert_eq!(
+            decision.state_patch.accepted_summary_add[0],
+            "现状：保留有效审计结论。"
+        );
     }
 
     #[test]

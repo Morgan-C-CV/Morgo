@@ -235,6 +235,16 @@ fn normalize_candidate_path(candidate: &str, cwd: Option<&Path>) -> Option<Strin
     Some(candidate.to_string())
 }
 
+fn slash_command_like_token(candidate: &str) -> bool {
+    let Some(rest) = candidate.strip_prefix('/') else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
 fn extract_path_candidates_with_mode(text: &str, objective_only: bool) -> Vec<(String, String)> {
     let mut paths = Vec::new();
     let cwd = std::env::current_dir().ok();
@@ -263,6 +273,9 @@ fn extract_path_candidates_with_mode(text: &str, objective_only: bool) -> Vec<(S
                 .filter(|suffix| suffix.contains('/'))
                 .unwrap_or(candidate);
             if candidate.is_empty() || candidate == "/" || !candidate.contains('/') {
+                continue;
+            }
+            if slash_command_like_token(candidate) {
                 continue;
             }
             if !(candidate.ends_with(".rs")
@@ -1712,6 +1725,48 @@ mod tests {
             item.path == "RustAgent/Agent/src/core/state_frame_projection.rs"
                 || item.path == "src/core/state_frame_projection.rs"
         }));
+    }
+
+    #[test]
+    fn build_step_fact_ledgers_ignores_slash_command_mentions() {
+        let step = BossPlanStep {
+            id: 2,
+            description: "audit boss mode".into(),
+            objective: Some(
+                "真实 /boss A/B use case 2：审计 bash 输出限界。\n- 参考实现：src/core/state_frame_loop.rs"
+                    .into(),
+            ),
+            acceptance: vec!["Task completed successfully.".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+        };
+
+        let ledgers = build_step_fact_ledgers(&step);
+
+        assert!(
+            ledgers.file_facts.iter().all(|item| item.path != "/boss"),
+            "slash-command mention must not become a concrete file fact: {:?}",
+            ledgers.file_facts
+        );
+        assert!(
+            ledgers
+                .file_facts
+                .iter()
+                .any(|item| item.path.ends_with("src/core/state_frame_loop.rs")),
+            "real source path should still be extracted"
+        );
     }
 
     #[test]

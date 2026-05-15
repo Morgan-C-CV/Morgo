@@ -40,6 +40,26 @@ fn current_task_contract_text(text: &str) -> String {
     lines.join("\n")
 }
 
+fn projection_objective_text(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    fallback: &str,
+) -> String {
+    let text = step.map(|step| step.objective()).unwrap_or(fallback);
+    if step
+        .and_then(|step| step.stage_execution_contract.task_profile)
+        .is_some_and(|profile| {
+            matches!(
+                profile,
+                TaskProfile::IndependentReview | TaskProfile::ReadOnlyAnalysis
+            )
+        })
+    {
+        text.to_string()
+    } else {
+        current_task_contract_text(text)
+    }
+}
+
 fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
     if step_id
         .and_then(|id| plan.steps.iter().find(|s| s.id == id))
@@ -1321,10 +1341,7 @@ pub fn project_state_frame_with_st_mode(
     let archive = build_accepted_archive(plan, step_id);
 
     // objective: current step objective if available, else plan task description.
-    let objective = step_id
-        .and_then(|id| plan.steps.iter().find(|s| s.id == id))
-        .map(|s| current_task_contract_text(s.objective()))
-        .unwrap_or_else(|| current_task_contract_text(&plan.task_description));
+    let objective = projection_objective_text(current_step, &plan.task_description);
 
     // open_items: unsatisfied acceptance criteria of the current step.
     let mut open_items = step_id
@@ -2064,6 +2081,71 @@ mod tests {
                 && line.contains("test_evidence=not_required")
                 && line.contains("verification_evidence=not_required")
         }));
+    }
+
+    #[test]
+    fn independent_review_projection_preserves_inline_reference_material() {
+        let plan = BossPlan {
+            plan_id: "plan-u2-inline-audit".into(),
+            task_description: "audit bash memory backpressure".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "audit bash output limits".into(),
+                objective: Some(
+                    "真实 /boss A/B use case 2：审计 bash 输出限界与内存背压合同。\n\n任务目标：\n- 判断文档对 bash clamped output 是否准确。\n- 只做只读审计与摘要。\n\n关键材料摘录：\n# 29 - 内存背压与防爆栈设计\n当前 BashTool 两条热路径都已接入有界输出读取。".into(),
+                ),
+                acceptance: vec!["Task completed successfully.".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract {
+                    review_mode: Some(ReviewMode::IndependentReview),
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    requires_source_evidence: Some(false),
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert!(
+            frame.objective.contains("关键材料摘录"),
+            "independent review must keep inline evidence material in objective: {}",
+            frame.objective
+        );
+        assert!(
+            frame.objective.contains("当前 BashTool 两条热路径"),
+            "inline audit material must remain visible to StateDecision"
+        );
+        assert!(
+            frame
+                .recent_evidence
+                .iter()
+                .all(|line| !line.contains("path=/boss ")),
+            "slash command mention must not become a file fact: {:?}",
+            frame.recent_evidence
+        );
     }
 
     #[test]
