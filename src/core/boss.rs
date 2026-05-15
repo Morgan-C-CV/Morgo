@@ -16903,6 +16903,94 @@ mod tests {
     }
 
     #[test]
+    fn state_frame_worker_review_summary_carries_runtime_evidence() {
+        let target = "/tmp/state-frame-review-summary.md";
+        let contract = StageExecutionContract {
+            review_mode: Some(ReviewMode::IndependentReview),
+            task_profile: Some(TaskProfile::CodeChange),
+            requires_source_evidence: Some(false),
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: target.into(),
+                kind: "file".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec!["artifact:step0:0".into(), target.into()],
+            }],
+            required_actions: vec!["create".into(), "write".into()],
+            required_evidence: vec![target.into()],
+            ..StageExecutionContract::default()
+        };
+        let tool_record = ToolExecutionRecord {
+            tool_name: "Write".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Write succeeded".into(),
+            detail: None,
+            pending_approval: None,
+            report_modifier: ToolReportModifier::None,
+            observable_input: Some(observable_input_json(json!({
+                "file_path": target
+            }))),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        };
+        let step = BossPlanStep {
+            id: 0,
+            description: "write reviewable artifact".into(),
+            objective: Some("create the declared artifact".into()),
+            acceptance: vec![format!("target file exists and is non-empty: {target}")],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 1,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: contract,
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![tool_record.clone()],
+        };
+
+        let usage = LoopUsage {
+            completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Write".into()),
+                files_changed: vec![target.into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "not_required".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["tool_output:1".into(), "filefact:runtime:1:edit".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            tool_execution_records: vec![tool_record],
+            ..LoopUsage::default()
+        };
+
+        let summary = build_state_frame_worker_review_summary(&step, &usage);
+
+        assert!(summary.contains("Current attempt: LisM StateFrame worker reported boss step"));
+        assert!(summary.contains("Current runtime evidence:"));
+        assert!(summary.contains(&format!("write:{target}")));
+        assert!(summary.contains("Completion evidence status: sufficient"));
+        assert!(summary.contains("Worker structured report:"));
+        assert!(summary.contains("\"review_mode\": \"independent_review\""));
+        assert!(summary.contains("Tool dispatch summary: 1. tool=Write kind=Success summary=Write succeeded"));
+    }
+
+    #[test]
     fn step_review_trim_preserves_protocol_header() {
         let summary = format!("old context\n{}\nRECENT_REVIEW_TAIL", "x".repeat(1_000));
         let prompt = build_step_review_prompt(0, &summary, None);
