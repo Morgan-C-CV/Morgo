@@ -4557,6 +4557,8 @@ fn build_step_review_prompt(step_id: usize, summary: &str, correction: Option<&s
          Use only the review package below, including current worker prose and current runtime evidence already included.\n\
          For automated testing, prefer proactive coverage guidance over hard gating: if the task has multiple input/output cases, boundary conditions, or failure paths, note which small extra cases should be added, but do not reject solely because the worker did not enumerate every possible case.\n\
          Treat prose-only claims as weak evidence: they can be listed in weak_evidence_used, but they must not be reported as runtime-verified facts.\n\
+         Coordinator-provided inline excerpts and historical reference material inside the review package are allowed as provided reference context. Do not request_missing_evidence solely because the original backing files for those inline excerpts were not re-read during the current attempt.\n\
+         Only require additional evidence when the worker's acceptance claim depends on a concrete current-runtime fact that is absent from both runtime evidence and the coordinator-provided review package.\n\
          Historical attempts marked stale are background only; do not reject because of stale blockers when Current runtime evidence resolves them.\n\
          If the current attempt says source evidence remains missing, max iterations were reached, tool dispatch failed, or completion is blocked, do not accept unless the same package also includes explicit runtime evidence that resolves the blocker.\n\
          If only a targeted read-only check is missing, return request_missing_evidence instead of asking the worker to rerun the whole step.\n\
@@ -16842,6 +16844,9 @@ mod tests {
         assert!(prompt.contains("No tools are available"));
         assert!(prompt.contains("Use only the review package below"));
         assert!(prompt.contains("Treat prose-only claims as weak evidence"));
+        assert!(prompt.contains(
+            "Coordinator-provided inline excerpts and historical reference material"
+        ));
         assert!(!prompt.contains("Coordinator verdict:"));
         assert!(prompt.contains("Summary: worker prose says files were read"));
         assert!(prompt.contains("\"verdict\""));
