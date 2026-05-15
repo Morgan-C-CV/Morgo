@@ -1316,12 +1316,18 @@ fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &s
         |candidate: &str| candidate == path || evidence_path_scope_matches(candidate, path);
     let acceptable_status =
         |status: &str| matches!(status, "created" | "touched" | "verified" | "observed");
+    let runtime_source = |line: &str| {
+        evidence_field_value(line, "source")
+            .as_deref()
+            .is_some_and(|source| source.starts_with("tool:"))
+    };
 
     frame.recent_evidence.iter().any(|line| {
         if line.starts_with("fact: recent_changes_in_files ") {
             return evidence_field_value(line, "path")
                 .as_deref()
-                .is_some_and(path_matches);
+                .is_some_and(path_matches)
+                && runtime_source(line);
         }
         if line.starts_with("fact: artifact_status ") {
             return evidence_field_value(line, "path")
@@ -1329,12 +1335,14 @@ fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &s
                 .is_some_and(path_matches)
                 && evidence_field_value(line, "status")
                     .as_deref()
-                    .is_some_and(acceptable_status);
+                    .is_some_and(acceptable_status)
+                && runtime_source(line);
         }
         if line.starts_with("fact: file_facts ") {
             return evidence_field_value(line, "path")
                 .as_deref()
-                .is_some_and(path_matches);
+                .is_some_and(path_matches)
+                && runtime_source(line);
         }
         false
     })
@@ -5354,6 +5362,73 @@ mod tests {
     }
 
     #[test]
+    fn done_with_extra_next_action_is_accepted_without_repair() {
+        let frame = make_clean_frame();
+        let decision_json = r#"{"state":"done","decision":"done","next_action":{"action_type":"SendMessage","args":{"text":"done"}},"state_patch":{"accepted_summary_add":["artifact ready"]}}"#;
+
+        let decision = parse_and_validate_decision(&frame, decision_json)
+            .expect("done with an extra non-executable next_action should normalize");
+
+        assert_eq!(decision.decision, DecisionKind::Done);
+        assert!(decision.next_action.is_none());
+        assert_eq!(decision.state_patch.accepted_summary_add, vec!["artifact ready"]);
+    }
+
+    #[test]
+    fn repeated_prose_done_without_artifact_evidence_exits_as_no_progress() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let target = unique_temp_path("prose_done_tailspin");
+        let target = target.to_string_lossy().into_owned();
+        let mut frame = make_clean_frame();
+        frame.stage_execution_contract = StageExecutionContract {
+            declared_artifacts: vec![DeclaredArtifactContract {
+                ref_id: "artifact:step0:0".into(),
+                path: target.clone(),
+                kind: "file".into(),
+                required_actions: vec!["create".into(), "write".into()],
+                required_evidence: vec!["artifact:step0:0".into(), target.clone()],
+            }],
+            required_actions: vec!["create".into(), "write".into()],
+            required_evidence: vec![target.clone()],
+            ..StageExecutionContract::default()
+        };
+        frame.allowed_tools = vec!["Write".into()];
+        frame.allowed_actions = vec!["write_file".into()];
+        let done_with_extra_next_action = format!(
+            r#"{{"state":"done","decision":"done","next_action":{{"action_type":"SendMessage","args":{{"text":"done"}}}},"state_patch":{{"accepted_summary_add":["claimed {target} ready"]}}}}"#
+        );
+        let done_again = r#"{"state":"done","decision":"done","state_patch":{"accepted_summary_add":["still claimed ready"]}}"#;
+        let client = ModelProviderClient::with_scripted_turns(vec![
+            vec![StreamEvent::TextDelta(done_with_extra_next_action.into())],
+            vec![StreamEvent::TextDelta(done_again.into())],
+        ]);
+
+        let outcome = rt
+            .block_on(run_decision_loop(
+                &client,
+                frame,
+                DecisionLoopConfig {
+                    max_iterations: 4,
+                    repair_budget: 0,
+                    ..DecisionLoopConfig::default()
+                },
+            ))
+            .expect("loop should terminate with no-progress instead of repair tailspin");
+
+        match outcome {
+            LoopOutcome::NoProgress { reason, usage, .. } => {
+                assert!(reason.contains("done repeated without runtime tool evidence"));
+                assert_eq!(usage.tool_dispatch_success_count, 0);
+                assert_eq!(
+                    usage.terminal_blocker_kind.as_deref(),
+                    Some("no_tool_done_missing_artifact")
+                );
+            }
+            other => panic!("expected no-progress tailspin exit, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn continue_without_state_or_patch_progress_is_rejected_for_repair() {
         let frame = make_clean_frame();
         let decision_json = r#"{"state":"executing","decision":"continue","state_patch":{}}"#;
@@ -8600,6 +8675,32 @@ mod tests {
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
             CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn step_objective_file_fact_is_not_material_artifact_evidence() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(&mut frame, &["artifact:contract:file"], &[], &[]);
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:file",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: file_facts ref=filefact:step0:0 path=/tmp/example-site/README.md kind=target_file source=step_objective source_event_id=step-objective:0 freshness=current confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=step objective names this file as a target".into(),
+        );
+
+        assert!(!super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site/README.md",
+            "file"
+        ));
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::MissingArtifactEvidence
         );
     }
 

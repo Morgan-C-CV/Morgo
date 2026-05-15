@@ -923,15 +923,17 @@ fn normalize_state_decision_value(value: Value) -> Result<Value, String> {
     normalized.insert("state".into(), Value::String(state.to_string()));
     normalized.insert("decision".into(), Value::String(decision.to_string()));
 
-    if let Some(next_action) = root
-        .get("next_action")
-        .cloned()
-        .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
-    {
-        normalized.insert(
-            "next_action".into(),
-            normalize_next_action_value(next_action),
-        );
+    if decision != "done" {
+        if let Some(next_action) = root
+            .get("next_action")
+            .cloned()
+            .or_else(|| nested.and_then(|m| m.get("next_action").cloned()))
+        {
+            normalized.insert(
+                "next_action".into(),
+                normalize_next_action_value(next_action),
+            );
+        }
     }
     if let Some(items) = needed_context {
         normalized.insert("needed_context".into(), Value::Array(items.clone()));
