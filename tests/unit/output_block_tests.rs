@@ -117,6 +117,10 @@ fn command_result_blocks_to_plain_text_uses_output_block_impl() {
 #[test]
 fn command_result_non_text_variants_return_none() {
     assert_eq!(CommandResult::ContinueToQuery.to_plain_text(), None);
+    assert_eq!(
+        CommandResult::ContinueToQueryWithPrompt("continue".into()).to_plain_text(),
+        None
+    );
     assert_eq!(CommandResult::Denied("x".into()).to_plain_text(), None);
 }
 

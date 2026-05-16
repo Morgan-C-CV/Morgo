@@ -565,9 +565,13 @@ impl AppState {
                     )
                     .await?;
                 match result {
-                    ToolResult::Text(text) => {
-                        Ok(CommandResult::Message(prepend_notice(allow_notice, text)))
-                    }
+                    ToolResult::Text(text) => Ok(CommandResult::ContinueToQueryWithPrompt(
+                        approval_continuation_prompt(
+                            &pending.tool_name,
+                            &pending.tool_input,
+                            prepend_notice(allow_notice, text),
+                        ),
+                    )),
                     ToolResult::Denied(reason) => Ok(CommandResult::Denied(reason)),
                     ToolResult::PendingApproval { message, .. } => Ok(CommandResult::Message(
                         prepend_notice(allow_notice, format!("approval still required: {message}")),
@@ -604,6 +608,22 @@ fn prepend_notice(notice: Option<String>, body: String) -> String {
         Some(notice) => format!("{notice}\n{body}"),
         None => body,
     }
+}
+
+fn approval_continuation_prompt(
+    tool_name: &str,
+    tool_input: &str,
+    tool_result: String,
+) -> String {
+    format!(
+        "Approval resolved for tool {tool_name}.\n\
+         The approved tool has now run.\n\n\
+         Tool input:\n\
+         {tool_input}\n\n\
+         Tool result:\n\
+         {tool_result}\n\n\
+         Continue the interrupted user task using this tool result. Do not repeat the same approved tool call unless more evidence is needed."
+    )
 }
 
 fn persist_store_write_with_retry(

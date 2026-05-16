@@ -95,6 +95,7 @@ pub enum CommandResult {
     Message(String),
     Blocks(Vec<OutputBlock>),
     ContinueToQuery,
+    ContinueToQueryWithPrompt(String),
     Prompt(String),
     Denied(String),
     UpdateConfig { key: String, value: String },

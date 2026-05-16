@@ -258,6 +258,11 @@ where
                         .await;
                 (messages, events, true, None)
             }
+            CommandResult::ContinueToQueryWithPrompt(prompt) => {
+                let (messages, events) =
+                    collect_stream_messages(engine, Message::user(prompt), &mut on_update).await;
+                (messages, events, true, None)
+            }
             CommandResult::Denied(reason) => (
                 vec![Message::assistant(format!("Denied: {reason}"))],
                 Vec::new(),

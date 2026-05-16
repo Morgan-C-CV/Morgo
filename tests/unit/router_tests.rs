@@ -3063,11 +3063,17 @@ async fn approval_replay_uses_runtime_tool_registry() {
         .await
         .expect("approval replay should resolve");
 
-    let RouteExecution::CommandResult(CommandResult::Message(text)) = result else {
-        panic!("expected approval replay message");
+    let RouteExecution::CommandResult(CommandResult::ContinueToQueryWithPrompt(text)) = result
+    else {
+        panic!("expected approval replay continuation prompt");
     };
+    assert!(text.contains("Approval resolved for tool Bash."));
+    assert!(text.contains("The approved tool has now run."));
+    assert!(text.contains("Tool input:"));
     assert!(text.contains("command: pwd"));
+    assert!(text.contains("Tool result:"));
     assert!(text.contains("exit_code: 0"));
+    assert!(text.contains("Continue the interrupted user task"));
     assert!(permission_context.pending_approval().is_none());
 }
 
