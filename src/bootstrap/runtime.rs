@@ -2177,10 +2177,32 @@ fn place_activity_below_startup_card(screen: &mut crate::interaction::cli::rende
             .map(|line| format!("  {line}")),
     );
 
-    if !screen.main.is_empty() && !screen.main.last().is_some_and(|line| line.is_empty()) {
-        screen.main.push(String::new());
+    let insertion_at = screen
+        .main
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|index| {
+            let mut start = index;
+            while start > 0 && !screen.main[start - 1].trim().is_empty() {
+                start -= 1;
+            }
+            start
+        })
+        .unwrap_or(screen.main.len());
+
+    let mut inserted = activity_lines;
+    inserted.push(String::new());
+    inserted.push("─".repeat(120));
+    inserted.push(String::new());
+
+    if insertion_at >= screen.main.len() {
+        if !screen.main.is_empty() && !screen.main.last().is_some_and(|line| line.is_empty()) {
+            screen.main.push(String::new());
+        }
+        screen.main.extend(inserted);
+        return;
     }
-    screen.main.extend(activity_lines);
+    screen.main.splice(insertion_at..insertion_at, inserted);
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -4077,6 +4099,7 @@ mod tui_output_tests {
 
         assert!(rendered.contains("[Activity]"), "{rendered}");
         assert!(rendered.contains("READ renderer.rs"), "{rendered}");
+        assert!(rendered.contains("────────────────"), "{rendered}");
         assert!(rendered.contains("> older user message"), "{rendered}");
         let user_pos = rendered
             .find("> older user message")

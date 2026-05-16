@@ -354,21 +354,138 @@ fn approval_detail_value<'a>(line: &'a str, keys: &[&str]) -> Option<&'a str> {
         .then_some(value.trim())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExplorationEntry {
+    Read { paths: Vec<String> },
+    Line(String),
+}
+
+impl ExplorationEntry {
+    fn from_tool_call(tool_name: &str, input: &str) -> Option<Self> {
+        let parsed = serde_json::from_str::<Value>(input).ok();
+        match tool_name {
+            "Read" => {
+                let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
+                Some(Self::Read {
+                    paths: vec![short_path(&path)],
+                })
+            }
+            "Grep" => {
+                let pattern = json_string_field(parsed.as_ref(), &["pattern", "query"])?;
+                let path = json_string_field(parsed.as_ref(), &["path"])
+                    .map(|value| format!(" in {}", short_path(&value)))
+                    .unwrap_or_default();
+                Some(Self::Line(format!(
+                    "{} {}{}",
+                    style_activity_action("SEARCH"),
+                    truncate_for_tui(&pattern, 72),
+                    path
+                )))
+            }
+            "Glob" => {
+                let pattern = json_string_field(parsed.as_ref(), &["pattern", "glob"])
+                    .or_else(|| json_string_field(parsed.as_ref(), &["path"]))?;
+                Some(Self::Line(format!(
+                    "{} {}",
+                    style_activity_action("LIST"),
+                    truncate_for_tui(&pattern, 72)
+                )))
+            }
+            "ToolSearch" | "WebSearch" => {
+                let query = json_string_field(parsed.as_ref(), &["query", "q"])?;
+                Some(Self::Line(format!(
+                    "{} {}",
+                    style_activity_action("SEARCH"),
+                    truncate_for_tui(&query, 72)
+                )))
+            }
+            "WebFetch" => {
+                let url = json_string_field(parsed.as_ref(), &["url"])?;
+                Some(Self::Line(format!(
+                    "{} {}",
+                    style_activity_action("FETCHED"),
+                    truncate_for_tui(&url, 72)
+                )))
+            }
+            _ => None,
+        }
+    }
+
+    fn merge_into(self, entries: &mut Vec<ExplorationEntry>) {
+        match self {
+            Self::Read { paths } => {
+                if let Some(Self::Read { paths: existing }) = entries.last_mut() {
+                    for path in paths {
+                        if !existing.contains(&path) {
+                            existing.push(path);
+                        }
+                    }
+                } else {
+                    entries.push(Self::Read { paths });
+                }
+            }
+            Self::Line(line) => entries.push(Self::Line(line)),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Read { paths } => format!("{} {}", style_activity_action("READ"), paths.join(", ")),
+            Self::Line(line) => line.clone(),
+        }
+    }
+}
+
+fn activity_stage_divider_line() -> String {
+    "─".repeat(120)
+}
+
+fn render_exploration_stage(entries: &[ExplorationEntry]) -> Vec<String> {
+    let mut lines = vec!["• Explored".to_string()];
+    for (index, entry) in entries.iter().enumerate() {
+        if index == 0 {
+            lines.push(format!("  └ {}", entry.render()));
+        } else {
+            lines.push(format!("    {}", entry.render()));
+        }
+    }
+    lines
+}
+
+fn flush_activity_stage(stages: &mut Vec<Vec<String>>, stage_lines: &mut Vec<String>) {
+    if stage_lines.is_empty() {
+        return;
+    }
+    stages.push(std::mem::take(stage_lines));
+}
+
 fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
-    let mut exploration = Vec::new();
-    let mut lines = Vec::new();
+    let mut stages: Vec<Vec<String>> = Vec::new();
+    let mut exploration_entries: Vec<ExplorationEntry> = Vec::new();
+    let mut current_stage_lines: Vec<String> = Vec::new();
+    let mut in_exploration_stage = false;
 
     for item in items {
         match item {
             SurfaceItem::ToolCallStarted { tool_name, input } => {
-                if let Some(line) = tool_call_activity_line(tool_name, input) {
-                    if is_exploration_tool(tool_name) {
-                        if exploration.last() != Some(&line) {
-                            exploration.push(line);
-                        }
-                    } else {
-                        lines.push(format!("• {line}"));
+                if is_exploration_tool(tool_name) {
+                    if !in_exploration_stage {
+                        flush_activity_stage(&mut stages, &mut current_stage_lines);
+                        in_exploration_stage = true;
                     }
+                    if let Some(entry) = ExplorationEntry::from_tool_call(tool_name, input) {
+                        entry.merge_into(&mut exploration_entries);
+                    }
+                } else if let Some(line) = tool_call_activity_line(tool_name, input) {
+                    if in_exploration_stage {
+                        if !exploration_entries.is_empty() {
+                            current_stage_lines.extend(render_exploration_stage(&exploration_entries));
+                            exploration_entries.clear();
+                        }
+                        flush_activity_stage(&mut stages, &mut current_stage_lines);
+                        in_exploration_stage = false;
+                    }
+                    current_stage_lines.push(format!("• {line}"));
                 }
             }
             SurfaceItem::ToolResult {
@@ -383,15 +500,23 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                     summary.as_deref(),
                     detail.as_deref(),
                 ) {
+                    if in_exploration_stage {
+                        if !exploration_entries.is_empty() {
+                            current_stage_lines.extend(render_exploration_stage(&exploration_entries));
+                            exploration_entries.clear();
+                        }
+                        flush_activity_stage(&mut stages, &mut current_stage_lines);
+                        in_exploration_stage = false;
+                    }
                     let detail_lines = detail_lines
                         .into_iter()
                         .filter(|line| !is_low_signal_tool_detail(line))
                         .collect::<Vec<_>>();
                     if !headline.trim().is_empty() {
-                        lines.push(format!("• {headline}"));
+                        current_stage_lines.push(format!("• {headline}"));
                     }
                     for detail_line in detail_lines {
-                        lines.push(format!("  └ {detail_line}"));
+                        current_stage_lines.push(format!("  └ {detail_line}"));
                     }
                 }
             }
@@ -399,24 +524,21 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
         }
     }
 
-    if !exploration.is_empty() {
-        let exploration_len = exploration.len();
-        let mut prefixed = vec![style_activity_action("EXPLORED")];
-        for (index, line) in exploration.into_iter().enumerate() {
-            let branch = if index + 1 == exploration_len {
-                "└"
-            } else {
-                "├"
-            };
-            prefixed.push(format!("  {branch} {line}"));
-        }
-        prefixed.extend(lines);
-        return Some(render_panel(PanelKind::ToolActivity, "Activity", prefixed));
+    if in_exploration_stage && !exploration_entries.is_empty() {
+        current_stage_lines.extend(render_exploration_stage(&exploration_entries));
     }
+    flush_activity_stage(&mut stages, &mut current_stage_lines);
 
-    if lines.is_empty() {
+    if stages.is_empty() {
         None
     } else {
+        let mut lines = Vec::new();
+        for stage in stages {
+            if !lines.is_empty() {
+                lines.push(activity_stage_divider_line());
+            }
+            lines.extend(stage);
+        }
         Some(render_panel(PanelKind::ToolActivity, "Activity", lines))
     }
 }
@@ -429,54 +551,9 @@ fn is_exploration_tool(tool_name: &str) -> bool {
 }
 
 fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(input).ok();
     match tool_name {
-        "Read" => {
-            let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("READ"),
-                short_path(&path)
-            ))
-        }
-        "Grep" => {
-            let pattern = json_string_field(parsed.as_ref(), &["pattern", "query"])?;
-            let path = json_string_field(parsed.as_ref(), &["path"])
-                .map(|value| format!(" in {}", short_path(&value)))
-                .unwrap_or_default();
-            Some(format!(
-                "{} {}{}",
-                style_activity_action("SEARCH"),
-                truncate_for_tui(&pattern, 72),
-                path
-            ))
-        }
-        "Glob" => {
-            let pattern = json_string_field(parsed.as_ref(), &["pattern", "glob"])
-                .or_else(|| json_string_field(parsed.as_ref(), &["path"]))?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("LIST"),
-                truncate_for_tui(&pattern, 72)
-            ))
-        }
-        "ToolSearch" | "WebSearch" => {
-            let query = json_string_field(parsed.as_ref(), &["query", "q"])?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("SEARCH"),
-                truncate_for_tui(&query, 72)
-            ))
-        }
-        "WebFetch" => {
-            let url = json_string_field(parsed.as_ref(), &["url"])?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("FETCHED"),
-                truncate_for_tui(&url, 72)
-            ))
-        }
         "Bash" => {
+            let parsed = serde_json::from_str::<Value>(input).ok();
             let command = json_string_field(parsed.as_ref(), &["command", "cmd"])?;
             Some(format!(
                 "{} {}",
@@ -485,6 +562,7 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
             ))
         }
         "Edit" | "Write" | "FileEdit" | "FileWrite" => {
+            let parsed = serde_json::from_str::<Value>(input).ok();
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
             Some(format!(
                 "{} {}",
@@ -1232,6 +1310,48 @@ mod tests {
         assert!(rendered.contains(
             "SEARCH createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr in src"
         ));
+    }
+
+    #[test]
+    fn tui_groups_exploration_into_stages_with_dividers() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"src/state/active_model_runtime.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"src/bootstrap/model_profiles.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"src/bootstrap/model_profiles.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"struct ModelProviderConfig","path":"src/service/api/client.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"src/service/api/client.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Bash".into(),
+                    input: r#"{"command":"cargo test --lib","timeout_ms":120000}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("• Explored"));
+        assert!(rendered.contains("READ active_model_runtime.rs, model_profiles.rs"));
+        assert!(rendered.contains("SEARCH struct ModelProviderConfig in client.rs"));
+        assert!(rendered.contains("READ client.rs"));
+        assert!(rendered.contains("RAN cargo test --lib"));
+        assert!(rendered.contains("────────────────"), "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
     }
 
     #[test]
