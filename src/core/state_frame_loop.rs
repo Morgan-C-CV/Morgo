@@ -3540,6 +3540,40 @@ fn compact_tool_excerpt(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn bash_exit_code(detail: &str) -> Option<String> {
+    detail.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("exit_code:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn bash_detail_has_nonzero_exit(detail: &str) -> bool {
+    bash_exit_code(detail).is_some_and(|code| code != "0")
+}
+
+fn bash_failure_reason(detail: &str) -> String {
+    match bash_exit_code(detail) {
+        Some(code) => format!("bash command exited with non-zero exit_code: {code}"),
+        None => "bash command failed".into(),
+    }
+}
+
+fn bash_output_detail_line(
+    dispatch_seq: usize,
+    tool_name: &str,
+    source_event_id: &str,
+    detail: &str,
+) -> String {
+    let content_json =
+        serde_json::to_string(detail).unwrap_or_else(|_| "\"<unserializable bash output>\"".into());
+    format!(
+        "tool_output_full: ref=tool_output:{dispatch_seq} tool={tool_name} source_event_id={source_event_id} content_json={content_json}"
+    )
+}
+
 fn parse_read_path(decision: &crate::core::state_frame::StateDecision) -> Option<String> {
     let next_action = decision.next_action.as_ref()?;
     if !next_action.action_type.eq_ignore_ascii_case("Read") {
@@ -3918,6 +3952,13 @@ async fn execute_call_tool(
     );
     match result {
         ToolResult::Text(text) => {
+            if next_action.action_type == "Bash" && bash_detail_has_nonzero_exit(&text) {
+                return Err(CallToolDispatchError {
+                    reason: bash_failure_reason(&text),
+                    record,
+                    outcome: tool_outcome,
+                });
+            }
             let mut changed = false;
             let mut ref_write_count = 0usize;
             let excerpt = compact_tool_excerpt(&text, 220);
@@ -3928,6 +3969,17 @@ async fn execute_call_tool(
                     dispatch_seq, next_action.action_type, source_event_id, excerpt
                 ),
             );
+            if next_action.action_type == "Bash" {
+                changed |= push_unique(
+                    &mut frame.recent_evidence,
+                    bash_output_detail_line(
+                        *dispatch_seq,
+                        &next_action.action_type,
+                        &source_event_id,
+                        &text,
+                    ),
+                );
+            }
             let mut success_outcome = tool_outcome.clone();
             success_outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
             success_outcome.bounded_excerpt = Some(excerpt.clone());
@@ -4132,6 +4184,26 @@ fn classify_tool_outcome(
         ),
     };
     let lowered = reason.to_ascii_lowercase();
+    if tool_name == "Bash"
+        && matches!(
+            record.kind,
+            crate::tool::result::ToolExecutionOutcomeKind::Success
+        )
+        && record
+            .detail
+            .as_deref()
+            .is_some_and(bash_detail_has_nonzero_exit)
+    {
+        outcome.kind = ToolOutcomeKind::RuntimeError;
+        outcome.recoverable = true;
+        outcome.recommended_next_action = Some("fix_runtime_error_and_rerun".into());
+        outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
+        outcome.bounded_excerpt = record
+            .detail
+            .as_deref()
+            .map(|detail| compact_tool_excerpt(detail, 1_200));
+        return outcome;
+    }
     if matches!(
         record.kind,
         crate::tool::result::ToolExecutionOutcomeKind::Success
@@ -4304,6 +4376,19 @@ fn push_tool_failure_feedback(
             detail
         ),
     );
+    if record.tool_name == "Bash" {
+        if let Some(full_detail) = record.detail.as_deref() {
+            changed |= push_unique(
+                &mut frame.recent_evidence,
+                bash_output_detail_line(
+                    dispatch_seq,
+                    &record.tool_name,
+                    &source_event_id,
+                    full_detail,
+                ),
+            );
+        }
+    }
     changed |= push_tool_outcome_evidence(frame, record, outcome, dispatch_seq, &source_event_id);
 
     let mut feedback_tail = String::new();
@@ -4411,6 +4496,11 @@ fn classify_dispatch_failure(reason: &str) -> String {
         || lowered.contains("result too large")
     {
         "tool_result_empty".into()
+    } else if lowered.contains("exit_code:")
+        || lowered.contains("traceback")
+        || lowered.contains("runtime error")
+    {
+        "runtime_error".into()
     } else {
         "tool_interrupted".into()
     }
@@ -7525,6 +7615,64 @@ mod tests {
                 |line| line.contains("tool_outcome:") && line.contains("kind=result_too_large")
             )
         );
+    }
+
+    #[test]
+    fn bash_success_record_with_nonzero_exit_is_runtime_error() {
+        let frame = make_frame();
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Bash","args":{"command":"python3 -u /tmp/demo.py"}}}"#,
+        )
+        .expect("decision");
+        let detail = "command: python3 -u /tmp/demo.py\nexit_code: 1\nstderr:\nTraceback (most recent call last):\n  File \"/tmp/demo.py\", line 15, in main\n    runtime = Runtime()\nTypeError: Runtime.__init__() missing 1 required positional argument: 'ledger'";
+        let record = build_execution_record("Bash", &ToolResult::Text(detail.into()), None);
+        let outcome = classify_tool_outcome(&frame, &decision, &record, record.summary.as_str(), 1);
+
+        assert_eq!(outcome.kind.as_str(), "runtime_error");
+        assert!(outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("fix_runtime_error_and_rerun")
+        );
+        assert!(
+            outcome
+                .bounded_excerpt
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Runtime.__init__")
+        );
+    }
+
+    #[test]
+    fn bash_failure_feedback_preserves_full_output_for_next_prompt() {
+        let mut frame = make_frame();
+        let decision = validate_state_decision(
+            r#"{"state":"executing","decision":"call_tool","next_action":{"action_type":"Bash","args":{"command":"python3 -u /tmp/demo.py"}}}"#,
+        )
+        .expect("decision");
+        let detail = "command: python3 -u /tmp/demo.py\nexit_code: 1\nstderr:\nTraceback (most recent call last):\n  File \"/tmp/demo.py\", line 15, in main\n    runtime = Runtime()\nTypeError: Runtime.__init__() missing 1 required positional argument: 'ledger'";
+        let record = build_execution_record("Bash", &ToolResult::Text(detail.into()), None);
+        let outcome = classify_tool_outcome(&frame, &decision, &record, record.summary.as_str(), 1);
+        let (changed, _) = push_tool_failure_feedback(
+            &mut frame,
+            &decision,
+            &record,
+            &outcome,
+            1,
+            "bash command exited with non-zero exit_code: 1",
+        );
+
+        assert!(changed);
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.starts_with("tool_output_full:")
+                && line.contains("exit_code: 1")
+                && line.contains("Runtime.__init__")
+        }));
+        assert!(frame.recent_evidence.iter().any(|line| {
+            line.starts_with("tool_outcome:")
+                && line.contains("kind=runtime_error")
+                && line.contains("recommended_next_action=fix_runtime_error_and_rerun")
+        }));
     }
 
     #[test]

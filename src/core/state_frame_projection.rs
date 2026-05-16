@@ -151,6 +151,47 @@ fn has_worker_correction_continuation(
         })
 }
 
+fn prose_repair_signal(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "missing evidence",
+        "runtime evidence",
+        "run demo",
+        "run the demo",
+        "stdout",
+        "stderr",
+        "exit code",
+        "verification output",
+        "worker_correction",
+        "read_source_evidence",
+        "verify_artifact",
+        "缺少",
+        "没跑",
+        "未运行",
+        "必须运行",
+        "运行一次",
+        "重新执行",
+        "验证输出",
+        "退出码",
+        "标准输出",
+        "标准错误",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn has_repair_visible_prose(step: Option<&crate::core::boss_state::BossPlanStep>) -> bool {
+    step.is_some_and(|step| {
+        step.last_correction
+            .as_deref()
+            .is_some_and(prose_repair_signal)
+            || step
+                .last_review_summary
+                .as_deref()
+                .is_some_and(prose_repair_signal)
+    })
+}
+
 fn apply_development_test_policy(contract: &mut StageExecutionContract) {
     if contract.tests.is_empty() {
         contract.tests.push(TestContract {
@@ -841,6 +882,60 @@ fn build_stage_continuation_fact_lines_with_history(
 }
 
 fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Vec<String> {
+    let facts = context
+        .repair_intent
+        .as_ref()
+        .map(|intent| intent.verified_facts.as_slice())
+        .unwrap_or(context.verified_facts.as_slice());
+    let fact_value = |prefix: &str| {
+        facts.iter().find_map(|fact| {
+            let trimmed = fact.trim();
+            trimmed
+                .to_ascii_lowercase()
+                .starts_with(prefix)
+                .then(|| {
+                    trimmed
+                        .split_once(':')
+                        .map(|(_, value)| value.trim().to_string())
+                        .unwrap_or_default()
+                })
+                .filter(|value| !value.is_empty())
+        })
+    };
+    let happened = fact_value("failure_reason:")
+        .or_else(|| fact_value("review_missing_evidence:"))
+        .unwrap_or_else(|| "completion is blocked by missing evidence".into());
+    let missing = fact_value("required_evidence_targets:")
+        .or_else(|| fact_value("review_missing_evidence:"))
+        .unwrap_or_else(|| "runtime or artifact evidence".into());
+    let action = context
+        .repair_intent
+        .as_ref()
+        .and_then(|intent| intent.next_action.as_deref())
+        .or(context.next_action.as_deref())
+        .unwrap_or("none");
+    let target = context
+        .repair_intent
+        .as_ref()
+        .and_then(|intent| intent.failed_target.as_deref())
+        .or(context.failed_target.as_deref())
+        .unwrap_or("current step");
+    let action_hint = match action {
+        "worker_correction" => {
+            "run the required demo/validation command and report stdout, stderr, and exit code"
+        }
+        "read_source_evidence" => "read the required source evidence target before verification",
+        "verify_artifact" => "read/verify the target artifact and return read:<target> evidence",
+        "repair_artifact" => "repair the artifact, then rerun verification",
+        _ => "close the listed evidence gap",
+    };
+    let actionable_item = || {
+        format!(
+            "required_action:{action} happened={} missing_evidence={} should_do={} target_path={}",
+            happened, missing, action_hint, target
+        )
+    };
+
     if context
         .repair_intent
         .as_ref()
@@ -848,12 +943,8 @@ fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Ve
         == Some("worker_correction")
         || context.next_action.as_deref() == Some("worker_correction")
     {
-        let facts = context
-            .repair_intent
-            .as_ref()
-            .map(|intent| intent.verified_facts.as_slice())
-            .unwrap_or(context.verified_facts.as_slice());
-        let mut items = Vec::new();
+        let mut items = vec![actionable_item()];
+        let mut added_specific_target = false;
         for fact in facts {
             let Some((_, tail)) = fact.split_once("required_evidence_targets:") else {
                 continue;
@@ -870,9 +961,10 @@ fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Ve
                 }
                 items.push(format!("create missing artifact: {target}"));
                 items.push(format!("provide read evidence: read:{target}"));
+                added_specific_target = true;
             }
         }
-        if items.is_empty() {
+        if !added_specific_target {
             if let Some(target) = context
                 .repair_intent
                 .as_ref()
@@ -889,6 +981,9 @@ fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Ve
         return items;
     }
     if context.next_action.as_deref() != Some("read_source_evidence") {
+        if matches!(action, "verify_artifact" | "repair_artifact") {
+            return vec![actionable_item()];
+        }
         return Vec::new();
     }
     context
@@ -896,7 +991,7 @@ fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Ve
         .as_deref()
         .filter(|target| !target.trim().is_empty())
         .map(|target| {
-            vec![format!(
+            vec![actionable_item(), format!(
                 "required_action:read_source_evidence target_path={} reason=content evidence source has not been read",
                 target
             )]
@@ -1419,7 +1514,8 @@ pub fn project_state_frame_with_st_mode(
     let blind_review_candidate = infer_review_mode(current_step, readonly_analysis)
         .is_some_and(|mode| mode.is_independent_review())
         && !has_source_evidence_continuation(current_step)
-        && !has_worker_correction_continuation(current_step);
+        && !has_worker_correction_continuation(current_step)
+        && !has_repair_visible_prose(current_step);
 
     // Build archive of completed steps (excluding current step).
     let archive = build_accepted_archive(plan, step_id);
@@ -2047,6 +2143,13 @@ mod tests {
                 .iter()
                 .any(|item| item == "provide read evidence: read:/tmp/demo-site/index.html")
         );
+        assert!(frame.open_items.iter().any(|item| {
+            item.starts_with("required_action:worker_correction ")
+                && item.contains("happened=")
+                && item.contains("missing_evidence=")
+                && item.contains("should_do=")
+                && item.contains("target_path=/tmp/demo-site/index.html")
+        }));
         assert!(frame.recent_evidence.iter().any(|item| {
             item.starts_with("fact: worker_correction ")
                 && item.contains("/tmp/demo-site/index.html")

@@ -667,6 +667,9 @@ fn correction_repair_action(correction: Option<&str>) -> Option<String> {
         return correction.map(|value| value.trim().to_string());
     }
     let correction_text = correction?.trim();
+    if let Some(action) = infer_prose_repair_action(correction_text) {
+        return Some(action);
+    }
     let normalized = normalize_verification_first_next_action(Some(correction_text.to_string()))?;
     let lower = correction_text.to_ascii_lowercase();
     if normalized == "verify_artifact"
@@ -717,6 +720,11 @@ fn correction_repair_target(
     action: Option<&str>,
 ) -> Option<String> {
     match action {
+        Some("worker_correction") => {
+            correction_explicit_target(step.last_correction.as_deref())
+                .or_else(|| verification_gap_target(step, metadata))
+                .or_else(|| primary_declared_artifact_path(step))
+        }
         Some("read_source_evidence") | Some("verify_artifact") => {
             verification_gap_target(step, metadata)
         }
@@ -771,6 +779,146 @@ fn missing_evidence_repair_target(
         }
     }
     artifacts.first().map(|path| (*path).to_string())
+}
+
+fn review_prose_has_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn review_prose_runtime_gap_signal(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    review_prose_has_any(
+        &lower,
+        &[
+            "missing evidence",
+            "missing runtime evidence",
+            "runtime evidence",
+            "runtime proof",
+            "run demo",
+            "run the demo",
+            "demo run",
+            "stdout",
+            "stderr",
+            "exit code",
+            "exit status",
+            "command output",
+            "verification output",
+            "rerun",
+            "re-run",
+            "execute",
+            "execution result",
+            "没有运行",
+            "没跑",
+            "未运行",
+            "必须运行",
+            "需要运行",
+            "运行一次",
+            "重新执行",
+            "验证输出",
+            "缺少",
+            "证据不足",
+            "运行结果",
+            "退出码",
+            "标准输出",
+            "标准错误",
+        ],
+    )
+}
+
+fn infer_prose_repair_action(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if review_prose_has_any(
+        &lower,
+        &[
+            "source evidence",
+            "read source",
+            "read evidence",
+            "content evidence",
+            "源证据",
+            "读取源",
+            "读取证据",
+        ],
+    ) {
+        return Some("read_source_evidence".into());
+    }
+    if review_prose_has_any(
+        &lower,
+        &[
+            "run demo",
+            "run the demo",
+            "demo run",
+            "stdout",
+            "stderr",
+            "exit code",
+            "exit status",
+            "command output",
+            "execute",
+            "rerun",
+            "re-run",
+            "必须运行",
+            "需要运行",
+            "运行一次",
+            "重新执行",
+            "运行结果",
+            "退出码",
+            "标准输出",
+            "标准错误",
+        ],
+    ) {
+        return Some("worker_correction".into());
+    }
+    if review_prose_has_any(
+        &lower,
+        &[
+            "verify artifact",
+            "verification evidence",
+            "runtime evidence",
+            "read evidence",
+            "验证证据",
+            "runtime 证据",
+            "运行证据",
+        ],
+    ) {
+        return Some("verify_artifact".into());
+    }
+    None
+}
+
+fn prose_review_missing_evidence_decision(
+    response: &str,
+    summary: &str,
+) -> Option<crate::core::boss_actor_runtime::ReviewDecision> {
+    if !review_prose_runtime_gap_signal(response) {
+        return None;
+    }
+    let action = infer_prose_repair_action(response).unwrap_or_else(|| "verify_artifact".into());
+    let mut missing_evidence = Vec::new();
+    let compact = compact_continuation_text(response);
+    if !compact.is_empty() {
+        missing_evidence.push(compact);
+    }
+    for target in concrete_path_tokens_from_review_text(response) {
+        if !missing_evidence.iter().any(|item| item == &target) {
+            missing_evidence.push(target);
+        }
+    }
+    if missing_evidence.is_empty() {
+        missing_evidence.push("runtime verification evidence".into());
+    }
+    Some(
+        crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary: if response.trim().is_empty() {
+                summary.to_string()
+            } else {
+                compact_continuation_text(response)
+            },
+            audited_items: Vec::new(),
+            evidence_used: Vec::new(),
+            missing_evidence,
+            weak_evidence_used: Vec::new(),
+            required_next_action: Some(action),
+        },
+    )
 }
 
 fn invalid_typed_review_correction(correction: Option<&str>) -> bool {
@@ -2680,6 +2828,16 @@ fn continuation_required_evidence_targets(
             push_unique_required_evidence(&mut targets, target);
         }
     }
+    if targets.is_empty() && action == "worker_correction" {
+        if let Some(target) = failed_target {
+            push_unique_required_evidence(&mut targets, target.to_string());
+        }
+        for test in &step.stage_execution_contract.tests {
+            for evidence in &test.required_evidence {
+                push_unique_required_evidence(&mut targets, evidence.clone());
+            }
+        }
+    }
     if targets.is_empty() {
         for artifact in step
             .stage_execution_contract
@@ -2709,6 +2867,9 @@ fn continuation_modification_direction(
     required_evidence_targets: &[String],
 ) -> String {
     match next_action.unwrap_or_default() {
+        "worker_correction" => {
+            "Run the required demo or validation command, capture stdout/stderr and exit code, then report the exact runtime evidence before claiming completion.".into()
+        }
         "read_source_evidence" => {
             "Read the required source evidence targets first, update the artifact from those sources if needed, then verify the output artifact again.".into()
         }
@@ -2762,6 +2923,16 @@ fn continuation_failure_reason(
             "completion blocked: required source evidence has not been read: {}",
             if required_evidence_targets.is_empty() {
                 "none".into()
+            } else {
+                required_evidence_targets.join(" | ")
+            }
+        );
+    }
+    if action == "worker_correction" {
+        return format!(
+            "completion blocked: required runtime/demo evidence is missing for {}",
+            if required_evidence_targets.is_empty() {
+                "the current step".into()
             } else {
                 required_evidence_targets.join(" | ")
             }
@@ -5223,10 +5394,10 @@ fn review_decision_requests_restricted_verification(
     match decision {
         crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence { .. } => true,
         crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => {
-            correction
-                .as_deref()
-                .is_some_and(missing_evidence_action_mentions_review_gap)
-                && !completion_gate_closed
+            correction.as_deref().is_some_and(|value| {
+                missing_evidence_action_mentions_review_gap(value)
+                    || review_prose_runtime_gap_signal(value)
+            }) && !completion_gate_closed
         }
         _ => false,
     }
@@ -6232,7 +6403,7 @@ impl BossCoordinator {
             "Restricted review verification for boss step {step_id}.\n\
              You are verify_child. Do not spawn agents or broaden the task.\n\
              This is an independent review pass: do not inherit implementation-worker assumptions or treat prose-only claims as verified facts.\n\
-             Use only minimal read-only verification on these exact target(s):\n- {}\n\
+             Use only minimal verification on these exact target(s): read target files and, only when runtime evidence is explicitly missing, run the narrowest validation command needed to capture stdout/stderr and exit code.\n- {}\n\
              Review package excerpt:\n{}\n\
              Return the verify output contract fields only.",
             targets.join("\n- "),
@@ -6269,7 +6440,7 @@ impl BossCoordinator {
             "task": task,
             "role": "verify",
             "inherit_context": false,
-            "allowed_tools": ["Read"],
+            "allowed_tools": ["Read", "Bash"],
             "reuse_strategy": "fresh",
             "review_mode": INDEPENDENT_REVIEW_MODE,
             "max_turns": 20,
@@ -8867,6 +9038,7 @@ impl BossCoordinator {
                 crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
                     summary,
                     missing_evidence,
+                    weak_evidence_used,
                     required_next_action,
                     ..
                 } => {
@@ -8913,9 +9085,27 @@ impl BossCoordinator {
                             Some(if requested_action == "restricted_verification" {
                                 "read_source_evidence".into()
                             } else {
-                                requested_action
+                                requested_action.clone()
                             }),
-                            continuation_verified_facts(step),
+                            {
+                                let mut facts = continuation_verified_facts(step);
+                                facts.push(format!(
+                                    "review_missing_evidence: {}",
+                                    if missing_evidence.is_empty() {
+                                        "unspecified".into()
+                                    } else {
+                                        missing_evidence.join(" | ")
+                                    }
+                                ));
+                                if !weak_evidence_used.is_empty() {
+                                    facts.push(format!(
+                                        "weak_evidence_used: {}",
+                                        weak_evidence_used.join(" | ")
+                                    ));
+                                }
+                                facts.push(format!("required_next_action: {}", requested_action));
+                                facts
+                            },
                         );
                         if matches!(
                             record_boss_loop_guard(step, routed_metadata.as_ref()),
@@ -11386,6 +11576,9 @@ refresh_reason: {}\n\n{}",
                 summary: summary.to_string(),
                 reason,
             };
+        }
+        if let Some(decision) = prose_review_missing_evidence_decision(response, summary) {
+            return decision;
         }
         if upper.contains("REJECT") {
             let correction = response
@@ -17788,6 +17981,31 @@ mod tests {
     }
 
     #[test]
+    fn prose_review_missing_demo_runtime_parses_as_missing_evidence() {
+        let decision = BossCoordinator::parse_a_review_decision_pub(
+            "不能接受：必须运行一次 demo，并提供 stdout/stderr 和 exit code，目标 /tmp/python-demo/demo.py 还缺 runtime 证据。",
+            "worker says done",
+        );
+
+        let crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            missing_evidence,
+            required_next_action,
+            summary,
+            ..
+        } = decision
+        else {
+            panic!("expected missing evidence decision");
+        };
+        assert_eq!(required_next_action.as_deref(), Some("worker_correction"));
+        assert!(summary.contains("必须运行一次 demo"));
+        assert!(
+            missing_evidence
+                .iter()
+                .any(|item| item.contains("/tmp/python-demo/demo.py"))
+        );
+    }
+
+    #[test]
     fn restricted_verifier_targets_prefer_typed_contract_over_review_prose() {
         let target_dir = "/tmp/rustagent-review-targets";
         let readme = format!("{target_dir}/README.md");
@@ -17987,7 +18205,7 @@ mod tests {
             json.get("allowed_tools")
                 .and_then(|v| v.as_array())
                 .map(|v| v.len()),
-            Some(1)
+            Some(2)
         );
     }
 

@@ -607,6 +607,10 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
             "keep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and set evidence_refs to read:<verified_target> when verification_result is verified"
                 .into(),
         );
+        sections.push(
+            "if a minimal validation command is allowed and needed, run only that command and compress its stdout/stderr/exit code into minimal_evidence"
+                .into(),
+        );
         sections.push("</verify-output-contract>".into());
     }
 
@@ -745,7 +749,7 @@ fn with_verify_output_contract(role: WorkerRole, task_input: String) -> String {
     }
 
     format!(
-        "{task_input}\n<verify-output-contract>\nreturn exactly five short fields only: verified_target, verification_result, minimal_evidence, remaining_blocker, evidence_refs\ndo not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, multi-section report formatting, or evidence prose\nkeep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and set evidence_refs to read:<verified_target> when verification_result is verified\n</verify-output-contract>"
+        "{task_input}\n<verify-output-contract>\nreturn exactly five short fields only: verified_target, verification_result, minimal_evidence, remaining_blocker, evidence_refs\ndo not include analysis, summary prose, recommendations, next_action, file lists, validation steps, risk notes, multi-section report formatting, or evidence prose\nkeep minimal_evidence to one short factual phrase, keep remaining_blocker to a single short blocker or none, and set evidence_refs to read:<verified_target> when verification_result is verified\nif a minimal validation command is allowed and needed, run only that command and compress its stdout/stderr/exit code into minimal_evidence\n</verify-output-contract>"
     )
 }
 
