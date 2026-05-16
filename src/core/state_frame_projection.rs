@@ -45,19 +45,51 @@ fn projection_objective_text(
     fallback: &str,
 ) -> String {
     let text = step.map(|step| step.objective()).unwrap_or(fallback);
-    if step
-        .and_then(|step| step.stage_execution_contract.task_profile)
-        .is_some_and(|profile| {
-            matches!(
-                profile,
-                TaskProfile::IndependentReview | TaskProfile::ReadOnlyAnalysis
-            )
-        })
-    {
+    if step_is_true_inline_reference_task(step) {
         text.to_string()
     } else {
         current_task_contract_text(text)
     }
+}
+
+fn step_is_true_inline_reference_task(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+) -> bool {
+    let Some(step) = step else {
+        return false;
+    };
+    let contract = &step.stage_execution_contract;
+    let profile_keeps_reference = contract.task_profile.is_some_and(|profile| {
+        matches!(
+            profile,
+            TaskProfile::IndependentReview | TaskProfile::ReadOnlyAnalysis
+        )
+    });
+    if !profile_keeps_reference {
+        return false;
+    }
+    let has_durable_contract = !contract.declared_artifacts.is_empty();
+    let objective_declares_artifacts =
+        !extract_artifact_expectations(&current_task_contract_text(step.objective())).is_empty();
+    let requires_write = contract.required_actions.iter().any(|action| {
+        matches!(
+            action.as_str(),
+            "create" | "write" | "write_file" | "edit_file" | "create_file"
+        )
+    }) || contract.declared_artifacts.iter().any(|artifact| {
+        artifact.required_actions.iter().any(|action| {
+            matches!(
+                action.as_str(),
+                "create" | "write" | "write_file" | "edit_file" | "create_file"
+            )
+        })
+    });
+    let route_corrected_to_code_change =
+        matches!(contract.task_profile, Some(TaskProfile::CodeChange));
+    !(has_durable_contract
+        || objective_declares_artifacts
+        || requires_write
+        || route_corrected_to_code_change)
 }
 
 fn is_readonly_analysis(plan: &BossPlan, step_id: Option<usize>) -> bool {
@@ -103,6 +135,20 @@ fn has_source_evidence_continuation(step: Option<&crate::core::boss_state::BossP
     step.and_then(|step| step.stage_continuation_context.as_ref())
         .and_then(|context| context.next_action.as_deref())
         == Some("read_source_evidence")
+}
+
+fn has_worker_correction_continuation(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+) -> bool {
+    step.and_then(|step| step.stage_continuation_context.as_ref())
+        .is_some_and(|context| {
+            context.next_action.as_deref() == Some("worker_correction")
+                || context
+                    .repair_intent
+                    .as_ref()
+                    .and_then(|intent| intent.next_action.as_deref())
+                    == Some("worker_correction")
+        })
 }
 
 fn apply_development_test_policy(contract: &mut StageExecutionContract) {
@@ -338,6 +384,63 @@ fn first_declared_target_directory(
         })
 }
 
+fn push_declared_artifact_contract(
+    declared_artifacts: &mut Vec<DeclaredArtifactContract>,
+    ref_id: String,
+    path: String,
+    kind: String,
+    readonly_analysis: bool,
+) {
+    if declared_artifacts.iter().any(|item| item.path == path) {
+        return;
+    }
+    declared_artifacts.push(DeclaredArtifactContract {
+        ref_id: ref_id.clone(),
+        path: path.clone(),
+        kind: kind.clone(),
+        required_actions: if readonly_analysis {
+            Vec::new()
+        } else {
+            vec!["create".into(), "write".into()]
+        },
+        required_evidence: vec![ref_id, path, kind],
+    });
+}
+
+fn enrich_static_site_directory_artifacts(
+    step: Option<&crate::core::boss_state::BossPlanStep>,
+    declared_artifacts: &mut Vec<DeclaredArtifactContract>,
+    readonly_analysis: bool,
+) {
+    let Some(step) = step else {
+        return;
+    };
+    if infer_preferred_deployment_mode(&current_task_contract_text(step.objective()))
+        != "static_site"
+    {
+        return;
+    }
+    let directories = declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "directory")
+        .map(|artifact| artifact.path.trim_end_matches('/').to_string())
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    for (dir_idx, directory) in directories.into_iter().enumerate() {
+        for (child_idx, child_name) in ["index.html", "README.md"].into_iter().enumerate() {
+            let path = format!("{directory}/{child_name}");
+            let ref_id = format!("artifact:step{}:static_site:{dir_idx}:{child_idx}", step.id);
+            push_declared_artifact_contract(
+                declared_artifacts,
+                ref_id,
+                path,
+                "file".into(),
+                readonly_analysis,
+            );
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn first_absolute_path_token(text: &str) -> Option<String> {
     let start = text
@@ -544,6 +647,7 @@ fn build_stage_execution_contract(
         }
         declared_artifacts.push(artifact.clone());
     }
+    enrich_static_site_directory_artifacts(step, &mut declared_artifacts, readonly_analysis);
     let st_test_only_mode =
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
     let review_mode = infer_review_mode(step, readonly_analysis);
@@ -792,10 +896,71 @@ fn build_stage_continuation_fact_lines_with_history(
             ),
         ));
     }
+    if let Some(intent) = context.repair_intent.as_ref() {
+        let intent_next_action = intent.next_action.as_deref().unwrap_or(next_action);
+        let intent_failed_target = intent.failed_target.as_deref().unwrap_or(failed_target);
+        if intent_next_action == "worker_correction" {
+            facts.push(fact_line(
+                "worker_correction",
+                format!(
+                    "target_path={} required_action=worker_correction verified_facts={} summary=apply Designer A correction and close missing artifact/read evidence",
+                    intent_failed_target,
+                    summarize_list(&intent.verified_facts)
+                ),
+            ));
+        }
+    }
     facts
 }
 
 fn build_stage_continuation_open_items(context: &StageContinuationContext) -> Vec<String> {
+    if context
+        .repair_intent
+        .as_ref()
+        .and_then(|intent| intent.next_action.as_deref())
+        == Some("worker_correction")
+        || context.next_action.as_deref() == Some("worker_correction")
+    {
+        let facts = context
+            .repair_intent
+            .as_ref()
+            .map(|intent| intent.verified_facts.as_slice())
+            .unwrap_or(context.verified_facts.as_slice());
+        let mut items = Vec::new();
+        for fact in facts {
+            let Some((_, tail)) = fact.split_once("required_evidence_targets:") else {
+                continue;
+            };
+            for target in tail.split('|') {
+                let target = target.trim();
+                if target.is_empty()
+                    || target == "none"
+                    || target.starts_with("failure_reason:")
+                    || target.starts_with("modification_direction:")
+                    || target.starts_with("remaining_blocker:")
+                {
+                    continue;
+                }
+                items.push(format!("create missing artifact: {target}"));
+                items.push(format!("provide read evidence: read:{target}"));
+            }
+        }
+        if items.is_empty() {
+            if let Some(target) = context
+                .repair_intent
+                .as_ref()
+                .and_then(|intent| intent.failed_target.as_deref())
+                .or(context.failed_target.as_deref())
+                .filter(|target| !target.trim().is_empty())
+            {
+                items.push(format!("create missing artifact: {target}"));
+                items.push(format!("provide read evidence: read:{target}"));
+            }
+        }
+        items.sort();
+        items.dedup();
+        return items;
+    }
     if context.next_action.as_deref() != Some("read_source_evidence") {
         return Vec::new();
     }
@@ -1335,7 +1500,8 @@ pub fn project_state_frame_with_st_mode(
     let current_step = step_id.and_then(|id| plan.steps.iter().find(|s| s.id == id));
     let blind_review_candidate = infer_review_mode(current_step, readonly_analysis)
         .is_some_and(|mode| mode.is_independent_review())
-        && !has_source_evidence_continuation(current_step);
+        && !has_source_evidence_continuation(current_step)
+        && !has_worker_correction_continuation(current_step);
 
     // Build archive of completed steps (excluding current step).
     let archive = build_accepted_archive(plan, step_id);
@@ -1399,6 +1565,7 @@ pub fn project_state_frame_with_st_mode(
         .review_mode
         .is_some_and(|mode| mode.is_independent_review());
     let source_evidence_continuation = has_source_evidence_continuation(current_step);
+    let worker_correction_continuation = has_worker_correction_continuation(current_step);
     if independent_review {
         accepted_summary.clear();
     }
@@ -1443,7 +1610,7 @@ pub fn project_state_frame_with_st_mode(
                 recent_evidence.push(format!("correction: {c}"));
             }
         }
-        if !independent_review || source_evidence_continuation {
+        if !independent_review || source_evidence_continuation || worker_correction_continuation {
             if let Some(context) = step.stage_continuation_context.as_ref() {
                 recent_evidence.extend(build_stage_continuation_fact_lines_with_history(
                     context,
@@ -1636,12 +1803,202 @@ mod tests {
                 item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
             })
         );
-        assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 1);
-        assert_eq!(frame.stage_execution_contract.verifications.len(), 1);
+        let artifact_paths = frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(artifact_paths.contains(&"/tmp/demo-site"));
+        assert!(artifact_paths.contains(&"/tmp/demo-site/index.html"));
+        assert!(artifact_paths.contains(&"/tmp/demo-site/README.md"));
+        assert_eq!(frame.stage_execution_contract.declared_artifacts.len(), 3);
+        assert_eq!(frame.stage_execution_contract.verifications.len(), 3);
         assert_eq!(
             frame.stage_execution_contract.required_actions,
             vec!["create", "write", "verify"]
         );
+    }
+
+    #[test]
+    fn implementation_objective_truncates_historical_reference_even_when_mistyped_review() {
+        let plan = BossPlan {
+            plan_id: "plan-reference-pollution".into(),
+            task_description: "build site".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "site".into(),
+                objective: Some(
+                    "任务目标：\n- 目标目录：/tmp/demo-site\n- 创建可直接打开的静态网站。\n\n参考材料摘录：\n- u8/u9 历史成功复测材料，不应进入 worker objective。"
+                        .into(),
+                ),
+                acceptance: vec!["site exists".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::IndependentReview),
+                    required_actions: vec!["create".into(), "write".into()],
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert!(frame.objective.contains("目标目录：/tmp/demo-site"));
+        assert!(!frame.objective.contains("参考材料摘录"));
+        assert!(!frame.objective.contains("u8/u9"));
+    }
+
+    #[test]
+    fn readonly_analysis_objective_may_keep_inline_reference_material() {
+        let plan = BossPlan {
+            plan_id: "plan-readonly-reference".into(),
+            task_description: "audit notes".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "audit".into(),
+                objective: Some(
+                    "只读审计当前方案。\n\n参考材料摘录：\n- 保留这段材料用于审计。".into(),
+                ),
+                acceptance: vec!["produce audit".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::ReadOnlyAnalysis),
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert!(frame.objective.contains("参考材料摘录"));
+        assert!(frame.objective.contains("保留这段材料"));
+    }
+
+    #[test]
+    fn worker_correction_repair_intent_projects_specific_artifact_open_items() {
+        let target = "/tmp/demo-site/index.html";
+        let plan = BossPlan {
+            plan_id: "plan-worker-correction".into(),
+            task_description: "repair site".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "repair site".into(),
+                objective: Some("任务目标：\n- 目标目录：/tmp/demo-site\n- 创建静态网站。".into()),
+                acceptance: vec!["site exists".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Rejected,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 1,
+                retry_budget: 3,
+                last_review_summary: Some("missing index".into()),
+                last_correction: Some("worker_correction".into()),
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::CodeChange),
+                    declared_artifacts: vec![crate::core::state_frame::DeclaredArtifactContract {
+                        ref_id: "artifact:index".into(),
+                        path: target.into(),
+                        kind: "file".into(),
+                        required_actions: vec!["create".into(), "write".into()],
+                        required_evidence: vec!["artifact:index".into(), target.into()],
+                    }],
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: Some(StageContinuationContext {
+                    repair_intent: Some(crate::core::state_frame::RepairIntent {
+                        failed_target: Some(target.into()),
+                        verified_facts: vec![
+                            "required_evidence_targets: /tmp/demo-site/index.html".into(),
+                            "already verified: /tmp/demo-site/README.md".into(),
+                        ],
+                        next_action: Some("worker_correction".into()),
+                        continuity_mode: Some(ContinuityMode::Repair),
+                    }),
+                    failed_target: Some(target.into()),
+                    verified_facts: vec!["already verified: /tmp/demo-site/README.md".into()],
+                    next_action: Some("worker_correction".into()),
+                    continuity_mode: Some(ContinuityMode::Repair),
+                }),
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item == "create missing artifact: /tmp/demo-site/index.html")
+        );
+        assert!(
+            frame
+                .open_items
+                .iter()
+                .any(|item| item == "provide read evidence: read:/tmp/demo-site/index.html")
+        );
+        assert!(frame.recent_evidence.iter().any(|item| {
+            item.starts_with("fact: worker_correction ")
+                && item.contains("/tmp/demo-site/index.html")
+        }));
     }
 
     #[test]

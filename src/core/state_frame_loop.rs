@@ -1312,8 +1312,15 @@ fn has_completion_verification_signal(frame: &StateFrame) -> bool {
         })
 }
 
-fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &str) -> bool {
-    let path_matches =
+fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, kind: &str) -> bool {
+    let write_path_matches = |candidate: &str| {
+        if kind == "directory" {
+            candidate == path || evidence_path_scope_matches(candidate, path)
+        } else {
+            candidate == path
+        }
+    };
+    let read_path_matches =
         |candidate: &str| candidate == path || evidence_path_scope_matches(candidate, path);
     let acceptable_status =
         |status: &str| matches!(status, "created" | "touched" | "verified" | "observed");
@@ -1327,13 +1334,13 @@ fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &s
         if line.starts_with("fact: recent_changes_in_files ") {
             return evidence_field_value(line, "path")
                 .as_deref()
-                .is_some_and(path_matches)
+                .is_some_and(write_path_matches)
                 && runtime_source(line);
         }
         if line.starts_with("fact: artifact_status ") {
             return evidence_field_value(line, "path")
                 .as_deref()
-                .is_some_and(path_matches)
+                .is_some_and(write_path_matches)
                 && evidence_field_value(line, "status")
                     .as_deref()
                     .is_some_and(acceptable_status)
@@ -1342,7 +1349,7 @@ fn artifact_path_has_material_evidence(frame: &StateFrame, path: &str, _kind: &s
         if line.starts_with("fact: file_facts ") {
             return evidence_field_value(line, "path")
                 .as_deref()
-                .is_some_and(path_matches)
+                .is_some_and(read_path_matches)
                 && runtime_source(line);
         }
         false
@@ -8680,6 +8687,67 @@ mod tests {
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
             CompletionEvidenceStatus::Sufficient
+        );
+    }
+
+    #[test]
+    fn static_site_readme_write_does_not_satisfy_missing_index_artifact() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:index",
+                "artifact:contract:readme",
+            ],
+            &[],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/example-site",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:index",
+            "/tmp/example-site/index.html",
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:readme",
+            "/tmp/example-site/README.md",
+            "file",
+        );
+        frame.recent_evidence.push(
+            "fact: recent_changes_in_files ref=change:readme path=/tmp/example-site/README.md source=tool:Write source_event_id=tool-write:1 freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated README".into(),
+        );
+
+        assert!(super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site",
+            "directory"
+        ));
+        assert!(super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site/README.md",
+            "file"
+        ));
+        assert!(!super::artifact_path_has_material_evidence(
+            &frame,
+            "/tmp/example-site/index.html",
+            "file"
+        ));
+        assert_eq!(
+            super::missing_artifact_evidence_refs(&frame),
+            vec!["artifact:contract:index".to_string()]
+        );
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::MissingArtifactEvidence
         );
     }
 

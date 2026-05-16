@@ -58,6 +58,8 @@ fn current_task_contract_text(text: &str) -> String {
     const HISTORICAL_CONTEXT_MARKERS: &[&str] = &[
         "参考材料摘录",
         "参考材料：",
+        "参考背景材料",
+        "关键材料摘录",
         "历史材料",
         "历史上下文",
         "背景材料摘录",
@@ -76,6 +78,21 @@ fn current_task_contract_text(text: &str) -> String {
         lines.push(line);
     }
     lines.join("\n")
+}
+
+fn infer_preferred_deployment_mode(objective: &str) -> &'static str {
+    let lowered = objective.to_lowercase();
+    if lowered.contains("静态网站") || lowered.contains("static site") {
+        "static_site"
+    } else if lowered.contains("python") && lowered.contains("demo") {
+        "python_demo"
+    } else if lowered.contains("jsonl") || lowered.contains("analyzer") {
+        "local_tool"
+    } else if lowered.contains("report") || lowered.contains("报告") {
+        "local_report_artifact"
+    } else {
+        "local_artifact"
+    }
 }
 
 #[derive(Debug)]
@@ -354,11 +371,26 @@ fn verification_gap_repair_can_continue(
             || has_only_verification_evidence_gap(step))
 }
 
+fn has_explicit_verification_repair_context(step: &BossPlanStep) -> bool {
+    step.stage_continuation_context
+        .as_ref()
+        .and_then(|context| context.next_action.as_deref())
+        .is_some_and(|action| {
+            action.eq_ignore_ascii_case("verify_artifact")
+                || action.eq_ignore_ascii_case("run_verification")
+        })
+}
+
 fn verification_gap_repair_dispatch_allowed(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
 ) -> bool {
-    verification_gap_repair_can_continue(step, metadata) && step.attempt_count < step.retry_budget
+    let can_continue_past_budget = has_explicit_verification_repair_context(step)
+        && step_artifact_verification_error(step).is_none()
+        && !step_report_body_looks_like_placeholder(step)
+        && !has_only_verification_evidence_gap(step);
+    verification_gap_repair_can_continue(step, metadata)
+        && (step.attempt_count < step.retry_budget || can_continue_past_budget)
 }
 
 fn step_has_blocking_terminal_failure(
@@ -622,6 +654,50 @@ fn correction_repair_target(
             verification_gap_target(step, metadata).or_else(|| primary_declared_artifact_path(step))
         }
     }
+}
+
+fn missing_evidence_repair_target(
+    step: &BossPlanStep,
+    missing_evidence: &[String],
+) -> Option<String> {
+    let mut artifacts = step
+        .stage_execution_contract
+        .declared_artifacts
+        .iter()
+        .filter(|artifact| artifact.kind != "directory")
+        .map(|artifact| artifact.path.as_str())
+        .collect::<Vec<_>>();
+    artifacts.extend(
+        step.stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "directory")
+            .map(|artifact| artifact.path.as_str()),
+    );
+    for evidence in missing_evidence {
+        let evidence = evidence.trim();
+        if evidence.is_empty() {
+            continue;
+        }
+        if let Some(path) = artifacts.iter().find(|path| evidence.contains(**path)) {
+            return Some((*path).to_string());
+        }
+        for token in evidence.split_whitespace() {
+            let token = token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']'
+                )
+            });
+            if let Some(path) = artifacts
+                .iter()
+                .find(|path| token == **path || token.strip_prefix("read:") == Some(**path))
+            {
+                return Some((*path).to_string());
+            }
+        }
+    }
+    artifacts.first().map(|path| (*path).to_string())
 }
 
 fn invalid_typed_review_correction(correction: Option<&str>) -> bool {
@@ -4206,6 +4282,27 @@ fn collect_target_artifacts(step: &BossPlanStep, target_files: &[String]) -> Vec
             });
         }
     }
+    if infer_preferred_deployment_mode(&current_objective) == "static_site" {
+        let directories = artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "directory")
+            .map(|artifact| artifact.path.trim_end_matches('/').to_string())
+            .filter(|path| !path.trim().is_empty())
+            .collect::<Vec<_>>();
+        for directory in directories {
+            for child_name in ["index.html", "README.md"] {
+                let path = format!("{directory}/{child_name}");
+                if !artifacts.iter().any(|artifact| artifact.path == path) {
+                    artifacts.push(TargetArtifact {
+                        path,
+                        kind: "file".to_string(),
+                        required_state: "exists_non_empty".to_string(),
+                        source: "static_site_child_artifact".to_string(),
+                    });
+                }
+            }
+        }
+    }
     artifacts
 }
 
@@ -5152,10 +5249,7 @@ fn review_verifier_target_is_concrete_path_with_cwd(value: &str, cwd: Option<&Pa
     }
     let path = Path::new(&normalized);
     if path.is_absolute() {
-        return path_has_file_extension(&normalized)
-            || cwd
-                .map(|_| path.exists())
-                .unwrap_or(false);
+        return path_has_file_extension(&normalized) || cwd.map(|_| path.exists()).unwrap_or(false);
     }
     if normalized.starts_with("~/") || normalized.starts_with('$') {
         return false;
@@ -8681,6 +8775,9 @@ impl BossCoordinator {
                     required_next_action,
                     ..
                 } => {
+                    let requested_action = required_next_action
+                        .clone()
+                        .unwrap_or_else(|| "restricted_verification".into());
                     let correction = format!(
                         "review requires missing evidence before acceptance: {}; required_next_action={}",
                         if missing_evidence.is_empty() {
@@ -8688,9 +8785,7 @@ impl BossCoordinator {
                         } else {
                             missing_evidence.join("; ")
                         },
-                        required_next_action
-                            .clone()
-                            .unwrap_or_else(|| "restricted_verification".into())
+                        requested_action
                     );
                     append_review_runtime_record(
                         step,
@@ -8704,15 +8799,21 @@ impl BossCoordinator {
                         step.status = BossPlanStepStatus::Failed;
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
+                        let failed_target = if requested_action == "worker_correction" {
+                            missing_evidence_repair_target(step, missing_evidence)
+                                .or_else(|| verification_gap_target(step, routed_metadata.as_ref()))
+                        } else {
+                            verification_gap_target(step, routed_metadata.as_ref())
+                        };
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
-                            verification_gap_target(step, routed_metadata.as_ref()),
-                            Some(
-                                required_next_action
-                                    .clone()
-                                    .unwrap_or_else(|| "read_source_evidence".into()),
-                            ),
+                            failed_target,
+                            Some(if requested_action == "restricted_verification" {
+                                "read_source_evidence".into()
+                            } else {
+                                requested_action
+                            }),
                             continuation_verified_facts(step),
                         );
                     }
@@ -10234,10 +10335,22 @@ impl BossCoordinator {
             Vec::new()
         };
         let allowed_tools = default_allowed_tools();
-        let worker_role = rollout_execution_policy
-            .as_ref()
-            .map(|policy| policy.worker_role)
-            .unwrap_or(WorkerRole::Implement);
+        let verification_repair_continuation = is_verification_first_continuation(step)
+            && verification_gap_repair_can_continue(step, routed_metadata.as_ref())
+            && !routed_metadata.as_ref().is_some_and(|metadata| {
+                metadata
+                    .completion_evidence_gaps
+                    .iter()
+                    .any(|gap| gap.missing_artifact_evidence || gap.missing_test_evidence)
+            });
+        let worker_role = if verification_repair_continuation {
+            WorkerRole::Verify
+        } else {
+            rollout_execution_policy
+                .as_ref()
+                .map(|policy| policy.worker_role)
+                .unwrap_or(WorkerRole::Implement)
+        };
         let source_evidence_repair = step_continuation_requires_source_evidence_read(step)
             || rollout_execution_policy.as_ref().is_some_and(|policy| {
                 policy
@@ -10249,7 +10362,8 @@ impl BossCoordinator {
             && rollout_execution_policy.as_ref().is_some_and(|policy| {
                 policy.fallback_tier == "verification_first"
                     || policy.fallback_tier == "source_evidence_repair"
-            });
+            })
+            || verification_repair_continuation;
         let st_mode_enabled = self.st_mode_enabled().await;
         let development_task = !verification_first_short_form
             && step_looks_like_development_task(step, &target_artifacts);
