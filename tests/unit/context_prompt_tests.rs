@@ -547,3 +547,30 @@ fn worker_system_prompt_includes_role_specific_guidance() {
     assert!(prompt.contains("surface=Cli"));
     assert!(prompt.contains("worker_role=verify"));
 }
+
+#[test]
+fn coordinator_system_prompt_includes_engineering_task_rules() {
+    let mut app_state = build_app_state();
+    app_state.runtime_role = RuntimeRole::Coordinator;
+    app_state.worker_role = None;
+    let prompt = rust_agent::prompt::system::build_system_prompt(&app_state);
+
+    assert!(prompt.contains("You are Morgo, a personal AI agent."));
+    assert!(prompt.contains("Engineering task rules:"));
+    assert!(prompt.contains("Read the relevant files before proposing or making specific changes"));
+    assert!(prompt.contains("Keep scope tight"));
+    assert!(prompt.contains("Report outcomes faithfully"));
+    assert!(prompt.contains("Coordinator worker policy:"));
+    assert!(prompt.contains("surface=Cli"));
+    assert!(prompt.contains("runtime_role=Coordinator"));
+}
+
+#[test]
+fn worker_system_prompt_does_not_include_coordinator_engineering_policy() {
+    let app_state = build_app_state();
+    let prompt = rust_agent::prompt::system::build_system_prompt(&app_state);
+
+    assert!(!prompt.contains("Engineering task rules:"));
+    assert!(!prompt.contains("Coordinator worker policy:"));
+    assert!(!prompt.contains("Use workers only when the work is independent, bounded"));
+}

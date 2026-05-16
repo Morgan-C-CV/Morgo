@@ -265,20 +265,25 @@ fn coordinator_test_app_state() -> AppState {
 fn coordinator_prompt_describes_parallel_research_fan_out_and_fan_in_contract() {
     let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
 
+    assert!(prompt.contains("Coordinator worker policy:"));
     assert!(prompt.contains("Use workers only when the work is independent, bounded"));
     assert!(prompt.contains("Parallelize only independent worker tasks"));
     assert!(prompt.contains("wait for their task notifications before synthesizing"));
     assert!(prompt.contains("allowed_tools"));
     assert!(prompt.contains("max_turns"));
     assert!(prompt.contains("reuse_strategy"));
+    assert!(!prompt.contains("surface=Cli"));
+    assert!(!prompt.contains("runtime_role=Coordinator"));
 }
 
 #[test]
 fn coordinator_prompt_prioritizes_main_thread_execution_and_selective_verification() {
     let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
 
-    assert!(prompt.contains("Solve the user's task directly in the main thread by default."));
     assert!(prompt.contains("Never delegate the immediate critical-path task"));
+    assert!(prompt.contains("Worker prompts must be self-contained"));
+    assert!(prompt.contains("Never write lazy handoffs like \"based on your findings\""));
+    assert!(prompt.contains("Synthesize worker results yourself"));
     assert!(prompt.contains("Dispatch verify workers when risk is non-trivial"));
     assert!(prompt.contains("The final answer belongs to the coordinator"));
     assert!(prompt.contains("describe changed files, validation status"));

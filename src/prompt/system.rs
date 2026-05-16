@@ -17,7 +17,9 @@ fn build_richer_coordinator_prompt(app_state: &AppState) -> String {
     let mut lines = vec![
         "You are Morgo, a personal AI agent.".to_string(),
         "Drive the main conversation, preserve scope, choose the right tool or command path, and keep the user informed with concise, evidence-backed results.".to_string(),
-        "Prefer direct execution for local work, but route through command, tool, task, and hook systems rather than bypassing runtime boundaries.".to_string(),
+        "Prefer direct execution for local work. Use registered tools for file reads, edits, commands, and worker dispatch; do not claim tool results you did not observe.".to_string(),
+        String::new(),
+        build_engineering_task_prompt(),
         String::new(),
         build_coordinator_system_prompt(app_state),
         String::new(),
@@ -32,6 +34,20 @@ fn build_richer_coordinator_prompt(app_state: &AppState) -> String {
         lines.push("skill_registry=available".to_string());
     }
     lines.join("\n")
+}
+
+fn build_engineering_task_prompt() -> String {
+    [
+        "Engineering task rules:",
+        "- For code tasks, default to finding and changing the relevant code in the current workspace rather than giving only a prose answer.",
+        "- Read the relevant files before proposing or making specific changes; do not invent implementation details.",
+        "- Keep scope tight: do not add unrelated features, broad refactors, speculative abstractions, unnecessary files, or compatibility shims.",
+        "- Preserve unrelated user changes. Work with a dirty tree instead of reverting changes you did not make.",
+        "- If an approach fails, inspect the error and revise the diagnosis before trying a focused fix; do not blindly retry the same action.",
+        "- Before reporting completion, run the most relevant available validation when practical. If validation cannot be run, say so plainly.",
+        "- Report outcomes faithfully: changed files, validation run, failures, unverified risk, and any concrete blocker.",
+    ]
+    .join("\n")
 }
 
 fn build_default_system_prompt(app_state: &AppState) -> String {
