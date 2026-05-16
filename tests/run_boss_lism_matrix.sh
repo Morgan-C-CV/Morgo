@@ -617,7 +617,11 @@ process_tree_pids() {
         next+=("$child_pid")
       done < <(pgrep -P "$parent_pid" 2>/dev/null || true)
     done
-    frontier=("${next[@]}")
+    if [ "${#next[@]}" -gt 0 ]; then
+      frontier=("${next[@]}")
+    else
+      frontier=()
+    fi
   done
 
   printf '%s\n' "${all_pids[@]}"

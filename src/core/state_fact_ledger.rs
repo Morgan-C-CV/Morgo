@@ -1670,6 +1670,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1718,6 +1720,8 @@ mod tests {
                         executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1751,6 +1755,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1799,6 +1805,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1840,6 +1848,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1883,6 +1893,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -1920,6 +1932,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers_with_mode(&step, true);
@@ -2000,6 +2014,8 @@ mod tests {
                     },
                 },
             ],
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -2470,6 +2486,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let ledgers = build_step_fact_ledgers(&step);
@@ -2504,6 +2522,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let open = build_open_item_records(&step, &["tests pass".into()]);
         let blocked = build_blocker_records(

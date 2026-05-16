@@ -2656,6 +2656,25 @@ fn record_recoverable_tool_failure(
     outcome: &ToolOutcome,
     target_path: Option<String>,
 ) {
+    if outcome
+        .bounded_excerpt
+        .as_deref()
+        .is_some_and(|excerpt| excerpt.contains("resource_backpressure:"))
+    {
+        usage.terminal_blocker_kind = Some("resource_backpressure".into());
+        usage.recovery_attempted = true;
+        usage.recovery_tier = Some("resource_backpressure".into());
+        usage.recovery_outcome = Some("backpressure".into());
+        usage.last_recovery_attempt = Some(RecoveryAttempt {
+            failure_kind: "resource_backpressure".into(),
+            recommended_next_action: outcome
+                .recommended_next_action
+                .clone()
+                .unwrap_or_else(|| "defer_agent_spawn".into()),
+            target_path,
+        });
+        return;
+    }
     if !outcome.recoverable {
         usage.terminal_blocker_kind = Some(outcome.kind.as_str().to_string());
         return;
@@ -4362,7 +4381,9 @@ fn push_tool_failure_feedback(
 
 fn classify_dispatch_failure(reason: &str) -> String {
     let lowered = reason.to_ascii_lowercase();
-    if lowered.contains("runtime is unavailable") {
+    if lowered.contains("resource_backpressure:") {
+        "resource_backpressure".into()
+    } else if lowered.contains("runtime is unavailable") {
         "tool_runtime_unavailable".into()
     } else if lowered.contains("unknown tool") {
         "tool_unavailable".into()
@@ -4393,6 +4414,16 @@ fn classify_dispatch_failure(reason: &str) -> String {
     } else {
         "tool_interrupted".into()
     }
+}
+
+fn continue_patch_is_summary_only(patch: &StatePatch) -> bool {
+    !patch.accepted_summary_add.is_empty()
+        && patch.open_items_add.is_empty()
+        && patch.open_items_remove.is_empty()
+        && patch.tests_add.is_empty()
+        && patch.review_mode.is_none()
+        && patch.task_profile.is_none()
+        && patch.requires_source_evidence.is_none()
 }
 
 /// Run a stateless JSON decision loop.
@@ -4726,6 +4757,38 @@ pub async fn run_decision_loop_with_tools(
                     continue;
                 }
                 let after = frame.to_prompt_segment().content;
+                if continue_patch_is_summary_only(&decision.state_patch)
+                    && total_usage.tool_dispatch_count == 0
+                    && count_decision_feedback(&frame, "summary_only_continue_no_progress") >= 1
+                {
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("summary_only_continue_guard".into());
+                    total_usage.recovery_outcome = Some("no_progress_escalation".into());
+                    total_usage.terminal_blocker_kind =
+                        Some("summary_only_continue_no_progress".into());
+                    finalize_worker_usage_report(&frame, &mut total_usage);
+                    return Ok(LoopOutcome::NoProgress {
+                        last_state: frame.state,
+                        reason: "continue only rewrote accepted summary without new evidence, open-item closure, or tool progress".into(),
+                        usage: total_usage,
+                    });
+                }
+                if continue_patch_is_summary_only(&decision.state_patch)
+                    && total_usage.tool_dispatch_count == 0
+                {
+                    push_decision_feedback(
+                        &mut frame,
+                        "summary_only_continue_no_progress",
+                        true,
+                        "close_open_items_add_evidence_or_choose_call_tool",
+                        "accepted_summary-only continue is not substantive progress by itself",
+                    );
+                    total_usage.recovery_attempted = true;
+                    total_usage.recovery_tier = Some("decision_feedback".into());
+                    total_usage.recovery_outcome = Some("feedback_injected".into());
+                    frame.state = AgentState::Correcting;
+                    continue;
+                }
                 if before == after {
                     finalize_worker_usage_report(&frame, &mut total_usage);
                     return Ok(LoopOutcome::NoProgress {

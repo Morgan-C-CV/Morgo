@@ -366,10 +366,98 @@ fn has_explicit_verification_repair_context(step: &BossPlanStep) -> bool {
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BossLoopGuardDecision {
+    Continue,
+    Terminal(String),
+}
+
+fn boss_runtime_evidence_count(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> usize {
+    let report_count = metadata
+        .and_then(|metadata| metadata.worker_report.as_ref())
+        .map(|report| {
+            report.evidence_refs.len()
+                + report.files_changed.len()
+                + report.tests_run.len()
+                + usize::from(report.last_tool_action.is_some())
+        })
+        .unwrap_or(0);
+    step.tool_execution_records.len() + report_count
+}
+
+fn build_boss_loop_fingerprint(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> String {
+    let missing_targets = verification_gap_required_targets(step, metadata);
+    json!({
+        "status": format!("{:?}", step.status),
+        "failure_classification": metadata
+            .and_then(|metadata| metadata.step_failure_classification)
+            .map(|classification| classification.as_str().to_string()),
+        "next_action": step
+            .stage_continuation_context
+            .as_ref()
+            .and_then(|context| context.next_action.clone())
+            .or_else(|| metadata.map(|_| verification_gap_next_action(step, metadata))),
+        "failed_target": step
+            .stage_continuation_context
+            .as_ref()
+            .and_then(|context| context.failed_target.clone())
+            .or_else(|| verification_gap_target(step, metadata)),
+        "terminal_blocker_kind": metadata
+            .and_then(|metadata| metadata.terminal_blocker_kind.clone()),
+        "completion_evidence_status": metadata
+            .and_then(|metadata| metadata.completion_evidence_status.clone()),
+        "missing_targets": missing_targets,
+        "runtime_evidence_count": boss_runtime_evidence_count(step, metadata),
+    })
+    .to_string()
+}
+
+fn reset_boss_loop_guard_on_new_evidence(
+    step: &mut BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) {
+    let runtime_evidence_count = boss_runtime_evidence_count(step, metadata);
+    if runtime_evidence_count > step.last_runtime_evidence_count {
+        step.last_loop_fingerprint = None;
+        step.same_loop_fingerprint_count = 0;
+        step.loop_guard_terminal_reason = None;
+    }
+    step.last_runtime_evidence_count = runtime_evidence_count;
+}
+
+fn record_boss_loop_guard(
+    step: &mut BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> BossLoopGuardDecision {
+    reset_boss_loop_guard_on_new_evidence(step, metadata);
+    let fingerprint = build_boss_loop_fingerprint(step, metadata);
+    if step.last_loop_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+        step.same_loop_fingerprint_count = step.same_loop_fingerprint_count.saturating_add(1);
+    } else {
+        step.last_loop_fingerprint = Some(fingerprint);
+        step.same_loop_fingerprint_count = 1;
+    }
+    if step.same_loop_fingerprint_count >= 2 {
+        let reason = "verification_loop_guard_exhausted".to_string();
+        step.loop_guard_terminal_reason = Some(reason.clone());
+        return BossLoopGuardDecision::Terminal(reason);
+    }
+    BossLoopGuardDecision::Continue
+}
+
 fn verification_gap_repair_dispatch_allowed(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
 ) -> bool {
+    if step.loop_guard_terminal_reason.is_some() {
+        return false;
+    }
     let can_continue_past_budget = has_explicit_verification_repair_context(step)
         && step_artifact_verification_error(step).is_none()
         && !step_report_body_looks_like_placeholder(step)
@@ -7065,7 +7153,9 @@ impl BossCoordinator {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            }],
+            
+            ..Default::default()
+        }],
             accepted_by_user: true,
             auto_sequence: true,
             session_snapshot: None,
@@ -7133,7 +7223,9 @@ impl BossCoordinator {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            }],
+            
+            ..Default::default()
+        }],
             accepted_by_user: false,
             auto_sequence: true,
             session_snapshot: None,
@@ -7290,6 +7382,9 @@ impl BossCoordinator {
         routed_metadata.terminal_blocker_kind = usage.terminal_blocker_kind.clone();
         routed_metadata.step_failure_classification = match usage.terminal_blocker_kind.as_deref()
         {
+            Some("resource_backpressure") => {
+                Some(StepFailureClassification::ResourceBackpressure)
+            }
             Some("true_external_blocker") => Some(StepFailureClassification::TrueExternalBlocker),
             Some("unsupported_selector") => Some(StepFailureClassification::UnsupportedRequest),
             _ if usage.recovery_outcome.as_deref() == Some("repair_turn_injected")
@@ -8388,6 +8483,7 @@ impl BossCoordinator {
                     BossPlanStepStatus::Rejected => Some(("repair_dispatched", None)),
                     BossPlanStepStatus::Failed
                         if step.last_correction.is_some()
+                            && step.loop_guard_terminal_reason.is_none()
                             && verification_gap_repair_can_continue(
                                 step,
                                 routed_step_metadata_snapshot.get(&step.id),
@@ -8603,7 +8699,26 @@ impl BossCoordinator {
                                     &reason,
                                     gate_metadata.as_ref(),
                                 );
-                                (false, Some(("repair_dispatched", None)))
+                                match record_boss_loop_guard(step, gate_metadata.as_ref()) {
+                                    BossLoopGuardDecision::Continue => {
+                                        (false, Some(("repair_dispatched", None)))
+                                    }
+                                    BossLoopGuardDecision::Terminal(loop_reason) => {
+                                        step.status = BossPlanStepStatus::Failed;
+                                        step.completed = false;
+                                        step.last_review_summary = Some(format!(
+                                            "{}: {}",
+                                            loop_reason, reason
+                                        ));
+                                        (
+                                            false,
+                                            Some((
+                                                "terminal_after_repair_exhausted",
+                                                Some("verification_loop_guard_exhausted"),
+                                            )),
+                                        )
+                                    }
+                                }
                             } else if step.attempt_count >= step.retry_budget {
                                 step.status = BossPlanStepStatus::Failed;
                                 update_step_continuation_context(
@@ -8718,6 +8833,12 @@ impl BossCoordinator {
                             next_action,
                             continuation_verified_facts(step),
                         );
+                        if matches!(
+                            record_boss_loop_guard(step, routed_metadata.as_ref()),
+                            BossLoopGuardDecision::Terminal(_)
+                        ) {
+                            step.status = BossPlanStepStatus::Failed;
+                        }
                     }
                     (false, None)
                 }
@@ -8796,6 +8917,16 @@ impl BossCoordinator {
                             }),
                             continuation_verified_facts(step),
                         );
+                        if matches!(
+                            record_boss_loop_guard(step, routed_metadata.as_ref()),
+                            BossLoopGuardDecision::Terminal(_)
+                        ) {
+                            step.status = BossPlanStepStatus::Failed;
+                            step.last_review_summary = Some(
+                                "verification_loop_guard_exhausted: repeated missing-evidence request without new runtime evidence"
+                                    .into(),
+                            );
+                        }
                     }
                     (false, None)
                 }
@@ -9182,6 +9313,21 @@ impl BossCoordinator {
     }
 
     async fn maybe_auto_advance_after_completion(&self) -> anyhow::Result<()> {
+        {
+            let plan_guard = self.plan.read().await;
+            let routed_guard = self.routed_step_metadata.read().await;
+            if let Some(plan) = plan_guard.as_ref() {
+                if plan.steps.iter().any(|step| {
+                    step.loop_guard_terminal_reason.is_some()
+                        || routed_guard.get(&step.id).is_some_and(|metadata| {
+                            metadata.step_failure_classification
+                                == Some(StepFailureClassification::ResourceBackpressure)
+                        })
+                }) {
+                    return Ok(());
+                }
+            }
+        }
         let app_state = {
             let guard = self.auto_advance_app_state.read().await;
             guard.clone()
@@ -9301,6 +9447,9 @@ impl BossCoordinator {
                 terminalization_blocked_step(plan, &routed_step_metadata_snapshot)
             {
                 if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    if step.loop_guard_terminal_reason.is_some() {
+                        return Ok(None);
+                    }
                     activate_verification_gap_continuation(
                         step,
                         routed_step_metadata_snapshot.get(&step_id),
@@ -9334,6 +9483,9 @@ impl BossCoordinator {
                             .to_string()
                     });
                 if let Some(step) = plan.steps.iter_mut().find(|step| step.id == step_id) {
+                    if step.loop_guard_terminal_reason.is_some() {
+                        return Ok(None);
+                    }
                     activate_verification_gap_continuation(
                         step,
                         routed_step_metadata_snapshot.get(&step_id),
@@ -11954,7 +12106,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12021,7 +12175,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12089,7 +12245,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12175,7 +12333,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12238,7 +12398,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    },
+                    
+            ..Default::default()
+        },
                     BossPlanStep {
                         id: 1,
                         description: "current step".into(),
@@ -12258,7 +12420,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    },
+                    
+            ..Default::default()
+        },
                 ],
                 ..BossPlan::default()
             });
@@ -12343,7 +12507,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12409,7 +12575,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12478,7 +12646,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12545,7 +12715,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12614,6 +12786,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let plan = BossPlan {
             accepted_by_user: true,
@@ -12690,7 +12864,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12769,7 +12945,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12845,7 +13023,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12913,7 +13093,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -12989,7 +13171,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -13084,7 +13268,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -13144,6 +13330,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         assert!(super::has_only_verification_evidence_gap(&step));
@@ -13220,7 +13408,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -13581,6 +13771,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         apply_step_failure_classification(
@@ -13640,6 +13832,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         apply_step_failure_classification(
@@ -13680,6 +13874,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         apply_step_failure_classification(
@@ -13748,7 +13944,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -13906,6 +14104,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("missing_verification_evidence".into()),
@@ -13999,6 +14199,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14076,6 +14278,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14153,6 +14357,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14230,6 +14436,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14306,6 +14514,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14387,6 +14597,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14446,6 +14658,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let worker_contract = StageExecutionContract {
             declared_artifacts: vec![DeclaredArtifactContract {
@@ -14541,6 +14755,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14618,6 +14834,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14711,6 +14929,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14790,6 +15010,8 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -14861,6 +15083,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -15266,6 +15490,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let usage = LoopUsage {
             completion_evidence_status: Some(CompletionEvidenceStatus::Sufficient),
@@ -15513,6 +15739,8 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let target = verification_first_target_path(&step).expect("verification target");
@@ -15584,6 +15812,8 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let objective = build_verification_first_brief_objective(&step);
@@ -15633,6 +15863,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_gaps: vec![CompletionEvidenceGap {
@@ -15718,7 +15950,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -15833,7 +16067,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -15928,7 +16164,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -16020,7 +16258,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -16165,7 +16405,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -16298,6 +16540,8 @@ mod tests {
                     },
                 },
             ],
+        
+            ..Default::default()
         };
 
         let summary = build_step_review_summary(
@@ -16367,6 +16611,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -16841,6 +17087,8 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         let memory = project_executor_b_stage_memory(&step, None).expect("memory projected");
@@ -17079,7 +17327,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -17211,6 +17461,7 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records,
+            ..Default::default()
         }
     }
 
@@ -17411,6 +17662,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: vec![tool_record.clone()],
+        
+            ..Default::default()
         };
 
         let usage = LoopUsage {
@@ -17576,6 +17829,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
             summary: "need listing".into(),
@@ -17653,6 +17908,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let section = runtime_content_evidence_section(&step).expect("content evidence");
@@ -17698,6 +17955,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let section = runtime_execution_evidence_section(&step).expect("execution evidence");
@@ -18042,6 +18301,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records,
+            ..Default::default()
         }
     }
 
@@ -18893,6 +19153,8 @@ mod tests {
                     },
                 },
             ],
+        
+            ..Default::default()
         };
 
         let summary = build_step_review_summary(
@@ -18981,6 +19243,8 @@ mod tests {
                     },
                 },
             ],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19051,6 +19315,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19118,6 +19384,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let shaped = shape_verification_first_result_text(
@@ -19183,6 +19451,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19256,6 +19526,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19323,6 +19595,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         step.last_review_summary = Some(normalize_verification_first_short_form(
@@ -19394,6 +19668,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19459,6 +19735,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let boss_on_only = make_step();
@@ -19470,8 +19748,8 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_short_form_is_identical_for_boss_on_only_and_all_on_given_same_target_result()
-     {
+    fn verification_first_short_form_is_identical_for_boss_on_only_and_all_on_given_same_target_result(
+    ) {
         let make_step = || BossPlanStep {
             id: 0,
             description: "verify target".into(),
@@ -19521,6 +19799,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         let mut boss_on_only = make_step();
@@ -19576,7 +19856,9 @@ mod tests {
                 }),
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            }],
+            
+            ..Default::default()
+        }],
             ..BossPlan::default()
         };
 
@@ -19695,6 +19977,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
         let general_step = BossPlanStep {
             stage_continuation_context: None,
@@ -19776,6 +20060,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
 
         store_step_result_diff(
@@ -19915,6 +20201,8 @@ mod tests {
                     },
                 },
             ],
+        
+            ..Default::default()
         };
 
         let memory = project_executor_b_stage_memory(&step, None).expect("memory projected");
@@ -19963,6 +20251,8 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             fallback_tier: Some("verification_first".into()),
@@ -20019,7 +20309,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    },
+                    
+            ..Default::default()
+        },
                     BossPlanStep {
                         id: 1,
                         description: "step 1".into(),
@@ -20053,7 +20345,9 @@ mod tests {
                                 executed_in_batch: false,
                             },
                         }],
-                    },
+                    
+            ..Default::default()
+        },
                 ],
                 accepted_by_user: true,
                 auto_sequence: true,
@@ -20184,6 +20478,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_gaps: vec![
@@ -20290,6 +20586,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_gaps: vec![
@@ -20436,6 +20734,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_gaps: vec![
@@ -20544,6 +20844,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_gaps: vec![CompletionEvidenceGap {
@@ -20672,6 +20974,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         {
             let mut routed = coordinator.routed_step_metadata.write().await;
@@ -20792,7 +21096,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -20914,6 +21220,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("missing_verification_evidence".into()),
@@ -21019,7 +21327,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -21247,7 +21557,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -21433,7 +21745,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            }],
+            
+            ..Default::default()
+        }],
             ..Default::default()
         };
         save_plan(&plan, &plan_path).await.unwrap();
@@ -21515,7 +21829,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -21660,7 +21976,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -21797,6 +22115,8 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
+        
+            ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
             completion_evidence_status: Some("sufficient".into()),
@@ -21908,7 +22228,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22075,7 +22397,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22283,7 +22607,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22385,7 +22711,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22490,7 +22818,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22586,7 +22916,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22702,7 +23034,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22802,7 +23136,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..BossPlan::default()
             });
         }
@@ -22922,7 +23258,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                }],
+                
+            ..Default::default()
+        }],
                 ..Default::default()
             });
         }
@@ -23091,6 +23429,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let target_files = collect_target_files(&handles);
         let target_artifacts = collect_target_artifacts(&step, &target_files);
@@ -23131,6 +23471,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
             path: "/tmp/demo.py".into(),
@@ -23181,6 +23523,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
             path: "/tmp/validator".into(),
@@ -23226,6 +23570,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
             path: "/tmp/validator".into(),
@@ -23313,6 +23659,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
             path: target_path.clone(),
@@ -23360,6 +23708,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(
             "建议核验路径：\n- src/tool/definition.rs\n- ../docs/31-token-efficiency-cost-performance.md",
@@ -23416,6 +23766,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
         let handles = extract_relevant_file_handles(&source_text, "step-4-attempt-0");
@@ -23462,6 +23814,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
         let handles = extract_relevant_file_handles(&source_text, "step-5-attempt-0");
@@ -23533,7 +23887,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            };
+            
+            ..Default::default()
+        };
             if id == 4 {
                 step.status = BossPlanStepStatus::Pending;
                 step.completed = false;
@@ -23586,6 +23942,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         let artifacts =
             collect_target_artifacts(&step, &["/tmp/report.md".into(), "/tmp/results/".into()]);
@@ -23622,6 +23980,8 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
         assert_eq!(
             collect_blocked_items(&step),
@@ -23650,11 +24010,48 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         };
 
         store_step_result_diff(&mut step, "", Some("fallback summary"));
         assert_eq!(step.result_diff.as_deref(), Some("fallback summary"));
         store_step_result_diff(&mut step, "primary result", Some("ignored"));
         assert_eq!(step.result_diff.as_deref(), Some("primary result"));
+    }
+
+    #[test]
+    fn boss_loop_guard_terminalizes_repeated_verification_fingerprint() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "verify target".into(),
+            status: BossPlanStepStatus::Rejected,
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                failed_target: Some("/tmp/report.md".into()),
+                next_action: Some("verify_artifact".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            step_failure_classification: Some(
+                StepFailureClassification::VerificationRepairContinuation,
+            ),
+            completion_evidence_status: Some("missing_verification_evidence".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            record_boss_loop_guard(&mut step, Some(&metadata)),
+            BossLoopGuardDecision::Continue
+        );
+        assert_eq!(
+            record_boss_loop_guard(&mut step, Some(&metadata)),
+            BossLoopGuardDecision::Terminal("verification_loop_guard_exhausted".into())
+        );
+        assert_eq!(
+            step.loop_guard_terminal_reason.as_deref(),
+            Some("verification_loop_guard_exhausted")
+        );
     }
 }

@@ -510,6 +510,8 @@ fn make_orchestrator_route_override_plan(step_id: usize) -> BossPlan {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         }],
         accepted_by_user: true,
         auto_sequence: true,
@@ -608,6 +610,7 @@ fn boss_step(id: usize, description: &str) -> BossPlanStep {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -9073,7 +9076,9 @@ fn t27_3_execution_stage_with_step_maps_objective_and_open_items() {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
-    };
+    
+            ..Default::default()
+        };
     let plan = BossPlan {
         plan_id: "p2".into(),
         task_description: "build the feature".into(),
@@ -9186,7 +9191,9 @@ fn t27_3_projection_emits_file_fact_when_worker_reports_reading_a_file() {
                 executed_in_batch: false,
             },
         }],
-    };
+    
+            ..Default::default()
+        };
     let plan = BossPlan {
         plan_id: "p-read-ledger".into(),
         task_description: "ledger read task".into(),
@@ -11260,6 +11267,8 @@ fn make_plan_with_step(
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
+        
+            ..Default::default()
         }],
         accepted_by_user: true,
         auto_sequence: true,
@@ -11820,7 +11829,9 @@ fn t27_7_build_accepted_archive_excludes_current_step() {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
-    };
+    
+            ..Default::default()
+        };
 
     let plan = BossPlan {
         plan_id: "p-t277".into(),
@@ -11896,7 +11907,9 @@ fn t27_7_projection_uses_archive_for_accepted_summary() {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
-    };
+    
+            ..Default::default()
+        };
 
     let plan = BossPlan {
         plan_id: "p-t277b".into(),
@@ -11955,7 +11968,9 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
-    };
+    
+            ..Default::default()
+        };
     let current_step = BossPlanStep {
         id: 1,
         description: "step 1".into(),
@@ -11976,7 +11991,9 @@ fn t27_7_open_items_excludes_criteria_already_in_archive() {
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
-    };
+    
+            ..Default::default()
+        };
     let plan = BossPlan {
         plan_id: "p-t277c".into(),
         task_description: "open items filter test".into(),
@@ -12035,6 +12052,7 @@ fn make_t278_step(
         executor_b_stage_memory: None,
         review_task_id: None,
         tool_execution_records: Vec::new(),
+        ..Default::default()
     }
 }
 

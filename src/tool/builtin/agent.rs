@@ -205,8 +205,10 @@ impl Tool for AgentTool {
                         current_memory_pressure_level(),
                     ) {
                         BossBudgetDecision::Allow => {}
-                        BossBudgetDecision::Queue { reason }
-                        | BossBudgetDecision::Deny { reason } => {
+                        BossBudgetDecision::Queue { reason } => {
+                            anyhow::bail!("resource_backpressure: {reason}");
+                        }
+                        BossBudgetDecision::Deny { reason } => {
                             anyhow::bail!(reason);
                         }
                     }

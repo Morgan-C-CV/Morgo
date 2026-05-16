@@ -180,6 +180,47 @@ pub struct BossPlanStep {
     /// Real runtime tool records captured from the latest worker attempt.
     #[serde(default)]
     pub tool_execution_records: Vec<ToolExecutionRecord>,
+    /// Last structured loop fingerprint observed by Boss repair/verification guard.
+    #[serde(default)]
+    pub last_loop_fingerprint: Option<String>,
+    /// Number of consecutive times the same loop fingerprint was observed.
+    #[serde(default)]
+    pub same_loop_fingerprint_count: u32,
+    /// Terminal reason set when the Boss loop guard exhausts a repeated pattern.
+    #[serde(default)]
+    pub loop_guard_terminal_reason: Option<String>,
+    /// Runtime evidence count at the last loop-guard observation.
+    #[serde(default)]
+    pub last_runtime_evidence_count: usize,
+}
+
+impl Default for BossPlanStep {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            description: String::new(),
+            objective: None,
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::default(),
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: default_retry_budget(),
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract::default(),
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+            last_loop_fingerprint: None,
+            same_loop_fingerprint_count: 0,
+            loop_guard_terminal_reason: None,
+            last_runtime_evidence_count: 0,
+        }
+    }
 }
 
 fn default_retry_budget() -> u32 {

@@ -32,6 +32,7 @@ pub enum StepFailureClassification {
     RepairableRecovery,
     VerificationRepairContinuation,
     TrueExternalBlocker,
+    ResourceBackpressure,
 }
 
 impl StepFailureClassification {
@@ -42,6 +43,7 @@ impl StepFailureClassification {
             Self::RepairableRecovery => "repairable_recovery",
             Self::VerificationRepairContinuation => "verification_repair_continuation",
             Self::TrueExternalBlocker => "true_external_blocker",
+            Self::ResourceBackpressure => "resource_backpressure",
         }
     }
 }
@@ -252,6 +254,19 @@ fn verification_repair_continuation_with_missing_evidence_is_not_generic_failure
     );
 }
 
+#[test]
+fn resource_backpressure_is_classified_separately() {
+    let mut usage = LoopUsage::default();
+    usage.terminal_blocker_kind = Some("resource_backpressure".into());
+    usage.tool_dispatch_failure_taxonomy
+        .insert("resource_backpressure".into(), 1);
+
+    assert_eq!(
+        classify_usage_failure(Some(&usage)),
+        StepFailureClassification::ResourceBackpressure
+    );
+}
+
 fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassification {
     let Some(usage) = usage else {
         return StepFailureClassification::GenericFailure;
@@ -266,6 +281,13 @@ fn classify_usage_failure(usage: Option<&LoopUsage>) -> StepFailureClassificatio
     }
     if usage.terminal_blocker_kind.as_deref() == Some("true_external_blocker") {
         return StepFailureClassification::TrueExternalBlocker;
+    }
+    if usage.terminal_blocker_kind.as_deref() == Some("resource_backpressure")
+        || usage
+            .tool_dispatch_failure_taxonomy
+            .contains_key("resource_backpressure")
+    {
+        return StepFailureClassification::ResourceBackpressure;
     }
     if usage.terminal_blocker_kind.as_deref() == Some("unsupported_selector")
         || usage.recovery_outcome.as_deref() == Some("unsupported_selector")
