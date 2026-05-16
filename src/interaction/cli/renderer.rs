@@ -1137,7 +1137,11 @@ mod tests {
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(rendered.contains("[Activity]"));
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
-        assert!(!rendered.contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
+        assert!(
+            !rendered.contains(
+                "Command: cargo test --package agent --lib -- interaction::cli::renderer"
+            )
+        );
         assert!(rendered.contains("Exit code: 0"));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
         assert!(!rendered.contains("[Tool result]"));

@@ -1670,7 +1670,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -1805,7 +1805,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -1893,7 +1893,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -1932,7 +1932,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -2486,7 +2486,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -2522,7 +2522,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let open = build_open_item_records(&step, &["tests pass".into()]);

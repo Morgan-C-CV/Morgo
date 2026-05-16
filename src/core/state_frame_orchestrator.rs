@@ -258,7 +258,8 @@ fn verification_repair_continuation_with_missing_evidence_is_not_generic_failure
 fn resource_backpressure_is_classified_separately() {
     let mut usage = LoopUsage::default();
     usage.terminal_blocker_kind = Some("resource_backpressure".into());
-    usage.tool_dispatch_failure_taxonomy
+    usage
+        .tool_dispatch_failure_taxonomy
         .insert("resource_backpressure".into(), 1);
 
     assert_eq!(

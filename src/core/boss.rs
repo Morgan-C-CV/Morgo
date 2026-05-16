@@ -720,11 +720,9 @@ fn correction_repair_target(
     action: Option<&str>,
 ) -> Option<String> {
     match action {
-        Some("worker_correction") => {
-            correction_explicit_target(step.last_correction.as_deref())
-                .or_else(|| verification_gap_target(step, metadata))
-                .or_else(|| primary_declared_artifact_path(step))
-        }
+        Some("worker_correction") => correction_explicit_target(step.last_correction.as_deref())
+            .or_else(|| verification_gap_target(step, metadata))
+            .or_else(|| primary_declared_artifact_path(step)),
         Some("read_source_evidence") | Some("verify_artifact") => {
             verification_gap_target(step, metadata)
         }
@@ -7324,9 +7322,9 @@ impl BossCoordinator {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: true,
             session_snapshot: None,
@@ -7394,9 +7392,9 @@ impl BossCoordinator {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: false,
             auto_sequence: true,
             session_snapshot: None,
@@ -8877,10 +8875,8 @@ impl BossCoordinator {
                                     BossLoopGuardDecision::Terminal(loop_reason) => {
                                         step.status = BossPlanStepStatus::Failed;
                                         step.completed = false;
-                                        step.last_review_summary = Some(format!(
-                                            "{}: {}",
-                                            loop_reason, reason
-                                        ));
+                                        step.last_review_summary =
+                                            Some(format!("{}: {}", loop_reason, reason));
                                         (
                                             false,
                                             Some((
@@ -12299,9 +12295,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12368,9 +12364,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12438,9 +12434,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12526,9 +12522,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12591,9 +12587,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    
-            ..Default::default()
-        },
+
+                        ..Default::default()
+                    },
                     BossPlanStep {
                         id: 1,
                         description: "current step".into(),
@@ -12613,9 +12609,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    
-            ..Default::default()
-        },
+
+                        ..Default::default()
+                    },
                 ],
                 ..BossPlan::default()
             });
@@ -12700,9 +12696,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12768,9 +12764,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12839,9 +12835,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12908,9 +12904,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -12979,7 +12975,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let plan = BossPlan {
@@ -13057,9 +13053,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13138,9 +13134,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13216,9 +13212,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13286,9 +13282,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13364,9 +13360,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13461,9 +13457,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13523,7 +13519,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -13601,9 +13597,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -13964,7 +13960,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -14025,7 +14021,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -14067,7 +14063,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -14137,9 +14133,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -14297,7 +14293,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14392,7 +14388,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14471,7 +14467,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14550,7 +14546,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14629,7 +14625,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14707,7 +14703,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14790,7 +14786,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -14851,7 +14847,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let worker_contract = StageExecutionContract {
@@ -14948,7 +14944,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -15027,7 +15023,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -15122,7 +15118,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -15203,7 +15199,7 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -15276,7 +15272,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -15683,7 +15679,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let usage = LoopUsage {
@@ -16005,7 +16001,7 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -16056,7 +16052,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -16143,9 +16139,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -16260,9 +16256,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -16357,9 +16353,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -16451,9 +16447,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -16598,9 +16594,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -16733,7 +16729,7 @@ mod tests {
                     },
                 },
             ],
-        
+
             ..Default::default()
         };
 
@@ -16804,7 +16800,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -17280,7 +17276,7 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 
@@ -17520,9 +17516,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -17855,7 +17851,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: vec![tool_record.clone()],
-        
+
             ..Default::default()
         };
 
@@ -18047,7 +18043,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
@@ -18126,7 +18122,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -18173,7 +18169,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19371,7 +19367,7 @@ mod tests {
                     },
                 },
             ],
-        
+
             ..Default::default()
         };
 
@@ -19461,7 +19457,7 @@ mod tests {
                     },
                 },
             ],
-        
+
             ..Default::default()
         };
 
@@ -19533,7 +19529,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19602,7 +19598,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19669,7 +19665,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19744,7 +19740,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19813,7 +19809,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19886,7 +19882,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19953,7 +19949,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -19966,8 +19962,8 @@ mod tests {
     }
 
     #[test]
-    fn verification_first_short_form_is_identical_for_boss_on_only_and_all_on_given_same_target_result(
-    ) {
+    fn verification_first_short_form_is_identical_for_boss_on_only_and_all_on_given_same_target_result()
+     {
         let make_step = || BossPlanStep {
             id: 0,
             description: "verify target".into(),
@@ -20017,7 +20013,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -20074,9 +20070,9 @@ mod tests {
                 }),
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             ..BossPlan::default()
         };
 
@@ -20195,7 +20191,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
         let general_step = BossPlanStep {
@@ -20278,7 +20274,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
 
@@ -20419,7 +20415,7 @@ mod tests {
                     },
                 },
             ],
-        
+
             ..Default::default()
         };
 
@@ -20469,7 +20465,7 @@ mod tests {
             }),
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -20527,9 +20523,9 @@ mod tests {
                         executor_b_stage_memory: None,
                         review_task_id: None,
                         tool_execution_records: Vec::new(),
-                    
-            ..Default::default()
-        },
+
+                        ..Default::default()
+                    },
                     BossPlanStep {
                         id: 1,
                         description: "step 1".into(),
@@ -20563,9 +20559,9 @@ mod tests {
                                 executed_in_batch: false,
                             },
                         }],
-                    
-            ..Default::default()
-        },
+
+                        ..Default::default()
+                    },
                 ],
                 accepted_by_user: true,
                 auto_sequence: true,
@@ -20696,7 +20692,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -20952,7 +20948,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -21192,7 +21188,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         {
@@ -21314,9 +21310,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -21438,7 +21434,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -21545,9 +21541,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -21775,9 +21771,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -21963,9 +21959,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             ..Default::default()
         };
         save_plan(&plan, &plan_path).await.unwrap();
@@ -22047,9 +22043,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -22194,9 +22190,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -22333,7 +22329,7 @@ mod tests {
                     executed_in_batch: false,
                 },
             }],
-        
+
             ..Default::default()
         };
         let metadata = BossStepRoutedMetadata {
@@ -22446,9 +22442,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -22615,9 +22611,9 @@ mod tests {
                             executed_in_batch: false,
                         },
                     }],
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -22825,9 +22821,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -22929,9 +22925,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -23036,9 +23032,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -23134,9 +23130,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -23252,9 +23248,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -23354,9 +23350,9 @@ mod tests {
                     }),
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..BossPlan::default()
             });
         }
@@ -23476,9 +23472,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        }],
+
+                    ..Default::default()
+                }],
                 ..Default::default()
             });
         }
@@ -23647,7 +23643,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let target_files = collect_target_files(&handles);
@@ -23689,7 +23685,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
@@ -23741,7 +23737,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
@@ -23788,7 +23784,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
@@ -23877,7 +23873,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let target_artifacts = vec![TargetArtifact {
@@ -23926,7 +23922,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(
@@ -23984,7 +23980,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
@@ -24032,7 +24028,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         let source_text = build_relevant_file_handle_source_text(step.objective(), &step);
@@ -24105,9 +24101,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        };
+
+                ..Default::default()
+            };
             if id == 4 {
                 step.status = BossPlanStepStatus::Pending;
                 step.completed = false;
@@ -24198,7 +24194,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
         assert_eq!(
@@ -24228,7 +24224,7 @@ mod tests {
             executor_b_stage_memory: None,
             review_task_id: None,
             tool_execution_records: Vec::new(),
-        
+
             ..Default::default()
         };
 

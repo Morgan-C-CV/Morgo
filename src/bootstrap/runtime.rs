@@ -287,11 +287,42 @@ fn tui_is_resume_picker_command(input: &str) -> bool {
     )
 }
 
-struct TuiRawModeGuard;
+struct TuiRawModeGuard {
+    keyboard_enhancements_enabled: bool,
+}
 
 impl TuiRawModeGuard {
     fn activate() -> anyhow::Result<Self> {
         let mut stdout = io::stdout();
+        let keyboard_enhancements_enabled = tui_should_enable_keyboard_enhancements();
+        if let Err(error) = enter_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled)
+        {
+            restore_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled);
+            return Err(error.into());
+        }
+        if let Err(error) = enable_raw_mode() {
+            restore_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled);
+            return Err(error.into());
+        }
+        Ok(Self {
+            keyboard_enhancements_enabled,
+        })
+    }
+}
+
+impl Drop for TuiRawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        restore_tui_control_sequences(&mut stdout, self.keyboard_enhancements_enabled);
+    }
+}
+
+fn enter_tui_control_sequences(
+    stdout: &mut io::Stdout,
+    keyboard_enhancements_enabled: bool,
+) -> io::Result<()> {
+    if keyboard_enhancements_enabled {
         execute!(
             stdout,
             EnterAlternateScreen,
@@ -303,19 +334,29 @@ impl TuiRawModeGuard {
                     | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
             )
-        )?;
-        enable_raw_mode()?;
-        Ok(Self)
+        )
+    } else {
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )
     }
 }
 
-impl Drop for TuiRawModeGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
+fn restore_tui_control_sequences(stdout: &mut io::Stdout, keyboard_enhancements_enabled: bool) {
+    if keyboard_enhancements_enabled {
         let _ = execute!(
             stdout,
             PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+    } else {
+        let _ = execute!(
+            stdout,
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen
@@ -2023,6 +2064,37 @@ fn prepend_tui_startup_card(
     screen.main = main;
 }
 
+fn place_activity_below_startup_card(screen: &mut crate::interaction::cli::renderer::TuiScreen) {
+    let Some(activity_index) = screen
+        .panels
+        .iter()
+        .position(|panel| panel.title == "Activity")
+    else {
+        return;
+    };
+    let activity_panel = screen.panels.remove(activity_index);
+    if activity_panel.lines.is_empty() {
+        return;
+    }
+
+    let mut activity_lines = vec!["[Activity]".to_string()];
+    activity_lines.extend(
+        activity_panel
+            .lines
+            .into_iter()
+            .map(|line| format!("  {line}")),
+    );
+
+    const STARTUP_CARD_WITH_GAP_LINES: usize = 9;
+    let insert_at = STARTUP_CARD_WITH_GAP_LINES.min(screen.main.len());
+    let mut new_main = Vec::with_capacity(screen.main.len() + activity_lines.len() + 1);
+    new_main.extend(screen.main.iter().take(insert_at).cloned());
+    new_main.extend(activity_lines);
+    new_main.push(String::new());
+    new_main.extend(screen.main.iter().skip(insert_at).cloned());
+    screen.main = new_main;
+}
+
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
     let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
     let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
@@ -2251,13 +2323,7 @@ fn tui_context_document(
     if !transcript_text.trim().is_empty() {
         blocks.push(RenderBlock::PrimaryText(transcript_text));
     }
-    blocks.extend(
-        current_turn_document
-            .blocks
-            .iter()
-            .filter(|block| !matches!(block, RenderBlock::PrimaryText(_)))
-            .cloned(),
-    );
+    blocks.extend(current_turn_document.blocks.iter().cloned());
     if blocks.is_empty() {
         current_turn_document.clone()
     } else {
@@ -2272,6 +2338,8 @@ fn tui_content_screen(
     let context_document = tui_context_document(app_state, document);
     let mut screen = build_tui_screen(&context_document);
     screen.prompt.clear();
+    prepend_tui_startup_card(app_state, &mut screen);
+    place_activity_below_startup_card(&mut screen);
     screen
 }
 
@@ -3259,11 +3327,42 @@ fn tui_terminal_program_is_ide(value: &str) -> bool {
 }
 
 fn tui_detect_ide_terminal() -> bool {
-    std::env::var("TERM_PROGRAM")
-        .ok()
-        .map(|value| tui_terminal_program_is_ide(&value))
+    tui_terminal_context_is_ide(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some(),
+    )
+}
+
+fn tui_should_enable_keyboard_enhancements() -> bool {
+    tui_should_enable_keyboard_enhancements_for(
+        std::env::var("MORGO_TUI_KEYBOARD_ENHANCEMENTS")
+            .ok()
+            .as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some(),
+    )
+}
+
+fn tui_should_enable_keyboard_enhancements_for(
+    override_value: Option<&str>,
+    term_program: Option<&str>,
+    vscode_ipc_hook_present: bool,
+) -> bool {
+    match override_value {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
+        },
+        None => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
+    }
+}
+
+fn tui_terminal_context_is_ide(term_program: Option<&str>, vscode_ipc_hook_present: bool) -> bool {
+    term_program
+        .map(tui_terminal_program_is_ide)
         .unwrap_or(false)
-        || std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some()
+        || vscode_ipc_hook_present
 }
 
 fn tui_compute_wheel_step(
@@ -3334,9 +3433,9 @@ mod tui_output_tests {
         render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
         selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
         tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up, tui_startup_face,
-        tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
-        tui_terminal_program_is_ide,
+        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
+        tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
+        tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
@@ -3732,7 +3831,7 @@ mod tui_output_tests {
 
         assert!(rendered.contains("older user message"));
         assert!(rendered.contains("older assistant reply"));
-        assert!(!rendered.contains("latest only"));
+        assert!(rendered.contains("latest only"));
     }
 
     #[test]
@@ -3800,12 +3899,14 @@ mod tui_output_tests {
         let document = crate::interaction::cli::renderer::render_turn_document(
             &crate::interaction::cli::repl::CliTurnOutput {
                 primary_text: String::new(),
-                events: vec![crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
-                    crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
-                        tool_name: "Read".into(),
-                        input: r#"{"file_path":"/tmp/renderer.rs"}"#.into(),
-                    },
-                )],
+                events: vec![
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Read".into(),
+                            input: r#"{"file_path":"/tmp/renderer.rs"}"#.into(),
+                        },
+                    ),
+                ],
             },
         );
 
@@ -3826,8 +3927,13 @@ mod tui_output_tests {
         assert!(rendered.contains("[Activity]"), "{rendered}");
         assert!(rendered.contains("READ renderer.rs"), "{rendered}");
         assert!(rendered.contains("> older user message"), "{rendered}");
-        assert!(rendered.contains("older assistant reply"), "{rendered}");
-        assert!(!rendered.contains(">_ Morgo"), "{rendered}");
+        let startup_pos = rendered.find(">_ Morgo").expect("startup card");
+        let activity_pos = rendered.find("[Activity]").expect("activity");
+        let user_pos = rendered
+            .find("> older user message")
+            .expect("user transcript");
+        assert!(startup_pos < activity_pos, "{rendered}");
+        assert!(activity_pos < user_pos, "{rendered}");
     }
 
     #[test]
@@ -4111,6 +4217,39 @@ mod tui_output_tests {
         assert!(tui_terminal_program_is_ide("Google Antigravity"));
         assert!(tui_terminal_program_is_ide("Trae"));
         assert!(!tui_terminal_program_is_ide("Apple_Terminal"));
+    }
+
+    #[test]
+    fn tui_keyboard_enhancements_default_off_in_ide_terminals() {
+        assert!(tui_should_enable_keyboard_enhancements_for(
+            None,
+            Some("Apple_Terminal"),
+            false
+        ));
+        assert!(!tui_should_enable_keyboard_enhancements_for(
+            None,
+            Some("vscode"),
+            false
+        ));
+        assert!(!tui_should_enable_keyboard_enhancements_for(
+            None,
+            Some("Apple_Terminal"),
+            true
+        ));
+    }
+
+    #[test]
+    fn tui_keyboard_enhancements_can_be_forced_or_disabled_explicitly() {
+        assert!(tui_should_enable_keyboard_enhancements_for(
+            Some("1"),
+            Some("vscode"),
+            true
+        ));
+        assert!(!tui_should_enable_keyboard_enhancements_for(
+            Some("0"),
+            Some("Apple_Terminal"),
+            false
+        ));
     }
 
     #[test]

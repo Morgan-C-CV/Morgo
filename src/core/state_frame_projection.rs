@@ -1826,9 +1826,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2051,9 +2051,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2121,9 +2121,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2190,9 +2190,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2287,9 +2287,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2346,9 +2346,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        },
+
+                    ..Default::default()
+                },
                 BossPlanStep {
                     id: 1,
                     description: "audit".into(),
@@ -2374,9 +2374,9 @@ mod tests {
                     executor_b_stage_memory: None,
                     review_task_id: None,
                     tool_execution_records: Vec::new(),
-                
-            ..Default::default()
-        },
+
+                    ..Default::default()
+                },
             ],
             accepted_by_user: true,
             auto_sequence: false,
@@ -2779,9 +2779,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2842,9 +2842,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -2964,9 +2964,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -3013,9 +3013,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,
@@ -3072,9 +3072,9 @@ mod tests {
                 executor_b_stage_memory: None,
                 review_task_id: None,
                 tool_execution_records: Vec::new(),
-            
-            ..Default::default()
-        }],
+
+                ..Default::default()
+            }],
             accepted_by_user: true,
             auto_sequence: false,
             session_snapshot: None,

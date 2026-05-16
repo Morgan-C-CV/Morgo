@@ -17,8 +17,7 @@ use rust_agent::hook::registry::{
 use rust_agent::interaction::cli::renderer::{
     RenderDocument, TuiStatusContext, build_tui_loading_screen, build_tui_screen,
     build_tui_screen_with_context, latest_task_next_action, render_document_output,
-    render_document_tui_output,
-    render_tui_screen_output, render_turn_document, render_turn_output,
+    render_document_tui_output, render_tui_screen_output, render_turn_document, render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{
     CliDisplayEvent, CliRuntimeEvent, CliTurnOutput, handle_normalized_input_streaming,
@@ -1492,9 +1491,15 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         screen.footer
     );
     assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
-    assert_eq!(live_screen.footer.first().map(String::as_str), Some("cwd: /tmp/project"));
+    assert_eq!(
+        live_screen.footer.first().map(String::as_str),
+        Some("cwd: /tmp/project")
+    );
     assert!(
-        live_screen.footer.iter().any(|line| line == "mode: default")
+        live_screen
+            .footer
+            .iter()
+            .any(|line| line == "mode: default")
             && live_screen
                 .footer
                 .iter()
@@ -1761,7 +1766,10 @@ fn cli_tui_latest_task_next_action_wins_over_pending_approval_fallback() {
     };
 
     let document = render_turn_document(&turn);
-    assert_eq!(latest_task_next_action(&document).as_deref(), Some("latest action"));
+    assert_eq!(
+        latest_task_next_action(&document).as_deref(),
+        Some("latest action")
+    );
 }
 
 #[test]
@@ -1777,9 +1785,15 @@ fn cli_tui_status_context_omits_next_action_when_no_task_or_approval_exists() {
         },
     );
 
-    assert!(screen.footer.iter().all(|line| !line.starts_with("next action:")));
     assert!(
-        screen.footer
+        screen
+            .footer
+            .iter()
+            .all(|line| !line.starts_with("next action:"))
+    );
+    assert!(
+        screen
+            .footer
             .iter()
             .all(|line| !line.starts_with("pending approval:"))
     );
