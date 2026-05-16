@@ -2532,10 +2532,10 @@ fn tui_layout_metrics(
     TuiLayoutMetrics {
         content_height,
         separator_row,
-        status_row: separator_row.saturating_add(1),
-        model_row: separator_row.saturating_add(2),
-        gap_row: separator_row.saturating_add(3),
-        input_row: separator_row.saturating_add(4),
+        input_row: separator_row.saturating_add(1),
+        gap_row: separator_row.saturating_add(5),
+        status_row: separator_row.saturating_add(6),
+        model_row: separator_row.saturating_add(7),
         suggestion_row: separator_row.saturating_add(8),
         suggestion_height,
     }
@@ -3287,17 +3287,6 @@ fn render_fixed_tui_layout(
         metrics.separator_row,
         render_tui_bottom_panel_separator(width)
     ));
-    frame.push_str(&format!(
-        "\x1b[{};1H\x1b[2K{}",
-        metrics.status_row,
-        render_tui_bottom_panel_meta_line(&strip_ansi_text(&status_line), width)
-    ));
-    frame.push_str(&format!(
-        "\x1b[{};1H\x1b[2K{}",
-        metrics.model_row,
-        render_tui_bottom_panel_meta_line(&strip_ansi_text(&model_cwd_line), width)
-    ));
-    frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
     for row_offset in 0..4 {
         let row = metrics.input_row.saturating_add(row_offset).min(height);
         let line = viewport
@@ -3314,6 +3303,17 @@ fn render_fixed_tui_layout(
             render_tui_input_text_line(prefix, &line, &padding, input_palette)
         ));
     }
+    frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.status_row,
+        render_tui_bottom_panel_meta_line(&strip_ansi_text(&status_line), width)
+    ));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.model_row,
+        render_tui_bottom_panel_meta_line(&strip_ansi_text(&model_cwd_line), width)
+    ));
     for (index, line) in suggestion_lines.iter().enumerate() {
         let row = metrics.suggestion_row.saturating_add(index).min(height);
         frame.push_str(&format!("\x1b[{};1H\x1b[2K{}", row, line));
@@ -3752,7 +3752,7 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_status_lines_render_above_input_box() {
+    fn tui_status_lines_render_below_input_box() {
         let app_state = test_app_state();
         let screen = crate::interaction::cli::renderer::TuiScreen {
             main: vec!["body".into()],
@@ -3780,8 +3780,8 @@ mod tui_output_tests {
             .expect("model and cwd line should render");
         let input_pos = rendered.find(">").expect("input prompt should render");
 
+        assert!(input_pos < status_pos);
         assert!(status_pos < model_pos);
-        assert!(model_pos < input_pos);
     }
 
     #[test]
