@@ -2121,7 +2121,7 @@ fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInpu
 fn tui_input_palette_for_light_mode(light_mode: bool) -> TuiInputPalette {
     if light_mode {
         TuiInputPalette {
-            background_code: "48;5;252",
+            background_code: "48;2;228;228;228",
             text_code: "30",
         }
     } else {
@@ -3738,7 +3738,7 @@ mod tui_output_tests {
         assert_eq!(
             light,
             super::TuiInputPalette {
-                background_code: "48;5;252",
+                background_code: "48;2;228;228;228",
                 text_code: "30",
             }
         );
@@ -3953,9 +3953,9 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;5;252;30m"));
+        assert!(rendered.contains("\x1b[48;2;228;228;228;30m"));
         assert!(rendered.contains("\x1b[1;36m>"));
-        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;228;228;228;30m older user message"));
     }
 
     #[test]
@@ -3966,8 +3966,8 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;5;252;30m"));
-        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;228;228;228;30m"));
+        assert!(rendered.contains("\x1b[48;2;228;228;228;30m older user message"));
     }
 
     #[test]
