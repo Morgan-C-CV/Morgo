@@ -310,6 +310,29 @@ impl TuiRawModeGuard {
     }
 }
 
+fn log_tui_runtime_issue(kind: &str, detail: &str) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let log_dir = cwd.join(".rust-agent").join("logs");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let path = log_dir.join("tui-runtime.log");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let line = format!("{timestamp} kind={kind} detail={detail}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 impl Drop for TuiRawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
@@ -5521,10 +5544,26 @@ impl RuntimeBootstrap {
             } else {
                 Duration::from_secs(60)
             };
-            if !poll(refresh_interval)? {
+            let has_event = match poll(refresh_interval) {
+                Ok(has_event) => has_event,
+                Err(error) => {
+                    log_tui_runtime_issue("event_poll_error", &error.to_string());
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            if !has_event {
                 continue;
             }
-            match read()? {
+            let event = match read() {
+                Ok(event) => event,
+                Err(error) => {
+                    log_tui_runtime_issue("event_read_error", &error.to_string());
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            match event {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
                         continue;
@@ -5578,12 +5617,27 @@ impl RuntimeBootstrap {
                                 }
                                 let session_id =
                                     picker.sessions[picker.selected].session_id.0.clone();
-                                let resumed_id =
-                                    self.switch_to_session_id(&mut app_state, engine, &session_id)?;
-                                current_document = render_turn_document(&CliTurnOutput {
-                                    primary_text: format!("Resumed session {resumed_id}."),
-                                    events: vec![],
-                                });
+                                match self.switch_to_session_id(&mut app_state, engine, &session_id)
+                                {
+                                    Ok(resumed_id) => {
+                                        current_document = render_turn_document(&CliTurnOutput {
+                                            primary_text: format!("Resumed session {resumed_id}."),
+                                            events: vec![],
+                                        });
+                                    }
+                                    Err(error) => {
+                                        log_tui_runtime_issue(
+                                            "resume_picker_error",
+                                            &error.to_string(),
+                                        );
+                                        current_document = render_turn_document(&CliTurnOutput {
+                                            primary_text: format!(
+                                                "Could not resume session {session_id}: {error}"
+                                            ),
+                                            events: vec![],
+                                        });
+                                    }
+                                }
                                 resume_picker = None;
                                 active_turn_started_at = None;
                                 last_turn_duration = None;
@@ -5661,13 +5715,13 @@ impl RuntimeBootstrap {
                             }
 
                             let dispatch = if is_resume_picker_command {
-                                CliDispatchOutcome {
+                                Ok(CliDispatchOutcome {
                                     output: CliTurnOutput {
                                         primary_text: String::new(),
                                         events: vec![],
                                     },
                                     system_trap: Some(SystemTrapAction::OpenResumePicker),
-                                }
+                                })
                             } else {
                                 self.handle_tui_input_with_loading(
                                     router,
@@ -5710,32 +5764,87 @@ impl RuntimeBootstrap {
                                         );
                                     },
                                 )
-                                .await?
+                                .await
                             };
-                            match dispatch.system_trap.clone() {
-                                Some(SystemTrapAction::NewSession) => {
-                                    let new_session_id =
-                                        self.create_new_session(&mut app_state, engine)?;
+                            let dispatch = match dispatch {
+                                Ok(dispatch) => dispatch,
+                                Err(error) => {
+                                    log_tui_runtime_issue(
+                                        "turn_dispatch_error",
+                                        &error.to_string(),
+                                    );
                                     current_document = render_turn_document(&CliTurnOutput {
                                         primary_text: format!(
-                                            "Started new session {new_session_id}."
+                                            "Request failed without closing the TUI: {error}"
                                         ),
                                         events: vec![],
                                     });
+                                    last_turn_duration = active_turn_started_at
+                                        .map(|started_at| started_at.elapsed());
+                                    active_turn_started_at = None;
+                                    continue;
+                                }
+                            };
+                            match dispatch.system_trap.clone() {
+                                Some(SystemTrapAction::NewSession) => {
+                                    match self.create_new_session(&mut app_state, engine) {
+                                        Ok(new_session_id) => {
+                                            current_document =
+                                                render_turn_document(&CliTurnOutput {
+                                                    primary_text: format!(
+                                                        "Started new session {new_session_id}."
+                                                    ),
+                                                    events: vec![],
+                                                });
+                                        }
+                                        Err(error) => {
+                                            log_tui_runtime_issue(
+                                                "new_session_error",
+                                                &error.to_string(),
+                                            );
+                                            current_document =
+                                                render_turn_document(&CliTurnOutput {
+                                                    primary_text: format!(
+                                                        "Could not start a new session: {error}"
+                                                    ),
+                                                    events: vec![],
+                                                });
+                                        }
+                                    }
                                 }
                                 Some(SystemTrapAction::OpenResumePicker) => {
                                     resume_picker = Some(self.open_resume_picker(&app_state));
                                 }
                                 Some(SystemTrapAction::ResumeSession(session_id)) => {
-                                    let resumed_id = self.switch_to_session_id(
+                                    match self.switch_to_session_id(
                                         &mut app_state,
                                         engine,
                                         &session_id,
-                                    )?;
-                                    current_document = render_turn_document(&CliTurnOutput {
-                                        primary_text: format!("Resumed session {resumed_id}."),
-                                        events: vec![],
-                                    });
+                                    ) {
+                                        Ok(resumed_id) => {
+                                            current_document =
+                                                render_turn_document(&CliTurnOutput {
+                                                    primary_text: format!(
+                                                        "Resumed session {resumed_id}."
+                                                    ),
+                                                    events: vec![],
+                                                });
+                                        }
+                                        Err(error) => {
+                                            log_tui_runtime_issue(
+                                                "resume_session_error",
+                                                &error.to_string(),
+                                            );
+                                            current_document = render_turn_document(
+                                                &CliTurnOutput {
+                                                    primary_text: format!(
+                                                        "Could not resume session {session_id}: {error}"
+                                                    ),
+                                                    events: vec![],
+                                                },
+                                            );
+                                        }
+                                    }
                                 }
                                 Some(SystemTrapAction::RequireReboot) => {
                                     current_document = render_turn_document(&CliTurnOutput {
