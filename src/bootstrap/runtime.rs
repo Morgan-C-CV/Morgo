@@ -3351,7 +3351,7 @@ fn render_fixed_tui_layout(
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K{}",
         metrics.model_row,
-        render_tui_bottom_panel_meta_line(&strip_ansi_text(&model_cwd_line), width)
+        render_tui_bottom_panel_meta_line(&model_cwd_line, width)
     ));
     for (index, line) in suggestion_lines.iter().enumerate() {
         let row = metrics.suggestion_row.saturating_add(index).min(height);
@@ -3830,6 +3830,33 @@ mod tui_output_tests {
         let rendered = format_tui_model_and_cwd(&app_state);
 
         assert!(rendered.contains("\u{1b}[38;5;208m"));
+        assert!(rendered.contains("\u{1b}[2;92m"));
+    }
+
+    #[test]
+    fn tui_model_line_colors_survive_fixed_layout_rendering() {
+        let app_state = test_app_state_with_model_level(Some(ModelLevel::Medium));
+        let screen = crate::interaction::cli::renderer::TuiScreen {
+            main: vec!["body".into()],
+            panels: vec![],
+            prompt: vec![],
+            footer: vec![],
+        };
+
+        let rendered = render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            None,
+            0,
+            usize::MAX,
+            TuiTurnStatus::Idle,
+            0,
+            &TuiSelectionState::default(),
+        );
+
+        assert!(rendered.contains("\u{1b}[32m"));
         assert!(rendered.contains("\u{1b}[2;92m"));
     }
 
