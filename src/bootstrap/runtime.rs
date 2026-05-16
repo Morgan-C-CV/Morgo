@@ -311,19 +311,43 @@ impl TuiRawModeGuard {
 }
 
 fn log_tui_runtime_issue(kind: &str, detail: &str) {
-    let Ok(cwd) = std::env::current_dir() else {
-        return;
-    };
-    let log_dir = cwd.join(".rust-agent").join("logs");
-    if std::fs::create_dir_all(&log_dir).is_err() {
-        return;
-    }
-    let path = log_dir.join("tui-runtime.log");
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
-    let line = format!("{timestamp} kind={kind} detail={detail}\n");
+    let pid = std::process::id();
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("<cwd unavailable: {error}>"));
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("<exe unavailable: {error}>"));
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let line = format!(
+        "{timestamp} pid={pid} kind={kind} cwd={cwd} exe={exe} term_program={term_program} detail={detail}\n"
+    );
+
+    for log_dir in tui_runtime_log_dirs() {
+        write_tui_runtime_log_line(&log_dir, &line);
+    }
+}
+
+fn tui_runtime_log_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(".rust-agent").join("logs"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".morgo").join("logs"));
+    }
+    dirs
+}
+
+fn write_tui_runtime_log_line(log_dir: &std::path::Path, line: &str) {
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let path = log_dir.join("tui-runtime.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -331,6 +355,34 @@ fn log_tui_runtime_issue(kind: &str, detail: &str) {
     {
         let _ = file.write_all(line.as_bytes());
     }
+}
+
+fn install_tui_panic_hook_once() {
+    static TUI_PANIC_HOOK: OnceLock<()> = OnceLock::new();
+    TUI_PANIC_HOOK.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                })
+                .unwrap_or_else(|| "<unknown>".into());
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".into());
+            log_tui_runtime_issue("panic", &format!("{location}: {payload}"));
+            previous(info);
+        }));
+    });
 }
 
 impl Drop for TuiRawModeGuard {
@@ -5440,6 +5492,8 @@ impl RuntimeBootstrap {
         engine: &mut QueryEngine,
         app_state: &AppState,
     ) -> anyhow::Result<()> {
+        install_tui_panic_hook_once();
+        log_tui_runtime_issue("tui_start", "entering interactive TUI");
         let _raw_mode = TuiRawModeGuard::activate()?;
         let mut app_state = app_state.clone();
         let mut current_document = render_turn_document(&CliTurnOutput {
@@ -6172,6 +6226,7 @@ impl RuntimeBootstrap {
             }
         }
 
+        log_tui_runtime_issue("tui_exit", "interactive TUI loop returned");
         Ok(())
     }
 
