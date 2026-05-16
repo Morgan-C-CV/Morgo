@@ -546,13 +546,13 @@ fn render_edit_activity_block(
     let headline = format!(
         "{} {} ({} {})",
         style_activity_action("EDITED"),
-        display_activity_path(path),
+        display_path,
         style_activity_added_count(new_count),
         style_activity_removed_count(old_count),
     );
 
     let detail_lines = render_edit_diff_lines(path, &old_text, &new_text);
-    Some((headline.replace(&display_activity_path(path), &display_path), detail_lines))
+    Some((headline, detail_lines))
 }
 
 fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<String> {

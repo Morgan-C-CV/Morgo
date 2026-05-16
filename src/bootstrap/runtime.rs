@@ -2023,6 +2023,48 @@ fn prepend_tui_startup_card(
     screen.main = main;
 }
 
+fn place_activity_below_startup_card(screen: &mut crate::interaction::cli::renderer::TuiScreen) {
+    let Some(activity_index) = screen.panels.iter().position(|panel| panel.title == "Activity")
+    else {
+        return;
+    };
+    let activity_panel = screen.panels.remove(activity_index);
+    if activity_panel.lines.is_empty() {
+        return;
+    }
+
+    let activity_lines = crate::interaction::cli::renderer::render_tui_screen_output(
+        &crate::interaction::cli::renderer::TuiScreen {
+            main: vec![],
+            panels: vec![activity_panel],
+            prompt: vec![],
+            footer: vec![],
+        },
+    )
+    .lines()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    if activity_lines.is_empty() {
+        return;
+    }
+
+    let insert_at = build_tui_startup_card_len().min(screen.main.len());
+    let mut new_main = Vec::with_capacity(screen.main.len() + activity_lines.len() + 1);
+    new_main.extend(screen.main.iter().take(insert_at).cloned());
+    new_main.push(String::new());
+    new_main.extend(activity_lines);
+    if screen.main.get(insert_at).is_some_and(|line| !line.is_empty()) {
+        new_main.push(String::new());
+    }
+    new_main.extend(screen.main.iter().skip(insert_at).cloned());
+    screen.main = new_main;
+}
+
+fn build_tui_startup_card_len() -> usize {
+    9
+}
+
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
     let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
     let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
@@ -2271,8 +2313,16 @@ fn tui_content_screen(
 ) -> crate::interaction::cli::renderer::TuiScreen {
     let context_document = tui_context_document(app_state, document);
     let mut screen = build_tui_screen(&context_document);
+    if screen
+        .panels
+        .iter()
+        .any(|panel| panel.title == "Activity" && !panel.lines.is_empty())
+    {
+        screen.main.clear();
+    }
     screen.prompt.clear();
     prepend_tui_startup_card(app_state, &mut screen);
+    place_activity_below_startup_card(&mut screen);
     screen
 }
 
@@ -3777,6 +3827,58 @@ mod tui_output_tests {
         assert!(rendered.contains("> older user message"));
         assert!(!rendered.contains("User:"));
         assert!(rendered.contains("older assistant reply"));
+    }
+
+    #[test]
+    fn tui_content_screen_places_activity_below_startup_card() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("older user message"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("older assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+        let document = crate::interaction::cli::renderer::render_turn_document(
+            &crate::interaction::cli::repl::CliTurnOutput {
+                primary_text: String::new(),
+                events: vec![crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                    crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                        tool_name: "Read".into(),
+                        input: r#"{"file_path":"/tmp/renderer.rs"}"#.into(),
+                    },
+                )],
+            },
+        );
+
+        let screen = super::tui_content_screen(&app_state, &document);
+        let rendered = strip_ansi_for_test(&super::render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            None,
+            0,
+            0,
+            TuiTurnStatus::Idle,
+            0,
+            &TuiSelectionState::default(),
+        ));
+
+        assert!(rendered.contains("[Activity]"), "{rendered}");
+        assert!(rendered.contains("READ renderer.rs"), "{rendered}");
+        let startup_pos = rendered.find(">_ Morgo").expect("startup card");
+        let activity_pos = rendered.find("[Activity]").expect("activity");
+        assert!(startup_pos < activity_pos, "{rendered}");
     }
 
     #[test]
