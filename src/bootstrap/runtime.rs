@@ -1949,17 +1949,34 @@ fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
 }
 
 fn format_tui_model_and_cwd(app_state: &AppState) -> String {
-    let model_label = if let Some(runtime) = app_state.active_model_runtime.as_ref() {
+    let (model_label, model_level) = if let Some(runtime) = app_state.active_model_runtime.as_ref() {
         let snapshot = runtime.snapshot_blocking();
-        match snapshot.active_level {
-            Some(level) => format!("{} {}", snapshot.config.model_id, level.as_str()),
-            None => snapshot.config.model_id,
-        }
+        (
+            snapshot.config.model_id,
+            snapshot.active_level.map(|level| level.as_str()),
+        )
     } else {
-        app_state.active_model_provider_summary.model.clone()
+        (
+            app_state.active_model_provider_summary.model.clone(),
+            None,
+        )
     };
     let cwd_label = shorten_home_path(&app_state.current_working_directory());
-    colorize_ansi(&format!("{model_label} · {cwd_label}"), "2;37")
+    format!(
+        "{} · {}",
+        colorize_ansi(&model_label, model_level_color_code(model_level)),
+        colorize_ansi(&cwd_label, "2;92")
+    )
+}
+
+fn model_level_color_code(level: Option<&str>) -> &'static str {
+    match level {
+        Some("xhigh") => "38;5;208",
+        Some("high") => "33",
+        Some("medium") => "32",
+        Some("low") => "38;5;99",
+        _ => "2;37",
+    }
 }
 
 fn shorten_home_path(path: &std::path::Path) -> String {
@@ -2532,11 +2549,11 @@ fn tui_layout_metrics(
     TuiLayoutMetrics {
         content_height,
         separator_row,
-        input_row: separator_row.saturating_add(1),
-        gap_row: separator_row.saturating_add(5),
-        status_row: separator_row.saturating_add(6),
-        model_row: separator_row.saturating_add(7),
-        suggestion_row: separator_row.saturating_add(8),
+        status_row: separator_row.saturating_add(1),
+        input_row: separator_row.saturating_add(2),
+        gap_row: separator_row.saturating_add(6),
+        model_row: separator_row.saturating_add(6),
+        suggestion_row: separator_row.saturating_add(7),
         suggestion_height,
     }
 }
@@ -3287,6 +3304,11 @@ fn render_fixed_tui_layout(
         metrics.separator_row,
         render_tui_bottom_panel_separator(width)
     ));
+    frame.push_str(&format!(
+        "\x1b[{};1H\x1b[2K{}",
+        metrics.status_row,
+        render_tui_bottom_panel_meta_line(&strip_ansi_text(&status_line), width)
+    ));
     for row_offset in 0..4 {
         let row = metrics.input_row.saturating_add(row_offset).min(height);
         let line = viewport
@@ -3304,11 +3326,6 @@ fn render_fixed_tui_layout(
         ));
     }
     frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
-    frame.push_str(&format!(
-        "\x1b[{};1H\x1b[2K{}",
-        metrics.status_row,
-        render_tui_bottom_panel_meta_line(&strip_ansi_text(&status_line), width)
-    ));
     frame.push_str(&format!(
         "\x1b[{};1H\x1b[2K{}",
         metrics.model_row,
@@ -3517,13 +3534,14 @@ fn normalize_tui_newlines(text: &str) -> String {
 #[cfg(test)]
 mod tui_output_tests {
     use super::{
-        TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState, TuiTurnStatus,
-        backspace_input_char, begin_selection, build_tui_rendered_content, delete_input_char,
-        heuristic_tui_suggestions, insert_input_char, insert_input_text, normalize_tui_newlines,
-        normalize_tui_pasted_text, osc52_copy_sequence, render_command_suggestion_line,
-        render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
-        selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
-        tui_context_document, tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
+        ModelLevel, TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState,
+        TuiTurnStatus, backspace_input_char, begin_selection, build_tui_rendered_content,
+        delete_input_char, format_tui_model_and_cwd, heuristic_tui_suggestions,
+        insert_input_char, insert_input_text, normalize_tui_newlines, normalize_tui_pasted_text,
+        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
+        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
+        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_context_document,
+        tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
         tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
         tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
         tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
@@ -3752,7 +3770,7 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_status_lines_render_below_input_box() {
+    fn tui_status_line_renders_above_input_box_and_model_line_below() {
         let app_state = test_app_state();
         let screen = crate::interaction::cli::renderer::TuiScreen {
             main: vec!["body".into()],
@@ -3780,8 +3798,17 @@ mod tui_output_tests {
             .expect("model and cwd line should render");
         let input_pos = rendered.find(">").expect("input prompt should render");
 
-        assert!(input_pos < status_pos);
-        assert!(status_pos < model_pos);
+        assert!(status_pos < input_pos);
+        assert!(input_pos < model_pos);
+    }
+
+    #[test]
+    fn tui_model_line_uses_level_specific_colors() {
+        let app_state = test_app_state_with_model_level(Some(ModelLevel::Xhigh));
+        let rendered = format_tui_model_and_cwd(&app_state);
+
+        assert!(rendered.contains("\u{1b}[38;5;208m"));
+        assert!(rendered.contains("\u{1b}[2;92m"));
     }
 
     #[test]
@@ -4496,6 +4523,51 @@ mod tui_output_tests {
             boss_coordinator: None,
             remote_actor_store: None,
         }
+    }
+
+    fn test_app_state_with_model_level(level: Option<ModelLevel>) -> AppState {
+        let mut app_state = test_app_state();
+        app_state.active_model_runtime = Some(crate::state::active_model_runtime::ActiveModelRuntime::new(
+            crate::state::active_model_runtime::ActiveModelRuntimeSnapshot {
+                config: crate::service::api::client::ModelProviderConfig {
+                    provider_id: "provider".into(),
+                    protocol: crate::service::api::client::ProviderProtocol::OpenAICompatible,
+                    compatibility_profile:
+                        crate::service::api::client::ProviderCompatibilityProfileKind::OpenAICompatible,
+                    base_url: "https://example.com".into(),
+                    chat_completions_path: "/v1/chat/completions".into(),
+                    model_id: "combo-model".into(),
+                    auth_strategy: crate::service::api::client::ProviderAuthStrategy::BearerApiKey,
+                    api_key: None,
+                    api_key_env: None,
+                    timeout: crate::service::api::client::ProviderTimeout {
+                        request_timeout_ms: 1000,
+                        stream_timeout_ms: 1000,
+                    },
+                    retry_policy: crate::service::api::retry::RetryPolicy::default(),
+                    pricing: crate::service::api::client::ModelPricing::default(),
+                    proxy_url: None,
+                    no_proxy: None,
+                    ca_bundle_path: None,
+                    max_tokens_param: None,
+                    prompt_cache_key: None,
+                    prompt_cache_retention: None,
+                },
+                client: crate::service::api::client::ModelProviderClient::default(),
+                active_profile_name: Some("combo-model".into()),
+                active_level: level,
+                source: ActiveModelProfileSource::BootstrapDefault,
+                summary: crate::state::app_state::ActiveModelProviderSummary {
+                    provider_id: "provider".into(),
+                    protocol: "openai".into(),
+                    compatibility_profile: "openai".into(),
+                    base_url_host: "example.com".into(),
+                    model: "combo-model".into(),
+                    auth_status: "set".into(),
+                },
+            },
+        ));
+        app_state
     }
 
     #[test]
