@@ -279,7 +279,8 @@ prepare_dirs() {
   mkdir -p \
     "$out_dir/tasks" \
     "$out_dir/configs" \
-    "$out_dir/reports"
+    "$out_dir/reports" \
+    "$out_dir/reports/memory"
 }
 
 mode_sequence_for_plan() {
@@ -549,6 +550,7 @@ run_one() {
   local sample_file
   local log_file
   local api_log_file
+  local memory_report_file
 
   src_mode="$(source_mode_for_label "$mode")"
   boss_policy="$(boss_policy_for_label "$mode")"
@@ -562,11 +564,13 @@ run_one() {
   sample_file="$out_dir/samples/${usecase}-${mode}.jsonl"
   log_file="$out_dir/logs/${usecase}-${mode}-run${run_id}.log"
   api_log_file="$out_dir/api_logs/${usecase}-${mode}-run${run_id}.jsonl"
+  memory_report_file="$out_dir/reports/memory/${usecase}-${mode}-run${run_id}.tsv"
 
   echo "=== START $usecase $mode run$run_id $(date '+%F %T') ==="
   (
     export RUST_AGENT_CONFIG_ROOT="$config_root"
     export RUST_AGENT_API_CALL_LOG="$api_log_file"
+    export RUST_AGENT_MEMORY_REPORT_FILE="$memory_report_file"
     cmd=(
       "$BIN_PATH"
       --lism-policy "$boss_policy"
@@ -596,6 +600,57 @@ run_one() {
   echo "=== END $usecase $mode run$run_id $(date '+%F %T') ==="
 }
 
+process_tree_pids() {
+  local root_pid="$1"
+  local all_pids=("$root_pid")
+  local frontier=("$root_pid")
+  local next=()
+  local parent_pid
+  local child_pid
+
+  while [ "${#frontier[@]}" -gt 0 ]; do
+    next=()
+    for parent_pid in "${frontier[@]}"; do
+      while IFS= read -r child_pid; do
+        [ -n "$child_pid" ] || continue
+        all_pids+=("$child_pid")
+        next+=("$child_pid")
+      done < <(pgrep -P "$parent_pid" 2>/dev/null || true)
+    done
+    frontier=("${next[@]}")
+  done
+
+  printf '%s\n' "${all_pids[@]}"
+}
+
+sample_process_tree_rss_kb() {
+  local root_pid="$1"
+  local rss_kb=0
+  local pid
+  local value
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    value="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -n "$value" ]; then
+      rss_kb=$((rss_kb + value))
+    fi
+  done < <(process_tree_pids "$root_pid")
+
+  printf '%s\n' "$rss_kb"
+}
+
+write_memory_sample() {
+  local report_file="$1"
+  local root_pid="$2"
+  local started_seconds="$3"
+  local elapsed=$((SECONDS - started_seconds))
+  local rss_kb
+
+  rss_kb="$(sample_process_tree_rss_kb "$root_pid")"
+  printf '%s\t%s\n' "$elapsed" "$rss_kb" >>"$report_file"
+}
+
 run_with_program_timeout() {
   local timeout_secs="$1"
   shift
@@ -612,9 +667,20 @@ run_with_program_timeout() {
   "$@" &
   local child_pid="$!"
   local deadline=$((SECONDS + timeout_secs))
+  local memory_report_file="${RUST_AGENT_MEMORY_REPORT_FILE:-}"
+  local memory_started_seconds="$SECONDS"
+
+  if [ -n "$memory_report_file" ]; then
+    mkdir -p "$(dirname "$memory_report_file")"
+    printf 'elapsed_seconds\trss_kb\n' >"$memory_report_file"
+    write_memory_sample "$memory_report_file" "$child_pid" "$memory_started_seconds"
+  fi
 
   while kill -0 "$child_pid" 2>/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
+      if [ -n "$memory_report_file" ]; then
+        write_memory_sample "$memory_report_file" "$child_pid" "$memory_started_seconds"
+      fi
       echo "program timeout after ${timeout_secs}s; terminating pid $child_pid" >&2
       kill "$child_pid" 2>/dev/null || true
       sleep 2
@@ -625,7 +691,14 @@ run_with_program_timeout() {
       return 124
     fi
     sleep 1
+    if [ -n "$memory_report_file" ]; then
+      write_memory_sample "$memory_report_file" "$child_pid" "$memory_started_seconds"
+    fi
   done
+
+  if [ -n "$memory_report_file" ]; then
+    write_memory_sample "$memory_report_file" "$child_pid" "$memory_started_seconds"
+  fi
 
   set +e
   wait "$child_pid"
@@ -648,6 +721,7 @@ from pathlib import Path
 out_dir = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
 samples_dir = out_dir / "samples"
+memory_dir = out_dir / "reports" / "memory"
 
 def load_unique(path: Path):
     records = {}
@@ -675,6 +749,52 @@ for path in sorted(samples_dir.glob("*.jsonl")):
 
 def avg(records, field):
     return sum(record.get(field, 0) for record in records) / len(records) if records else 0.0
+
+def load_memory_stats(path: Path):
+    if not path.exists():
+        return None
+    values = []
+    for raw in path.read_text(encoding="utf-8").splitlines()[1:]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split("\t")
+        if len(parts) != 2:
+            continue
+        try:
+            rss_kb = int(parts[1])
+        except ValueError:
+            continue
+        if rss_kb > 0:
+            values.append(rss_kb)
+    if not values:
+        return None
+    return {
+        "min_kb": min(values),
+        "max_kb": max(values),
+        "avg_kb": sum(values) / len(values),
+        "samples": len(values),
+    }
+
+def fmt_mb(kb):
+    return "{:.1f} MB".format(kb / 1024)
+
+memory_stats = {}
+if memory_dir.exists():
+    for path in sorted(memory_dir.glob("*.tsv")):
+        stem = path.stem
+        matched = None
+        for mode in ("all_off", "boss_on_only", "all_on"):
+            marker = f"-{mode}-run"
+            if marker in stem:
+                usecase, run_id = stem.split(marker, 1)
+                matched = (usecase, mode, run_id)
+                break
+        if not matched:
+            continue
+        stats = load_memory_stats(path)
+        if stats:
+            memory_stats[matched] = stats
 
 lines = []
 lines.append("# Boss LisM Matrix Summary")
@@ -715,6 +835,41 @@ for usecase in sorted(grouped):
         )
 
 lines.append("")
+lines.append("## Memory Pressure Report")
+lines.append("")
+lines.append("| use case | mode | runs sampled | lowest memory | highest memory | average memory | samples |")
+lines.append("|---|---|---:|---:|---:|---:|---:|")
+
+for usecase in sorted(grouped):
+    for mode in ("all_off", "boss_on_only", "all_on"):
+        records = grouped[usecase].get(mode)
+        if not records:
+            continue
+        mode_stats = []
+        for script_run_id, record in enumerate(records, start=1):
+            stats = memory_stats.get((usecase, mode, str(script_run_id)))
+            if stats:
+                mode_stats.append(stats)
+        if not mode_stats:
+            lines.append(f"| `{usecase}` | `{mode}` | 0 | n/a | n/a | n/a | 0 |")
+            continue
+        min_kb = min(stats["min_kb"] for stats in mode_stats)
+        max_kb = max(stats["max_kb"] for stats in mode_stats)
+        sample_count = sum(stats["samples"] for stats in mode_stats)
+        weighted_avg_kb = sum(stats["avg_kb"] * stats["samples"] for stats in mode_stats) / sample_count
+        lines.append(
+            "| `{}` | `{}` | {} | {} | {} | {} | {} |".format(
+                usecase,
+                mode,
+                len(mode_stats),
+                fmt_mb(min_kb),
+                fmt_mb(max_kb),
+                fmt_mb(weighted_avg_kb),
+                sample_count,
+            )
+        )
+
+lines.append("")
 lines.append("## Run Details")
 lines.append("")
 
@@ -726,10 +881,19 @@ for usecase in sorted(grouped):
         if not records:
             continue
         lines.append(f"- `{mode}`")
-        for record in records:
+        for script_run_id, record in enumerate(records, start=1):
+            run_id = str(record.get("run_id"))
+            stats = memory_stats.get((usecase, mode, str(script_run_id)))
+            memory_detail = " memory_min=`n/a` memory_max=`n/a` memory_avg=`n/a`"
+            if stats:
+                memory_detail = " memory_min=`{}` memory_max=`{}` memory_avg=`{}`".format(
+                    fmt_mb(stats["min_kb"]),
+                    fmt_mb(stats["max_kb"]),
+                    fmt_mb(stats["avg_kb"]),
+                )
             lines.append(
-                "  - run_id=`{}` outcome=`{}` cost={} input={} uncached={} output={} hydration={} tool_dispatch={} ref_writes={} missing_refs={} context_tier=`{}` typed_path_signal=`{}` fallback_tier=`{}`".format(
-                    record.get("run_id"),
+                "  - run_id=`{}` outcome=`{}` cost={} input={} uncached={} output={} hydration={} tool_dispatch={} ref_writes={} missing_refs={} context_tier=`{}` typed_path_signal=`{}` fallback_tier=`{}`{}".format(
+                    run_id,
                     record.get("outcome"),
                     record.get("cost_micros_usd", 0),
                     record.get("total_input_tokens", 0),
@@ -742,6 +906,7 @@ for usecase in sorted(grouped):
                     record.get("context_tier"),
                     record.get("typed_path_signal"),
                     record.get("fallback_tier"),
+                    memory_detail,
                 )
             )
     lines.append("")
