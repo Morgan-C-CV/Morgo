@@ -206,8 +206,13 @@ fn panel_priority(kind: Option<PanelKind>) -> u8 {
 
 fn build_render_document(view: &SurfaceView) -> RenderDocument {
     let mut blocks = Vec::new();
-    if !view.primary_text.is_empty() {
-        blocks.push(RenderBlock::PrimaryText(view.primary_text.clone()));
+    let primary_text = if view.primary_text.is_empty() {
+        streaming_delta_text(&view.items)
+    } else {
+        view.primary_text.clone()
+    };
+    if !primary_text.is_empty() {
+        blocks.push(RenderBlock::PrimaryText(primary_text));
     }
     if let Some(activity_panel) = build_tool_activity_panel(&view.items) {
         blocks.push(RenderBlock::Panel(activity_panel));
@@ -218,6 +223,17 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         }
     }
     RenderDocument { blocks }
+}
+
+fn streaming_delta_text(items: &[SurfaceItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            SurfaceItem::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
@@ -1082,9 +1098,9 @@ mod tests {
     }
 
     #[test]
-    fn tui_output_omits_streaming_delta_noise() {
+    fn tui_output_renders_streaming_delta_text_without_legacy_noise() {
         let turn = CliTurnOutput {
-            primary_text: "final answer".into(),
+            primary_text: String::new(),
             events: vec![
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
                     text: "morg".into(),
@@ -1094,12 +1110,27 @@ mod tests {
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
-        assert!(rendered.contains("final answer"));
+        assert!(rendered.contains("morgo"));
         assert!(!rendered.contains("[delta]"));
-        assert!(!rendered.contains("  morg"));
-        assert!(!rendered.contains("  o"));
         assert!(!rendered.contains("[Prompt]"));
         assert!(!rendered.contains("[Footer]"));
+    }
+
+    #[test]
+    fn tui_final_text_supersedes_streaming_delta_text() {
+        let turn = CliTurnOutput {
+            primary_text: "final answer".into(),
+            events: vec![CliDisplayEvent::RuntimeEvent(
+                CliRuntimeEvent::AssistantDelta {
+                    text: "partial".into(),
+                },
+            )],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("final answer"));
+        assert!(!rendered.contains("partial"));
+        assert!(!rendered.contains("[delta]"));
     }
 
     #[test]

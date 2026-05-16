@@ -2319,12 +2319,32 @@ fn tui_context_document(
     if !transcript_text.trim().is_empty() {
         blocks.push(RenderBlock::PrimaryText(transcript_text));
     }
-    blocks.extend(current_turn_document.blocks.iter().cloned());
+    let current_blocks = current_turn_document
+        .blocks
+        .iter()
+        .filter(|block| !render_block_duplicates_transcript_tail(block, &blocks))
+        .cloned()
+        .collect::<Vec<_>>();
+    blocks.extend(current_blocks);
     if blocks.is_empty() {
         current_turn_document.clone()
     } else {
         RenderDocument { blocks }
     }
+}
+
+fn render_block_duplicates_transcript_tail(
+    block: &RenderBlock,
+    existing_blocks: &[RenderBlock],
+) -> bool {
+    let RenderBlock::PrimaryText(text) = block else {
+        return false;
+    };
+    let Some(RenderBlock::PrimaryText(transcript_text)) = existing_blocks.last() else {
+        return false;
+    };
+    let text = text.trim();
+    !text.is_empty() && transcript_text.trim_end().ends_with(text)
 }
 
 fn tui_content_screen(
@@ -3828,6 +3848,39 @@ mod tui_output_tests {
         assert!(rendered.contains("older user message"));
         assert!(rendered.contains("older assistant reply"));
         assert!(rendered.contains("latest only"));
+    }
+
+    #[test]
+    fn tui_context_document_skips_current_turn_when_already_at_transcript_tail() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("current user message"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("current assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+        let current_turn = crate::interaction::cli::renderer::RenderDocument {
+            blocks: vec![crate::interaction::cli::renderer::RenderBlock::PrimaryText(
+                "current assistant reply".into(),
+            )],
+        };
+
+        let context_document = tui_context_document(&app_state, &current_turn);
+        let rendered = strip_ansi_for_test(
+            &crate::interaction::cli::renderer::render_document_tui_output(&context_document),
+        );
+
+        assert_eq!(rendered.matches("current assistant reply").count(), 1);
     }
 
     #[test]
@@ -5623,7 +5676,8 @@ impl RuntimeBootstrap {
                                     line,
                                     |snapshot| {
                                         let next_document = render_turn_document(snapshot);
-                                        if next_document != current_document {
+                                        let document_changed = next_document != current_document;
+                                        if document_changed {
                                             current_document = next_document;
                                             if follow_content_tail {
                                                 content_scroll_top = usize::MAX;
@@ -5637,23 +5691,23 @@ impl RuntimeBootstrap {
                                                 content_scroll_top =
                                                     content_scroll_top.min(max_scroll_top);
                                             }
-                                            self.print_tui_interactive_frame(
-                                                &app_state,
-                                                &current_document,
-                                                "",
-                                                &[],
-                                                None,
-                                                0,
-                                                0,
-                                                TuiTurnStatus::Working(
-                                                    active_turn_started_at
-                                                        .map(|instant| instant.elapsed())
-                                                        .unwrap_or_default(),
-                                                ),
-                                                0,
-                                                &selection,
-                                            );
                                         }
+                                        self.print_tui_interactive_frame(
+                                            &app_state,
+                                            &current_document,
+                                            "",
+                                            &[],
+                                            None,
+                                            0,
+                                            0,
+                                            TuiTurnStatus::Working(
+                                                active_turn_started_at
+                                                    .map(|instant| instant.elapsed())
+                                                    .unwrap_or_default(),
+                                            ),
+                                            0,
+                                            &selection,
+                                        );
                                     },
                                 )
                                 .await?

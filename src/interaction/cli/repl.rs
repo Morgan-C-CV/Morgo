@@ -8,6 +8,7 @@ use crate::interaction::router::{CommandRouter, RouteExecution};
 use crate::plugins::runtime_state::{build_turn_engine, build_turn_router};
 use crate::state::app_state::AppState;
 use crate::task::types::TaskEvent;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliRuntimeEvent {
@@ -338,10 +339,26 @@ async fn collect_stream_messages(
     input: Message,
     on_update: &mut dyn FnMut(&CliTurnOutput),
 ) -> (Vec<Message>, Vec<CliRuntimeEvent>) {
+    const STREAM_UPDATE_HEARTBEAT: Duration = Duration::from_millis(250);
+
     let mut receiver = engine.stream_turn(input).await;
+    let mut heartbeat = tokio::time::interval(STREAM_UPDATE_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await;
+
     let mut messages = Vec::new();
     let mut runtime_events = Vec::new();
-    while let Some(event) = receiver.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = receiver.recv() => event,
+            _ = heartbeat.tick() => {
+                emit_stream_update(&messages, &runtime_events, on_update);
+                continue;
+            }
+        };
+        let Some(event) = event else {
+            break;
+        };
         match event {
             EngineEvent::MessageCommitted(message) => messages.push(message),
             EngineEvent::AssistantDelta(delta) => {
@@ -475,16 +492,24 @@ async fn collect_stream_messages(
                 });
             }
         }
-        on_update(&CliTurnOutput {
-            primary_text: collect_message_content(&messages),
-            events: runtime_events
-                .iter()
-                .cloned()
-                .map(CliDisplayEvent::RuntimeEvent)
-                .collect(),
-        });
+        emit_stream_update(&messages, &runtime_events, on_update);
     }
     (messages, runtime_events)
+}
+
+fn emit_stream_update(
+    messages: &[Message],
+    runtime_events: &[CliRuntimeEvent],
+    on_update: &mut dyn FnMut(&CliTurnOutput),
+) {
+    on_update(&CliTurnOutput {
+        primary_text: collect_message_content(messages),
+        events: runtime_events
+            .iter()
+            .cloned()
+            .map(CliDisplayEvent::RuntimeEvent)
+            .collect(),
+    });
 }
 
 fn service_failure_code_string(service_failure: Option<&ServiceFailureNotice>) -> Option<String> {
