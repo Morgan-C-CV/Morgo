@@ -265,7 +265,8 @@ fn coordinator_test_app_state() -> AppState {
 fn coordinator_prompt_describes_parallel_research_fan_out_and_fan_in_contract() {
     let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
 
-    assert!(prompt.contains("Parallelize only independent research tasks"));
+    assert!(prompt.contains("Use workers only when the work is independent, bounded"));
+    assert!(prompt.contains("Parallelize only independent worker tasks"));
     assert!(prompt.contains("wait for their task notifications before synthesizing"));
     assert!(prompt.contains("allowed_tools"));
     assert!(prompt.contains("max_turns"));
@@ -273,12 +274,14 @@ fn coordinator_prompt_describes_parallel_research_fan_out_and_fan_in_contract() 
 }
 
 #[test]
-fn coordinator_prompt_requires_verify_after_implement_before_final_answer() {
+fn coordinator_prompt_prioritizes_main_thread_execution_and_selective_verification() {
     let prompt = build_coordinator_system_prompt(&coordinator_test_app_state());
 
-    assert!(prompt.contains("After a non-trivial implement worker completes, dispatch a fresh verify worker before giving the user a final answer."));
+    assert!(prompt.contains("Solve the user's task directly in the main thread by default."));
+    assert!(prompt.contains("Never delegate the immediate critical-path task"));
+    assert!(prompt.contains("Dispatch verify workers when risk is non-trivial"));
     assert!(prompt.contains("The final answer belongs to the coordinator"));
-    assert!(prompt.contains("describe validation status"));
+    assert!(prompt.contains("describe changed files, validation status"));
 }
 
 #[test]
