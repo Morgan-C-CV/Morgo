@@ -2,7 +2,9 @@ use crate::core::message::is_legacy_hidden_primary_line;
 use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
+use crate::state::permission_context::PermissionMode;
 use serde_json::Value;
+use std::path::Path;
 
 const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
@@ -18,6 +20,15 @@ pub struct TuiScreen {
     pub panels: Vec<TuiPanelSection>,
     pub prompt: Vec<String>,
     pub footer: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiStatusContext {
+    pub cwd: String,
+    pub mode: PermissionMode,
+    pub pending_approval: Option<String>,
+    pub next_action: Option<String>,
+    pub active_model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,13 +113,27 @@ pub fn build_tui_loading_screen(request: &str, _frame_index: usize) -> TuiScreen
 }
 
 pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
+    build_tui_screen_internal(document, None)
+}
+
+pub fn build_tui_screen_with_context(
+    document: &RenderDocument,
+    status: &TuiStatusContext,
+) -> TuiScreen {
+    build_tui_screen_internal(document, Some(status))
+}
+
+fn build_tui_screen_internal(
+    document: &RenderDocument,
+    status: Option<&TuiStatusContext>,
+) -> TuiScreen {
     let mut main = Vec::new();
     let mut panel_entries = Vec::new();
 
     for (index, block) in document.blocks.iter().enumerate() {
         match block {
             RenderBlock::PrimaryText(text) => {
-                let visible_lines = visible_tui_primary_lines(text);
+                let visible_lines = visible_tui_primary_lines(text, status.is_some());
                 if !visible_lines.is_empty() {
                     main.extend(visible_lines);
                 }
@@ -154,11 +179,13 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
         main,
         panels,
         prompt: vec!["> ".into()],
-        footer: vec![],
+        footer: status
+            .map(build_tui_status_lines)
+            .unwrap_or_default(),
     }
 }
 
-fn visible_tui_primary_lines(text: &str) -> Vec<String> {
+fn visible_tui_primary_lines(text: &str, rich_tui: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let mut previous_blank = true;
 
@@ -167,7 +194,11 @@ fn visible_tui_primary_lines(text: &str) -> Vec<String> {
             continue;
         }
 
-        let line = raw_line.to_string();
+        let line = if rich_tui {
+            normalize_markdown_line_for_tui(raw_line)
+        } else {
+            raw_line.to_string()
+        };
         let is_blank = line.trim().is_empty();
         if is_blank && previous_blank {
             continue;
@@ -499,18 +530,60 @@ fn decode_tool_preview_text(value: &str) -> String {
 }
 
 fn render_bash_result_lines(content: &str) -> Vec<String> {
-    content
-        .lines()
-        .map(|line| {
-            if let Some(command) = line.strip_prefix("command:") {
-                format!("Command: {}", command.trim())
-            } else if let Some(exit_code) = line.strip_prefix("exit_code:") {
-                format!("Exit code: {}", exit_code.trim())
-            } else {
-                line.to_string()
-            }
-        })
-        .collect()
+    let mut command = None;
+    let mut exit_code = None;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut body = Vec::new();
+    let mut section = None::<&str>;
+
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("command:") {
+            command = Some(format!("Command: {}", value.trim()));
+            section = None;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("exit_code:") {
+            exit_code = Some(format!("Exit code: {}", value.trim()));
+            section = None;
+            continue;
+        }
+        if line.trim() == "stdout:" {
+            section = Some("stdout");
+            continue;
+        }
+        if line.trim() == "stderr:" {
+            section = Some("stderr");
+            continue;
+        }
+
+        match section {
+            Some("stdout") => stdout.push(line.to_string()),
+            Some("stderr") => stderr.push(line.to_string()),
+            _ => body.push(line.to_string()),
+        }
+    }
+
+    let mut lines = Vec::new();
+    if let Some(command) = command {
+        lines.push(command);
+    }
+    if let Some(exit_code) = exit_code {
+        lines.push(exit_code);
+    }
+    if !stdout.is_empty() {
+        lines.push("stdout:".into());
+        lines.extend(compact_tool_body_lines(stdout));
+    }
+    if !stderr.is_empty() {
+        lines.push("stderr:".into());
+        lines.extend(compact_tool_body_lines(stderr));
+    }
+    if !body.is_empty() {
+        lines.push("Output:".into());
+        lines.extend(compact_tool_body_lines(body));
+    }
+    lines
 }
 
 fn render_tool_result_panel(
@@ -532,7 +605,7 @@ fn render_tool_result_panel(
 
 fn render_bash_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
     let mut lines = vec![format!("Tool: {tool_name}")];
-    lines.extend(compact_tool_detail_lines(render_bash_result_lines(detail)));
+    lines.extend(render_bash_result_lines(detail));
     lines
 }
 
@@ -576,7 +649,10 @@ fn render_read_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
     if let Some(truncation) = truncation {
         lines.push(truncation);
     }
-    lines.extend(compact_tool_detail_lines(body_lines));
+    if !body_lines.is_empty() {
+        lines.push("Content:".into());
+        lines.extend(compact_tool_body_lines(body_lines));
+    }
     lines
 }
 
@@ -594,16 +670,16 @@ fn render_edit_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
         lines.push(format!("Replace all: {replace_all}"));
     }
     if let Some(old_text) = fields.get("old_text") {
-        lines.push(format!(
-            "Old text: {}",
-            truncate_for_tui(&decode_tool_preview_text(old_text), MAX_TOOL_DETAIL_WIDTH)
-        ));
+        let preview = truncate_for_tui(&decode_tool_preview_text(old_text), MAX_TOOL_DETAIL_WIDTH);
+        lines.push(format!("Old text: {preview}"));
+        lines.push("Before:".into());
+        lines.push(format!("  - {preview}"));
     }
     if let Some(new_text) = fields.get("new_text") {
-        lines.push(format!(
-            "New text: {}",
-            truncate_for_tui(&decode_tool_preview_text(new_text), MAX_TOOL_DETAIL_WIDTH)
-        ));
+        let preview = truncate_for_tui(&decode_tool_preview_text(new_text), MAX_TOOL_DETAIL_WIDTH);
+        lines.push(format!("New text: {preview}"));
+        lines.push("After:".into());
+        lines.push(format!("  + {preview}"));
     }
 
     lines
@@ -653,6 +729,13 @@ fn compact_tool_detail_lines(lines: Vec<String>) -> Vec<String> {
     truncated
 }
 
+fn compact_tool_body_lines(lines: Vec<String>) -> Vec<String> {
+    compact_tool_detail_lines(lines)
+        .into_iter()
+        .map(|line| format!("  {line}"))
+        .collect()
+}
+
 fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -> RenderPanel {
     RenderPanel {
         kind,
@@ -669,35 +752,6 @@ fn panel_marker(kind: PanelKind) -> &'static str {
         PanelKind::ToolActivity => "activity",
         PanelKind::ToolResult => "tool",
     }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn build_tui_footer(document: &RenderDocument) -> Vec<String> {
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| ".".into());
-
-    let mut footer = vec![format!("Status: cwd: {cwd} | mode: default")];
-
-    if let Some(tool_name) = pending_approval_tool_name(document) {
-        footer.push(format!("Pending approval: {tool_name}"));
-    }
-
-    footer.push("Controls: /exit, exit, or quit leaves the TUI.".into());
-    footer
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn pending_approval_tool_name(document: &RenderDocument) -> Option<String> {
-    document.blocks.iter().find_map(|block| match block {
-        RenderBlock::Panel(panel) if panel.kind == PanelKind::Approval => {
-            panel.lines.iter().find_map(|line| {
-                line.strip_prefix("Tool: ")
-                    .map(|tool| tool.trim().to_string())
-            })
-        }
-        _ => None,
-    })
 }
 
 fn panel_header(title: &str) -> String {
@@ -745,6 +799,10 @@ fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
         }));
         lines.push("╚═════════════════════════════════════════".to_string());
         sections.push(lines.join("\n"));
+    }
+
+    if !screen.footer.is_empty() {
+        sections.push(render_tui_status_section(screen));
     }
 
     if !screen.prompt.is_empty() {
@@ -816,12 +874,6 @@ fn render_tui_boxed_sections(screen: &TuiScreen) -> Vec<String> {
             panel.lines.iter().map(|line| line.as_str()).collect(),
         ));
     }
-    if !screen.footer.is_empty() {
-        sections.push(render_tui_section(
-            "Footer",
-            screen.footer.iter().map(|line| line.as_str()).collect(),
-        ));
-    }
     sections
 }
 
@@ -842,6 +894,84 @@ fn render_tui_section(title: &str, lines: Vec<&str>) -> String {
     let mut section_lines = vec![format!("[{}]", title)];
     section_lines.extend(lines.into_iter().map(|line| format!("  {line}")));
     section_lines.join("\n")
+}
+
+fn render_tui_status_section(screen: &TuiScreen) -> String {
+    let mut lines = vec!["[Status]".to_string()];
+    lines.extend(screen.footer.iter().map(|line| format!("  {line}")));
+    lines.join("\n")
+}
+
+fn build_tui_status_lines(status: &TuiStatusContext) -> Vec<String> {
+    let mut lines = vec![
+        format!("cwd: {}", shorten_home_path(status.cwd.as_str())),
+        format!("mode: {}", permission_mode_label(status.mode)),
+        format!("active model: {}", status.active_model),
+    ];
+
+    if let Some(tool) = status.pending_approval.as_deref().filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("pending approval: {tool}"));
+    }
+    if let Some(action) = status.next_action.as_deref().filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("next action: {action}"));
+    }
+
+    lines
+}
+
+pub fn latest_task_next_action(document: &RenderDocument) -> Option<String> {
+    document.blocks.iter().rev().find_map(|block| match block {
+        RenderBlock::Panel(panel) if panel.kind == PanelKind::TaskSummary => panel.lines.iter().find_map(|line| {
+            line.strip_prefix("[task] next_action:")
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "none")
+                .map(ToOwned::to_owned)
+        }),
+        _ => None,
+    })
+}
+
+fn permission_mode_label(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "accept_edits",
+        PermissionMode::BypassPermissions => "bypass_permissions",
+        PermissionMode::Plan => "plan",
+    }
+}
+
+fn shorten_home_path(path: &str) -> String {
+    let path = Path::new(path);
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_path = std::path::PathBuf::from(home);
+        if let Ok(relative) = path.strip_prefix(&home_path) {
+            if relative.as_os_str().is_empty() {
+                return "~".into();
+            }
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn normalize_markdown_line_for_tui(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") {
+        return format!("{}{}", &line[..line.len() - trimmed.len()], "```");
+    }
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        return format!("## {}", rest.trim());
+    }
+    if let Some(rest) = trimmed.strip_prefix("## ") {
+        return format!("### {}", rest.trim());
+    }
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return format!("• {}", rest.trim());
+    }
+    if let Some(rest) = trimmed.strip_prefix("* ") {
+        return format!("• {}", rest.trim());
+    }
+    line.to_string()
 }
 
 fn title_case_label(label: &str) -> String {

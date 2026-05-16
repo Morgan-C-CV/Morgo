@@ -15,8 +15,10 @@ use rust_agent::hook::registry::{
     HookEvent, HookEventMatcher, HookRegistry, HookRule, HookRuleLayer,
 };
 use rust_agent::interaction::cli::renderer::{
-    build_tui_loading_screen, build_tui_screen, render_document_output, render_document_tui_output,
-    render_turn_document, render_turn_output,
+    RenderDocument, TuiStatusContext, build_tui_loading_screen, build_tui_screen,
+    build_tui_screen_with_context, latest_task_next_action, render_document_output,
+    render_document_tui_output,
+    render_tui_screen_output, render_turn_document, render_turn_output,
 };
 use rust_agent::interaction::cli::repl::{
     CliDisplayEvent, CliRuntimeEvent, CliTurnOutput, handle_normalized_input_streaming,
@@ -1438,6 +1440,16 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
 
     let document = render_turn_document(&turn);
     let screen = build_tui_screen(&document);
+    let live_screen = build_tui_screen_with_context(
+        &document,
+        &TuiStatusContext {
+            cwd: "/tmp/project".into(),
+            mode: PermissionMode::Default,
+            pending_approval: Some("Bash".into()),
+            next_action: Some("wait for approval decision".into()),
+            active_model: "gpt-5".into(),
+        },
+    );
     let rendered = render_document_tui_output(&document);
     let empty_screen = build_tui_screen(&render_turn_document(&CliTurnOutput {
         primary_text: String::new(),
@@ -1480,13 +1492,35 @@ fn cli_tui_screen_keeps_main_panels_and_status_regions_structurally_distinct() {
         screen.footer
     );
     assert_eq!(screen.prompt.first().map(String::as_str), Some("> "));
+    assert_eq!(live_screen.footer.first().map(String::as_str), Some("cwd: /tmp/project"));
+    assert!(
+        live_screen.footer.iter().any(|line| line == "mode: default")
+            && live_screen
+                .footer
+                .iter()
+                .any(|line| line == "active model: gpt-5")
+            && live_screen
+                .footer
+                .iter()
+                .any(|line| line == "pending approval: Bash")
+            && live_screen
+                .footer
+                .iter()
+                .any(|line| line == "next action: wait for approval decision"),
+        "live screen should surface status in a dedicated footer/status region; footer={:?}",
+        live_screen.footer
+    );
 
     assert!(rendered.contains("[Approval required]"), "{rendered}");
     assert!(!rendered.contains("[Activity]"), "{rendered}");
     assert!(rendered.contains("[Tool result]"), "{rendered}");
     assert!(rendered.contains("[Task update]"), "{rendered}");
     assert!(!rendered.contains("[Prompt]"), "{rendered}");
-    assert!(!rendered.contains("[Footer]"), "{rendered}");
+    assert!(!rendered.contains("[Status]"), "{rendered}");
+
+    let live_rendered = render_tui_screen_output(&live_screen);
+    assert!(live_rendered.contains("[Status]"), "{live_rendered}");
+    assert!(!live_rendered.contains("║ [Status]"), "{live_rendered}");
 
     assert!(
         empty_screen.panels.is_empty(),
@@ -1534,7 +1568,16 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         })],
     };
 
-    let screen = build_tui_screen(&render_turn_document(&turn));
+    let screen = build_tui_screen_with_context(
+        &render_turn_document(&turn),
+        &TuiStatusContext {
+            cwd: "/tmp/workspace".into(),
+            mode: PermissionMode::Plan,
+            pending_approval: Some("Bash".into()),
+            next_action: Some("approve or deny Bash".into()),
+            active_model: "default-model".into(),
+        },
+    );
     let footer_text = screen.footer.join("\n");
     let main_text = screen.main.join("\n");
     let panel_titles = screen
@@ -1544,11 +1587,11 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        screen.footer.is_empty(),
-        "streamlined TUI should not render footer/status metadata; footer={:?}",
-        screen.footer
-    );
+    assert!(footer_text.contains("cwd: /tmp/workspace"));
+    assert!(footer_text.contains("mode: plan"));
+    assert!(footer_text.contains("active model: default-model"));
+    assert!(footer_text.contains("pending approval: Bash"));
+    assert!(footer_text.contains("next action: approve or deny Bash"));
 
     assert!(
         !main_text.contains("cwd:")
@@ -1576,7 +1619,8 @@ fn cli_tui_footer_surfaces_cwd_mode_and_pending_approval_state() {
         "footer/status metadata should not leak into panel titles; panel_titles={:?}",
         screen.panels
     );
-    assert!(footer_text.is_empty());
+    let rendered = render_tui_screen_output(&screen);
+    assert!(rendered.contains("[Status]"), "{rendered}");
 }
 
 #[test]
@@ -1665,6 +1709,79 @@ fn cli_tui_loading_approval_and_task_states_keep_distinct_visual_roles() {
     assert!(
         !task_rendered.contains("[Activity]"),
         "task-only screen should not invent tool activity; rendered={task_rendered}"
+    );
+}
+
+#[test]
+fn cli_tui_latest_task_next_action_wins_over_pending_approval_fallback() {
+    let turn = CliTurnOutput {
+        primary_text: String::new(),
+        events: vec![
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-next-action".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-next-action-1".into()),
+                task_id: "task-next-action-1".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                summary: "first".into(),
+                result: "Task running".into(),
+                next_action: "older action".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                step_id: None,
+                output_file: "/tmp/old.log".into(),
+                usage: None,
+            }),
+            CliDisplayEvent::TaskEvent(TaskEvent {
+                owner: TaskOwner {
+                    session_id: "session-next-action".into(),
+                    surface: InteractionSurface::Cli,
+                },
+                target_task_id: Some("task-next-action-2".into()),
+                task_id: "task-next-action-2".into(),
+                task_type: rust_agent::task::types::TaskType::LocalAgent,
+                status: TaskStatus::Running,
+                summary: "second".into(),
+                result: "Task running".into(),
+                next_action: "latest action".into(),
+                worker_role: None,
+                orchestration_group_id: None,
+                phase: None,
+                validation_state: None,
+                step_id: None,
+                output_file: "/tmp/new.log".into(),
+                usage: None,
+            }),
+        ],
+    };
+
+    let document = render_turn_document(&turn);
+    assert_eq!(latest_task_next_action(&document).as_deref(), Some("latest action"));
+}
+
+#[test]
+fn cli_tui_status_context_omits_next_action_when_no_task_or_approval_exists() {
+    let screen = build_tui_screen_with_context(
+        &RenderDocument { blocks: vec![] },
+        &TuiStatusContext {
+            cwd: "/tmp/workspace".into(),
+            mode: PermissionMode::Default,
+            pending_approval: None,
+            next_action: None,
+            active_model: "default-model".into(),
+        },
+    );
+
+    assert!(screen.footer.iter().all(|line| !line.starts_with("next action:")));
+    assert!(
+        screen.footer
+            .iter()
+            .all(|line| !line.starts_with("pending approval:"))
     );
 }
 
