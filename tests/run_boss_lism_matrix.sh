@@ -429,6 +429,105 @@ rewrite_task_for_run() {
     cp "$src" "$dst"
   fi
 
+  case "$usecase" in
+    u6_frontend_agent_site)
+    cat >>"$dst" <<EOF
+
+\`\`\`stage_execution_contract
+{
+  "review_mode": "independent_review",
+  "task_profile": "code_change",
+  "requires_source_evidence": false,
+  "declared_artifacts": [
+    {
+      "ref_id": "artifact:u6:target_dir",
+      "path": "$target",
+      "kind": "directory",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u6:target_dir", "$target", "directory"]
+    },
+    {
+      "ref_id": "artifact:u6:index",
+      "path": "$target/index.html",
+      "kind": "file",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u6:index", "$target/index.html", "file"]
+    },
+    {
+      "ref_id": "artifact:u6:readme",
+      "path": "$target/README.md",
+      "kind": "file",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u6:readme", "$target/README.md", "file"]
+    }
+  ],
+  "required_actions": ["create", "write"],
+  "required_evidence": [
+    "artifact:u6:target_dir",
+    "artifact:u6:index",
+    "artifact:u6:readme",
+    "$target",
+    "$target/index.html",
+    "$target/README.md"
+  ]
+}
+\`\`\`
+EOF
+      ;;
+    u9_lism_jsonl_analyzer_tool)
+    cat >>"$dst" <<EOF
+
+\`\`\`stage_execution_contract
+{
+  "review_mode": "independent_review",
+  "task_profile": "code_change",
+  "requires_source_evidence": false,
+  "declared_artifacts": [
+    {
+      "ref_id": "artifact:u9:target_dir",
+      "path": "$target",
+      "kind": "directory",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u9:target_dir", "$target", "directory"]
+    },
+    {
+      "ref_id": "artifact:u9:analyzer",
+      "path": "$target/analyze.py",
+      "kind": "file",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u9:analyzer", "$target/analyze.py", "file"]
+    },
+    {
+      "ref_id": "artifact:u9:report",
+      "path": "$target/report.md",
+      "kind": "file",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u9:report", "$target/report.md", "file"]
+    }
+  ],
+  "tests": [
+    {
+      "name": "u9_analyzer_runtime",
+      "required_actions": ["run_test"],
+      "required_evidence": ["runtime_test_passed"]
+    }
+  ],
+  "required_actions": ["create", "write", "run_test"],
+  "required_evidence": [
+    "artifact:u9:target_dir",
+    "artifact:u9:analyzer",
+    "artifact:u9:report",
+    "$target",
+    "$target/analyze.py",
+    "$target/report.md",
+    "runtime_test_passed"
+  ]
+}
+\`\`\`
+EOF
+      ;;
+  esac
+
   printf '%s\n' "$dst"
 }
 

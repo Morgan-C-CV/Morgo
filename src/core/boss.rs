@@ -80,21 +80,6 @@ fn current_task_contract_text(text: &str) -> String {
     lines.join("\n")
 }
 
-fn infer_preferred_deployment_mode(objective: &str) -> &'static str {
-    let lowered = objective.to_lowercase();
-    if lowered.contains("静态网站") || lowered.contains("static site") {
-        "static_site"
-    } else if lowered.contains("python") && lowered.contains("demo") {
-        "python_demo"
-    } else if lowered.contains("jsonl") || lowered.contains("analyzer") {
-        "local_tool"
-    } else if lowered.contains("report") || lowered.contains("报告") {
-        "local_report_artifact"
-    } else {
-        "local_artifact"
-    }
-}
-
 #[derive(Debug)]
 pub struct BossCoordinator {
     pub status: Arc<RwLock<BossStatus>>,
@@ -3045,6 +3030,14 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
     acceptance
 }
 
+fn parse_embedded_stage_execution_contract(task: &str) -> Option<StageExecutionContract> {
+    const START_MARKER: &str = "```stage_execution_contract";
+    let (_, tail) = task.split_once(START_MARKER)?;
+    let (_, json_tail) = tail.split_once('\n')?;
+    let (json_text, _) = json_tail.split_once("```")?;
+    serde_json::from_str::<StageExecutionContract>(json_text.trim()).ok()
+}
+
 fn classify_relevant_file_handle(path: &str, line: &str) -> String {
     if line.contains("目标目录") || path.ends_with('/') {
         "target_directory".to_string()
@@ -4280,27 +4273,6 @@ fn collect_target_artifacts(step: &BossPlanStep, target_files: &[String]) -> Vec
                 required_state: "referenced_for_step".to_string(),
                 source: "target_file_handle".to_string(),
             });
-        }
-    }
-    if infer_preferred_deployment_mode(&current_objective) == "static_site" {
-        let directories = artifacts
-            .iter()
-            .filter(|artifact| artifact.kind == "directory")
-            .map(|artifact| artifact.path.trim_end_matches('/').to_string())
-            .filter(|path| !path.trim().is_empty())
-            .collect::<Vec<_>>();
-        for directory in directories {
-            for child_name in ["index.html", "README.md"] {
-                let path = format!("{directory}/{child_name}");
-                if !artifacts.iter().any(|artifact| artifact.path == path) {
-                    artifacts.push(TargetArtifact {
-                        path,
-                        kind: "file".to_string(),
-                        required_state: "exists_non_empty".to_string(),
-                        source: "static_site_child_artifact".to_string(),
-                    });
-                }
-            }
         }
     }
     artifacts
@@ -7057,12 +7029,13 @@ impl BossCoordinator {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let default_stage_execution_contract = StageExecutionContract {
-            review_mode: Some(ReviewMode::IndependentReview),
-            task_profile: Some(TaskProfile::IndependentReview),
-            requires_source_evidence: Some(false),
-            ..StageExecutionContract::default()
-        };
+        let default_stage_execution_contract = parse_embedded_stage_execution_contract(task)
+            .unwrap_or_else(|| StageExecutionContract {
+                review_mode: Some(ReviewMode::IndependentReview),
+                task_profile: Some(TaskProfile::IndependentReview),
+                requires_source_evidence: Some(false),
+                ..StageExecutionContract::default()
+            });
         let plan = BossPlan {
             plan_id: plan_id.clone(),
             task_description: task.to_string(),
@@ -7124,12 +7097,13 @@ impl BossCoordinator {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let default_stage_execution_contract = StageExecutionContract {
-            review_mode: Some(ReviewMode::IndependentReview),
-            task_profile: Some(TaskProfile::IndependentReview),
-            requires_source_evidence: Some(false),
-            ..StageExecutionContract::default()
-        };
+        let default_stage_execution_contract = parse_embedded_stage_execution_contract(task)
+            .unwrap_or_else(|| StageExecutionContract {
+                review_mode: Some(ReviewMode::IndependentReview),
+                task_profile: Some(TaskProfile::IndependentReview),
+                requires_source_evidence: Some(false),
+                ..StageExecutionContract::default()
+            });
         let plan = BossPlan {
             plan_id: plan_id.clone(),
             task_description: task.to_string(),
@@ -8794,12 +8768,18 @@ impl BossCoordinator {
                         Some(&correction),
                     );
                     step.last_review_summary = Some(summary.clone());
+                    let worker_correction_requested = requested_action == "worker_correction";
+                    if worker_correction_requested
+                        && step.attempt_count.saturating_add(1) >= step.retry_budget
+                    {
+                        step.retry_budget = step.attempt_count.saturating_add(2);
+                    }
                     step.attempt_count += 1;
                     if step.attempt_count >= step.retry_budget {
                         step.status = BossPlanStepStatus::Failed;
                     } else {
                         step.status = BossPlanStepStatus::Rejected;
-                        let failed_target = if requested_action == "worker_correction" {
+                        let failed_target = if worker_correction_requested {
                             missing_evidence_repair_target(step, missing_evidence)
                                 .or_else(|| verification_gap_target(step, routed_metadata.as_ref()))
                         } else {
@@ -11816,6 +11796,56 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn parses_embedded_stage_execution_contract_from_fenced_json() {
+        let task = r#"Build the current artifact only.
+
+```stage_execution_contract
+{
+  "review_mode": "independent_review",
+  "task_profile": "code_change",
+  "requires_source_evidence": false,
+  "declared_artifacts": [
+    {
+      "ref_id": "artifact:u9:analyzer",
+      "path": "/tmp/lism-jsonl-analyzer/analyze.py",
+      "kind": "file",
+      "required_actions": ["create", "write"],
+      "required_evidence": ["artifact:u9:analyzer"]
+    }
+  ],
+  "tests": [
+    {
+      "name": "u9_analyzer_runtime",
+      "required_actions": ["run_test"],
+      "required_evidence": ["runtime_test_passed"]
+    }
+  ],
+  "required_actions": ["create", "write", "run_test"],
+  "required_evidence": ["artifact:u9:analyzer", "runtime_test_passed"]
+}
+```
+"#;
+
+        let contract = parse_embedded_stage_execution_contract(task).unwrap();
+
+        assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
+        assert_eq!(contract.task_profile, Some(TaskProfile::CodeChange));
+        assert_eq!(contract.requires_source_evidence, Some(false));
+        assert_eq!(contract.declared_artifacts.len(), 1);
+        assert_eq!(
+            contract.declared_artifacts[0].path,
+            "/tmp/lism-jsonl-analyzer/analyze.py"
+        );
+        assert_eq!(contract.tests.len(), 1);
+        assert!(
+            contract.tests[0]
+                .required_evidence
+                .iter()
+                .any(|item| item == "runtime_test_passed")
+        );
+    }
 
     fn test_app_state_with_tasks(
         task_manager: Arc<TaskManager>,

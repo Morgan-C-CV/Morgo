@@ -301,21 +301,6 @@ fn summarize_list(items: &[String]) -> String {
     }
 }
 
-fn infer_preferred_deployment_mode(objective: &str) -> &'static str {
-    let lowered = objective.to_lowercase();
-    if lowered.contains("静态网站") || lowered.contains("static site") {
-        "static_site"
-    } else if lowered.contains("python") && lowered.contains("demo") {
-        "python_demo"
-    } else if lowered.contains("jsonl") || lowered.contains("analyzer") {
-        "local_tool"
-    } else if lowered.contains("report") || lowered.contains("报告") {
-        "local_report_artifact"
-    } else {
-        "local_artifact"
-    }
-}
-
 fn build_permission_facts(step_id: usize, objective: &str, readonly_analysis: bool) -> Vec<String> {
     if readonly_analysis {
         return Vec::new();
@@ -382,63 +367,6 @@ fn first_declared_target_directory(
                 .map(|(parent, _)| parent.to_string())
                 .unwrap_or(path)
         })
-}
-
-fn push_declared_artifact_contract(
-    declared_artifacts: &mut Vec<DeclaredArtifactContract>,
-    ref_id: String,
-    path: String,
-    kind: String,
-    readonly_analysis: bool,
-) {
-    if declared_artifacts.iter().any(|item| item.path == path) {
-        return;
-    }
-    declared_artifacts.push(DeclaredArtifactContract {
-        ref_id: ref_id.clone(),
-        path: path.clone(),
-        kind: kind.clone(),
-        required_actions: if readonly_analysis {
-            Vec::new()
-        } else {
-            vec!["create".into(), "write".into()]
-        },
-        required_evidence: vec![ref_id, path, kind],
-    });
-}
-
-fn enrich_static_site_directory_artifacts(
-    step: Option<&crate::core::boss_state::BossPlanStep>,
-    declared_artifacts: &mut Vec<DeclaredArtifactContract>,
-    readonly_analysis: bool,
-) {
-    let Some(step) = step else {
-        return;
-    };
-    if infer_preferred_deployment_mode(&current_task_contract_text(step.objective()))
-        != "static_site"
-    {
-        return;
-    }
-    let directories = declared_artifacts
-        .iter()
-        .filter(|artifact| artifact.kind == "directory")
-        .map(|artifact| artifact.path.trim_end_matches('/').to_string())
-        .filter(|path| !path.trim().is_empty())
-        .collect::<Vec<_>>();
-    for (dir_idx, directory) in directories.into_iter().enumerate() {
-        for (child_idx, child_name) in ["index.html", "README.md"].into_iter().enumerate() {
-            let path = format!("{directory}/{child_name}");
-            let ref_id = format!("artifact:step{}:static_site:{dir_idx}:{child_idx}", step.id);
-            push_declared_artifact_contract(
-                declared_artifacts,
-                ref_id,
-                path,
-                "file".into(),
-                readonly_analysis,
-            );
-        }
-    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -647,7 +575,6 @@ fn build_stage_execution_contract(
         }
         declared_artifacts.push(artifact.clone());
     }
-    enrich_static_site_directory_artifacts(step, &mut declared_artifacts, readonly_analysis);
     let st_test_only_mode =
         st_mode_enabled && step_looks_like_development_task(step, &declared_artifacts);
     let review_mode = infer_review_mode(step, readonly_analysis);
@@ -1164,15 +1091,6 @@ fn build_fact_ledger(
             ),
         ));
         facts.push(fact_line(
-            "preferred_deployment_mode",
-            format!(
-                "ref=deploymode:step{} source=objective_inference source_event_id=deploymode:{} freshness=current confidence=0.85 status=active invalidated_by=none supersedes=none conflicts_with=none summary={}",
-                step.id,
-                step.id,
-                infer_preferred_deployment_mode(&current_task_contract_text(step.objective()))
-            ),
-        ));
-        facts.push(fact_line(
             "reject_correction",
             if blind_review {
                 "none recorded"
@@ -1665,7 +1583,8 @@ mod tests {
     use crate::core::boss_state::{BossPlan, BossPlanStep, BossPlanStepStatus, BossStage};
     use crate::core::state_frame::{
         ActorRole, AgentState, ContinuityMode, ReviewMode, StageContinuationContext,
-        StageExecutionContract, StateBudget, StateFrame, TaskProfile, VerificationContract,
+        StageExecutionContract, StateBudget, StateFrame, TaskProfile, TestContract,
+        VerificationContract,
     };
 
     #[test]
@@ -1753,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn project_state_frame_emits_permission_and_deployment_facts_for_artifact_tasks() {
+    fn static_site_entrypoint_must_come_from_explicit_contract_not_objective_prose() {
         let plan = BossPlan {
             plan_id: "plan-1".into(),
             task_description: "build site".into(),
@@ -1782,6 +1701,29 @@ mod tests {
                 last_correction: None,
                 stage_execution_contract: StageExecutionContract {
                     task_profile: Some(TaskProfile::CodeChange),
+                    declared_artifacts: vec![
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:site:dir".into(),
+                            path: "/tmp/demo-site".into(),
+                            kind: "directory".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:site:dir".into()],
+                        },
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:site:index".into(),
+                            path: "/tmp/demo-site/index.html".into(),
+                            kind: "file".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:site:index".into()],
+                        },
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:site:readme".into(),
+                            path: "/tmp/demo-site/README.md".into(),
+                            kind: "file".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:site:readme".into()],
+                        },
+                    ],
                     ..StageExecutionContract::default()
                 },
                 stage_continuation_context: None,
@@ -1795,9 +1737,12 @@ mod tests {
         };
 
         let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
-        assert!(frame.recent_evidence.iter().any(|item| {
-            item.contains("fact: preferred_deployment_mode") && item.contains("summary=static_site")
-        }));
+        assert!(
+            !frame
+                .recent_evidence
+                .iter()
+                .any(|item| item.contains("fact: preferred_deployment_mode"))
+        );
         assert!(
             frame.recent_evidence.iter().any(|item| {
                 item.contains("fact: permission_to_create_and_write:/tmp/demo-site")
@@ -1817,6 +1762,103 @@ mod tests {
         assert_eq!(
             frame.stage_execution_contract.required_actions,
             vec!["create", "write", "verify"]
+        );
+    }
+
+    #[test]
+    fn explicit_tool_contract_projects_analyzer_report_and_runtime_test() {
+        let plan = BossPlan {
+            plan_id: "plan-local-tool".into(),
+            task_description: "build jsonl analyzer".into(),
+            document_spec: String::new(),
+            pseudo_code: String::new(),
+            draft_spec: None,
+            review_feedback: None,
+            revision_notes: None,
+            finalized: false,
+            documentation_feedback: Vec::new(),
+            steps: vec![BossPlanStep {
+                id: 0,
+                description: "jsonl analyzer".into(),
+                objective: Some(
+                    "真实 /boss use case 9：创建一个 JSONL 分析工具。\n\n任务目标：\n- 在目标目录实现一个小工具：\n  - 目标目录：/tmp/lism-jsonl-analyzer\n- 工具输出：\n  - 生成 markdown 报告：/tmp/lism-jsonl-analyzer/report.md\n- 要求：\n  - Python 标准库优先\n  - 需要实际运行一次工具并汇报结果"
+                        .into(),
+                ),
+                acceptance: vec!["tool runs".into()],
+                requires_approval: false,
+                status: BossPlanStepStatus::Running,
+                completed: false,
+                result_diff: None,
+                worker_task_id: None,
+                attempt_count: 0,
+                retry_budget: 3,
+                last_review_summary: None,
+                last_correction: None,
+                stage_execution_contract: StageExecutionContract {
+                    task_profile: Some(TaskProfile::CodeChange),
+                    declared_artifacts: vec![
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:u9:target_dir".into(),
+                            path: "/tmp/lism-jsonl-analyzer".into(),
+                            kind: "directory".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:u9:target_dir".into()],
+                        },
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:u9:analyzer".into(),
+                            path: "/tmp/lism-jsonl-analyzer/analyze.py".into(),
+                            kind: "file".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:u9:analyzer".into()],
+                        },
+                        crate::core::state_frame::DeclaredArtifactContract {
+                            ref_id: "artifact:u9:report".into(),
+                            path: "/tmp/lism-jsonl-analyzer/report.md".into(),
+                            kind: "file".into(),
+                            required_actions: vec!["create".into(), "write".into()],
+                            required_evidence: vec!["artifact:u9:report".into()],
+                        },
+                    ],
+                    tests: vec![TestContract {
+                        name: "u9_analyzer_runtime".into(),
+                        required_actions: vec!["run_test".into()],
+                        required_evidence: vec!["runtime_test_passed".into()],
+                    }],
+                    ..StageExecutionContract::default()
+                },
+                stage_continuation_context: None,
+                executor_b_stage_memory: None,
+                review_task_id: None,
+                tool_execution_records: Vec::new(),
+            }],
+            accepted_by_user: true,
+            auto_sequence: false,
+            session_snapshot: None,
+        };
+
+        let frame = project_state_frame(&plan, BossStage::Execution, Some(0), ActorRole::Worker);
+        let artifact_paths = frame
+            .stage_execution_contract
+            .declared_artifacts
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(artifact_paths.contains(&"/tmp/lism-jsonl-analyzer"));
+        assert!(artifact_paths.contains(&"/tmp/lism-jsonl-analyzer/analyze.py"));
+        assert!(artifact_paths.contains(&"/tmp/lism-jsonl-analyzer/report.md"));
+        assert!(frame.stage_execution_contract.tests.iter().any(|test| {
+            test.name == "u9_analyzer_runtime"
+                && test
+                    .required_evidence
+                    .iter()
+                    .any(|item| item == "runtime_test_passed")
+        }));
+        assert!(
+            frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| action == "run_test")
         );
     }
 

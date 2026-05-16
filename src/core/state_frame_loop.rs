@@ -1472,6 +1472,14 @@ fn runtime_test_passed(frame: &StateFrame) -> bool {
     })
 }
 
+fn runtime_test_contract_enabled(frame: &StateFrame) -> bool {
+    frame.stage_execution_contract.tests.iter().any(|test| {
+        test.required_evidence
+            .iter()
+            .any(|item| item == "runtime_test_passed")
+    })
+}
+
 fn st_automated_test_audit_enabled(frame: &StateFrame) -> bool {
     frame
         .stage_execution_contract
@@ -1676,11 +1684,7 @@ fn recommended_action_for_gap(
     } else if missing_verification_evidence {
         "verify_artifact".into()
     } else if missing_test_evidence {
-        if st_automated_test_audit_enabled(frame) {
-            "run_test".into()
-        } else {
-            "run_verification".into()
-        }
+        "run_test".into()
     } else {
         "none".into()
     }
@@ -1838,6 +1842,9 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
         && !missing_artifact_evidence_refs(frame).is_empty()
     {
         return CompletionEvidenceStatus::MissingArtifactEvidence;
+    }
+    if runtime_test_contract_enabled(frame) && !runtime_test_passed(frame) {
+        return CompletionEvidenceStatus::MissingTestEvidence;
     }
     if completion_contract_requirement(frame, "test_evidence")
         && !missing_test_evidence_refs(frame).is_empty()
@@ -8748,6 +8755,115 @@ mod tests {
         assert_eq!(
             super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
             CompletionEvidenceStatus::MissingArtifactEvidence
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_contract_without_runtime_fact_is_missing_test_evidence() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:script",
+                "artifact:contract:report",
+            ],
+            &["u9_analyzer_runtime"],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/lism-jsonl-analyzer",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:script",
+            "/tmp/lism-jsonl-analyzer/analyze.py",
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:report",
+            "/tmp/lism-jsonl-analyzer/report.md",
+            "file",
+        );
+        for (idx, path) in [
+            "/tmp/lism-jsonl-analyzer/analyze.py",
+            "/tmp/lism-jsonl-analyzer/report.md",
+        ]
+        .iter()
+        .enumerate()
+        {
+            frame.recent_evidence.push(format!(
+                "fact: recent_changes_in_files ref=change:{idx} path={path} source=tool:Write source_event_id=tool-write:{idx} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated {path}"
+            ));
+        }
+
+        let usage = LoopUsage::default();
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &usage),
+            CompletionEvidenceStatus::MissingTestEvidence
+        );
+        let gaps = super::collect_completion_evidence_gaps(&frame);
+        assert!(gaps.iter().any(|gap| {
+            gap.target_ref == "u9_analyzer_runtime" && gap.recommended_action == "run_test"
+        }));
+    }
+
+    #[test]
+    fn explicit_runtime_contract_closes_after_typed_runtime_test_fact() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        push_completion_contract_with_refs(
+            &mut frame,
+            &[
+                "artifact:contract:dir",
+                "artifact:contract:script",
+                "artifact:contract:report",
+            ],
+            &["u9_analyzer_runtime"],
+            &[],
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:dir",
+            "/tmp/lism-jsonl-analyzer",
+            "directory",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:script",
+            "/tmp/lism-jsonl-analyzer/analyze.py",
+            "file",
+        );
+        push_artifact_target_fact(
+            &mut frame,
+            "artifact:contract:report",
+            "/tmp/lism-jsonl-analyzer/report.md",
+            "file",
+        );
+        for (idx, path) in [
+            "/tmp/lism-jsonl-analyzer/analyze.py",
+            "/tmp/lism-jsonl-analyzer/report.md",
+        ]
+        .iter()
+        .enumerate()
+        {
+            frame.recent_evidence.push(format!(
+                "fact: recent_changes_in_files ref=change:{idx} path={path} source=tool:Write source_event_id=tool-write:{idx} freshness=after-runtime confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none summary=updated {path}"
+            ));
+        }
+
+        frame.recent_evidence.push(
+            "fact: test_failures ref=test:u9:runtime name=u9_analyzer_runtime status=passed source=tool:Bash source_event_id=tool-bash:u9 freshness=after-runtime-test confidence=1.00 lineage_status=active invalidated_by=none supersedes=none conflicts_with=none summary=runtime test passed".into(),
+        );
+
+        assert_eq!(
+            super::evaluate_completion_evidence(&frame, &LoopUsage::default()),
+            CompletionEvidenceStatus::Sufficient
         );
     }
 
