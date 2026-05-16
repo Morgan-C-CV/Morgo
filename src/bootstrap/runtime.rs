@@ -2085,14 +2085,10 @@ fn place_activity_below_startup_card(screen: &mut crate::interaction::cli::rende
             .map(|line| format!("  {line}")),
     );
 
-    const STARTUP_CARD_WITH_GAP_LINES: usize = 9;
-    let insert_at = STARTUP_CARD_WITH_GAP_LINES.min(screen.main.len());
-    let mut new_main = Vec::with_capacity(screen.main.len() + activity_lines.len() + 1);
-    new_main.extend(screen.main.iter().take(insert_at).cloned());
-    new_main.extend(activity_lines);
-    new_main.push(String::new());
-    new_main.extend(screen.main.iter().skip(insert_at).cloned());
-    screen.main = new_main;
+    if !screen.main.is_empty() && !screen.main.last().is_some_and(|line| line.is_empty()) {
+        screen.main.push(String::new());
+    }
+    screen.main.extend(activity_lines);
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
@@ -3590,7 +3586,7 @@ mod tui_output_tests {
             &suggestions,
             Some(11),
             8,
-            0,
+            usize::MAX,
             TuiTurnStatus::Idle,
             2,
             &TuiSelectionState::default(),
@@ -3677,7 +3673,7 @@ mod tui_output_tests {
             &[],
             None,
             0,
-            0,
+            usize::MAX,
             TuiTurnStatus::Worked(Duration::from_secs(157)),
             0,
             &TuiSelectionState::default(),
@@ -3918,7 +3914,7 @@ mod tui_output_tests {
             &[],
             None,
             0,
-            0,
+            usize::MAX,
             TuiTurnStatus::Idle,
             0,
             &TuiSelectionState::default(),
@@ -3928,12 +3924,12 @@ mod tui_output_tests {
         assert!(rendered.contains("READ renderer.rs"), "{rendered}");
         assert!(rendered.contains("> older user message"), "{rendered}");
         let startup_pos = rendered.find(">_ Morgo").expect("startup card");
-        let activity_pos = rendered.find("[Activity]").expect("activity");
         let user_pos = rendered
             .find("> older user message")
             .expect("user transcript");
+        let activity_pos = rendered.find("[Activity]").expect("activity");
         assert!(startup_pos < activity_pos, "{rendered}");
-        assert!(activity_pos < user_pos, "{rendered}");
+        assert!(user_pos < activity_pos, "{rendered}");
     }
 
     #[test]

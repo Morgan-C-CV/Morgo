@@ -935,13 +935,13 @@ fn render_document_to_tui_text(document: &RenderDocument) -> String {
 fn render_tui_screen_to_text(screen: &TuiScreen) -> String {
     let mut sections = Vec::new();
 
+    if !screen.main.is_empty() {
+        sections.push(screen.main.join("\n"));
+    }
+
     let activity_sections = render_activity_sections(screen);
     if !activity_sections.is_empty() {
         sections.extend(activity_sections);
-    }
-
-    if !screen.main.is_empty() {
-        sections.push(screen.main.join("\n"));
     }
 
     let boxed_sections = render_tui_boxed_sections(screen);
@@ -1192,11 +1192,11 @@ mod tests {
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
-        let activity_pos = rendered.find("[Activity]").expect("activity section");
         let answer_pos = rendered
             .find("### 方案 B：直接给你一个“改造优先级清单”")
             .expect("final answer text");
-        assert!(activity_pos < answer_pos, "{rendered}");
+        let activity_pos = rendered.find("[Activity]").expect("activity section");
+        assert!(answer_pos < activity_pos, "{rendered}");
         assert_eq!(rendered.matches("[Activity]").count(), 1, "{rendered}");
         assert!(rendered.contains(
             "SEARCH createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr in src"
