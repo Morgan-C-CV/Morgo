@@ -52,7 +52,7 @@ impl Default for QueryParams {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
-            max_turns: Some(4),
+            max_turns: Some(100),
             max_output_tokens_recovery_limit: 3,
             max_budget_input_tokens: None,
             initial_max_output_tokens: None,
@@ -69,6 +69,9 @@ pub struct LoopState {
     pub max_output_tokens_override: Option<u64>,
     pub pending_tool_use_summary: Option<String>,
     pub final_report_attempted: bool,
+    pub max_turn_report_attempted: bool,
+    pub max_turn_terminal_count: Option<usize>,
+    pub last_stop_reason: Option<StopReason>,
     pub prompt_only_output_contract_active: bool,
     pub prompt_only_discovery_locked: bool,
     pub stop_hook_active: bool,
@@ -86,6 +89,9 @@ impl LoopState {
             max_output_tokens_override: params.initial_max_output_tokens,
             pending_tool_use_summary: None,
             final_report_attempted: false,
+            max_turn_report_attempted: false,
+            max_turn_terminal_count: None,
+            last_stop_reason: None,
             prompt_only_output_contract_active: false,
             prompt_only_discovery_locked: false,
             stop_hook_active: false,
@@ -278,7 +284,7 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
             }
         });
 
-        if let Some(result) = check_turn_limits(context, &state, &params, &events) {
+        if let Some(result) = check_turn_limits(context, &mut state, &params, &mut events) {
             turn_token.cancel();
             let _ = hb_handle.await;
             return result;
@@ -318,18 +324,13 @@ pub(crate) async fn run_query_loop_with_params_and_sink(
             turn_token.cancel();
             let _ = hb_handle.await;
             let events = EventCollector::from_events(events.take(), sink.clone());
-            return if state.final_report_attempted && !is_user_facing_final_report(&state.messages)
-            {
-                query_result_with_synthetic_final_report(state, events)
-            } else {
-                finalize_turn(
-                    context,
-                    state,
-                    QueryLoopState::Completed,
-                    Terminal::Completed,
-                    events,
-                )
-            };
+            return finalize_turn(
+                context,
+                state,
+                QueryLoopState::Completed,
+                Terminal::Completed,
+                events,
+            );
         }
 
         let turn_events = events.take();
@@ -394,27 +395,35 @@ enum NormalTurnFinalization {
 }
 
 fn check_turn_limits(
-    context: &QueryContext,
-    state: &LoopState,
+    _context: &QueryContext,
+    state: &mut LoopState,
     params: &QueryParams,
-    events: &EventCollector,
+    events: &mut EventCollector,
 ) -> Option<QueryLoopResult> {
     if let Some(max_turns) = params.max_turns {
         if state.turn_count >= max_turns {
-            let events = EventCollector::from_events(events.clone_events(), events.sink_clone());
-            if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
-                return Some(query_result_with_synthetic_final_report(
-                    state.clone(),
-                    events,
-                ));
+            if !state.max_turn_report_attempted {
+                let count = state.turn_count;
+                state.max_turn_report_attempted = true;
+                state.max_turn_terminal_count = Some(count);
+                state.final_report_attempted = true;
+                state.transition = Some(Continue::FinalUserReport);
+                let report_request = max_turn_report_continuation_message(count, max_turns);
+                state.messages.push(report_request);
+                events.push(EngineEvent::Transition(Continue::FinalUserReport));
+                return None;
             }
-            let count = state.turn_count;
-            return Some(finalize_turn(
-                context,
+            if state.transition == Some(Continue::FinalUserReport) {
+                return None;
+            }
+            let count = state
+                .max_turn_terminal_count
+                .unwrap_or(state.turn_count);
+            let events = EventCollector::from_events(events.clone_events(), events.sink_clone());
+            return Some(query_result_with_synthetic_final_report_terminal(
                 state.clone(),
-                QueryLoopState::Failed,
-                Terminal::MaxTurns { count },
                 events,
+                Terminal::MaxTurns { count },
             ));
         }
     }
@@ -452,8 +461,8 @@ fn prepare_turn(
                 code: None,
                 service_failure: None,
             });
-            if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
-                return Err(query_result_with_synthetic_final_report(
+            if state.final_report_attempted && !is_result_successful(state) {
+                return Err(query_result_with_final_report_validation_error(
                     state.clone(),
                     EventCollector::from_events(events.clone_events(), events.sink_clone()),
                 ));
@@ -491,8 +500,8 @@ fn prepare_turn(
         .compactor
         .plan_auto_compact(prepared.token_estimate, AUTO_COMPACT_INPUT_CHAR_LIMIT)
     {
-        if state.final_report_attempted && !is_user_facing_final_report(&state.messages) {
-            return Err(query_result_with_synthetic_final_report(
+        if state.final_report_attempted && !is_result_successful(state) {
+            return Err(query_result_with_final_report_validation_error(
                 state.clone(),
                 EventCollector::from_events(events.clone_events(), events.sink_clone()),
             ));
@@ -630,13 +639,13 @@ async fn decide_next_turn(
         TurnDecision::Return(loop_state, terminal) => {
             let events = EventCollector::from_events(turn_outcome.events, events.sink_clone());
             if loop_state.final_report_attempted
-                && !is_user_facing_final_report(&loop_state.messages)
+                && !is_result_successful(&loop_state)
                 && !matches!(
                     terminal,
                     Terminal::StopHookPrevented | Terminal::AbortedTools
                 )
             {
-                NextTurnDecision::Return(query_result_with_synthetic_final_report(
+                NextTurnDecision::Return(query_result_with_final_report_validation_error(
                     loop_state, events,
                 ))
             } else {
@@ -871,6 +880,8 @@ async fn consume_model_stream(
         engine_events.push(EngineEvent::MessageCommitted(message.clone()));
         state.messages.push(message);
     }
+
+    state.last_stop_reason = terminal_stop_reason.clone();
 
     match terminal_stop_reason {
         Some(StopReason::EndTurn) => {
@@ -2306,12 +2317,26 @@ fn finalize_normal_turn(
         };
     }
 
-    if context.is_subagent() || is_user_facing_final_report(&state.messages) {
+    if context.is_subagent() {
+        return completed_turn_result(state, events);
+    }
+
+    if state.max_turn_report_attempted {
+        if !is_result_successful(&state) {
+            commit_max_turn_synthetic_report(&mut state, &mut events);
+        }
+        let count = state
+            .max_turn_terminal_count
+            .unwrap_or(state.turn_count);
+        return result_with_terminal(state, events, Terminal::MaxTurns { count });
+    }
+
+    if is_result_successful(&state) {
         return completed_turn_result(state, events);
     }
 
     if state.final_report_attempted {
-        return completed_turn_with_synthetic_final_report(state, events);
+        return final_report_validation_failed_result(state, events);
     }
 
     state.final_report_attempted = true;
@@ -2335,6 +2360,40 @@ fn completed_turn_result(state: LoopState, mut events: EventCollector) -> Normal
     })
 }
 
+fn result_with_terminal(
+    state: LoopState,
+    mut events: EventCollector,
+    terminal: Terminal,
+) -> NormalTurnFinalization {
+    events.push(EngineEvent::Terminal(terminal.clone()));
+    NormalTurnFinalization::Return(QueryLoopResult {
+        state: terminal_state(&terminal),
+        terminal,
+        messages: state.messages,
+        transition: state.transition,
+        events: events.into_events(),
+    })
+}
+
+fn final_report_validation_failed_result(
+    mut state: LoopState,
+    mut events: EventCollector,
+) -> NormalTurnFinalization {
+    let message = Message::assistant(
+        "Execution error: the runtime requested a final user-facing report, but the model did not produce a valid final response.",
+    );
+    events.push(EngineEvent::MessageCommitted(message.clone()));
+    state.messages.push(message);
+    result_with_terminal(
+        state,
+        events,
+        Terminal::ModelError {
+            message: "final report validation failed".into(),
+            code: Some(ServiceFailureCode::ApiStreamTerminal),
+        },
+    )
+}
+
 fn latest_visible_message(messages: &[Message]) -> Option<&Message> {
     messages
         .iter()
@@ -2353,6 +2412,37 @@ fn is_user_facing_final_report(messages: &[Message]) -> bool {
         matches!(message.role, crate::core::message::Role::Assistant)
             && !is_runtime_or_tool_status_message(&message.text())
     })
+}
+
+fn is_result_successful(state: &LoopState) -> bool {
+    if latest_visible_message(&state.messages).is_some_and(|message| {
+        matches!(message.role, crate::core::message::Role::Assistant)
+            && !is_runtime_or_tool_status_message(&message.text())
+    }) {
+        return true;
+    }
+
+    latest_result_message(&state.messages).is_some_and(is_tool_result_user_message)
+}
+
+fn latest_result_message(messages: &[Message]) -> Option<&Message> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::message::Role::Assistant | crate::core::message::Role::User))
+}
+
+fn is_tool_result_user_message(message: &Message) -> bool {
+    if !matches!(message.role, crate::core::message::Role::User) {
+        return false;
+    }
+    let text = message.text();
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && (trimmed.starts_with("tool result for ")
+            || trimmed.starts_with("tool batch result:")
+            || trimmed.starts_with("tool progress for ")
+            || trimmed.contains("verification_result:"))
 }
 
 fn is_runtime_or_tool_status_message(text: &str) -> bool {
@@ -2389,23 +2479,34 @@ fn final_report_continuation_message() -> Message {
     )
 }
 
-fn completed_turn_with_synthetic_final_report(
-    mut state: LoopState,
-    mut events: EventCollector,
-) -> NormalTurnFinalization {
-    commit_synthetic_final_report(&mut state, &mut events);
-    completed_turn_result(state, events)
-}
-
-fn query_result_with_synthetic_final_report(
+fn query_result_with_final_report_validation_error(
     mut state: LoopState,
     mut events: EventCollector,
 ) -> QueryLoopResult {
     commit_synthetic_final_report(&mut state, &mut events);
-    let terminal = Terminal::Completed;
+    let terminal = Terminal::ModelError {
+        message: "final report validation failed".into(),
+        code: Some(ServiceFailureCode::ApiStreamTerminal),
+    };
     events.push(EngineEvent::Terminal(terminal.clone()));
     QueryLoopResult {
-        state: QueryLoopState::Completed,
+        state: terminal_state(&terminal),
+        terminal,
+        messages: state.messages,
+        transition: state.transition,
+        events: events.into_events(),
+    }
+}
+
+fn query_result_with_synthetic_final_report_terminal(
+    mut state: LoopState,
+    mut events: EventCollector,
+    terminal: Terminal,
+) -> QueryLoopResult {
+    commit_max_turn_synthetic_report(&mut state, &mut events);
+    events.push(EngineEvent::Terminal(terminal.clone()));
+    QueryLoopResult {
+        state: terminal_state(&terminal),
         terminal,
         messages: state.messages,
         transition: state.transition,
@@ -2421,8 +2522,20 @@ fn turn_outcome_with_final_report(
     TurnOutcome {
         state: state.clone(),
         events: events.into_events(),
-        decision: TurnDecision::Return(state.clone(), Terminal::Completed),
+        decision: TurnDecision::Return(
+            state.clone(),
+            Terminal::ModelError {
+                message: "final report validation failed".into(),
+                code: Some(ServiceFailureCode::ApiStreamTerminal),
+            },
+        ),
     }
+}
+
+fn max_turn_report_continuation_message(turn_count: usize, max_turns: usize) -> Message {
+    Message::user(format!(
+        "The runtime hit the maximum turn budget ({turn_count}/{max_turns}). Provide one final user-facing report that explains what happened, what work was completed, what remains unfinished, and the next recommended step. Do not call tools."
+    ))
 }
 
 fn commit_synthetic_final_report(state: &mut LoopState, events: &mut EventCollector) {
@@ -2430,6 +2543,19 @@ fn commit_synthetic_final_report(state: &mut LoopState, events: &mut EventCollec
         return;
     }
     let report = Message::assistant(synthesize_terminal_final_report(state));
+    events.push(EngineEvent::MessageCommitted(report.clone()));
+    state.messages.push(report);
+}
+
+fn commit_max_turn_synthetic_report(state: &mut LoopState, events: &mut EventCollector) {
+    if is_user_facing_final_report(&state.messages) {
+        return;
+    }
+    let count = state.max_turn_terminal_count.unwrap_or(state.turn_count);
+    let report = Message::assistant(format!(
+        "Final update: stopped because the maximum turn budget was reached after {count} turns. The last available runtime result was:\n\n{}",
+        synthesize_terminal_final_report(state)
+    ));
     events.push(EngineEvent::MessageCommitted(report.clone()));
     state.messages.push(report);
 }
@@ -2845,7 +2971,7 @@ mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
         classify_pre_stream_failure_code, classify_stream_failure_code, extract_read_target_path,
-        extract_verified_target_from_messages, is_broad_discovery_tool,
+        extract_verified_target_from_messages, is_broad_discovery_tool, is_result_successful,
         is_prompt_only_discovery_gate_record, prompt_only_discovery_gate_outcome,
         prompt_only_output_contract_from_messages, report_detail_or_summary,
         should_discourage_repeated_discovery_search, should_gate_prompt_only_discovery,
@@ -3117,6 +3243,30 @@ mod tests {
         };
 
         assert!(should_discourage_repeated_discovery_search(&report));
+    }
+
+    #[test]
+    fn default_query_turn_budget_is_100() {
+        assert_eq!(QueryParams::default().max_turns, Some(100));
+    }
+
+    #[test]
+    fn result_success_requires_more_than_plain_user_text() {
+        let mut state = LoopState::new(&QueryParams::default());
+        state.messages.push(Message::assistant("working on it"));
+        state.last_stop_reason = Some(crate::service::api::streaming::StopReason::EndTurn);
+        assert!(is_result_successful(&state));
+
+        let mut failed = LoopState::new(&QueryParams::default());
+        failed.messages.push(Message::user("plain note from runtime"));
+        failed.last_stop_reason = Some(crate::service::api::streaming::StopReason::EndTurn);
+        assert!(!is_result_successful(&failed));
+
+        let mut tool_state = LoopState::new(&QueryParams::default());
+        tool_state
+            .messages
+            .push(Message::user("tool result for Read: Read succeeded"));
+        assert!(is_result_successful(&tool_state));
     }
 
     #[test]
