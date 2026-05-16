@@ -5522,6 +5522,13 @@ impl RuntimeBootstrap {
         const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
         loop {
+            if app_state.cancellation_token.is_cancelled() {
+                log_tui_runtime_issue(
+                    "tui_shutdown_observed",
+                    "app cancellation token was cancelled",
+                );
+                break;
+            }
             if pending_exit_gesture
                 .map(|(_, started_at)| started_at.elapsed() > TUI_EXIT_CONFIRM_WINDOW)
                 .unwrap_or(false)
@@ -7185,11 +7192,24 @@ fn spawn_runtime_signal_shutdown(app_state: AppState) {
             use tokio::signal::unix::{SignalKind, signal as unix_signal};
 
             let mut terminate = unix_signal(SignalKind::terminate()).ok();
+            let mut hangup = unix_signal(SignalKind::hangup()).ok();
             tokio::select! {
                 result = signal::ctrl_c() => {
                     if result.is_ok() {
+                        log_tui_runtime_issue("signal", "received ctrl_c");
                         execute_runtime_shutdown(app_state.clone(), "signal.ctrl_c").await;
                     }
+                }
+                _ = async {
+                    match hangup.as_mut() {
+                        Some(stream) => {
+                            stream.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    log_tui_runtime_issue("signal", "received sighup");
+                    execute_runtime_shutdown(app_state.clone(), "signal.sighup").await;
                 }
                 _ = async {
                     match terminate.as_mut() {
@@ -7199,6 +7219,7 @@ fn spawn_runtime_signal_shutdown(app_state: AppState) {
                         None => std::future::pending::<()>().await,
                     }
                 } => {
+                    log_tui_runtime_issue("signal", "received sigterm");
                     execute_runtime_shutdown(app_state.clone(), "signal.sigterm").await;
                 }
             }
