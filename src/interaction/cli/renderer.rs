@@ -993,11 +993,11 @@ fn short_path(path: &str) -> String {
 }
 
 fn style_activity_action(label: &str) -> String {
-    format!("\x1b[1;30m{label}\x1b[0m")
+    format!("\x1b[34m{label}\x1b[0m")
 }
 
 fn style_activity_title(label: &str) -> String {
-    format!("\x1b[1;34m[{label}]\x1b[0m")
+    format!("\x1b[34m[{label}]\x1b[0m")
 }
 
 fn render_block_to_text(block: &RenderBlock) -> String {

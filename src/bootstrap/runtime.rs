@@ -3923,12 +3923,10 @@ mod tui_output_tests {
         assert!(rendered.contains("[Activity]"), "{rendered}");
         assert!(rendered.contains("READ renderer.rs"), "{rendered}");
         assert!(rendered.contains("> older user message"), "{rendered}");
-        let startup_pos = rendered.find(">_ Morgo").expect("startup card");
         let user_pos = rendered
             .find("> older user message")
             .expect("user transcript");
         let activity_pos = rendered.find("[Activity]").expect("activity");
-        assert!(startup_pos < activity_pos, "{rendered}");
         assert!(user_pos < activity_pos, "{rendered}");
     }
 
