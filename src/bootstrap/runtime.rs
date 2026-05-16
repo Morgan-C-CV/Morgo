@@ -49,8 +49,7 @@ use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    RenderBlock, RenderDocument, TuiStatusContext, build_tui_screen,
-    build_tui_screen_with_context, latest_task_next_action, render_document_output,
+    RenderBlock, RenderDocument, build_tui_screen, render_document_output,
     render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{
@@ -2009,7 +2008,7 @@ fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::re
         primary_text: String::new(),
         events: vec![],
     });
-    let mut screen = build_live_tui_screen(app_state, &document);
+    let mut screen = build_tui_screen(&document);
     prepend_tui_startup_card(app_state, &mut screen);
     screen
 }
@@ -2271,42 +2270,10 @@ fn tui_content_screen(
     document: &crate::interaction::cli::renderer::RenderDocument,
 ) -> crate::interaction::cli::renderer::TuiScreen {
     let context_document = tui_context_document(app_state, document);
-    let mut screen = build_live_tui_screen(app_state, &context_document);
+    let mut screen = build_tui_screen(&context_document);
     screen.prompt.clear();
     prepend_tui_startup_card(app_state, &mut screen);
     screen
-}
-
-fn build_live_tui_screen(
-    app_state: &AppState,
-    document: &crate::interaction::cli::renderer::RenderDocument,
-) -> crate::interaction::cli::renderer::TuiScreen {
-    let status = derive_tui_status_context(app_state, document);
-    build_tui_screen_with_context(document, &status)
-}
-
-fn derive_tui_status_context(
-    app_state: &AppState,
-    document: &crate::interaction::cli::renderer::RenderDocument,
-) -> TuiStatusContext {
-    let pending_approval = app_state
-        .permission_context
-        .pending_approval()
-        .map(|pending| pending.tool_name);
-    let next_action = latest_task_next_action(document).or_else(|| {
-        pending_approval
-            .as_ref()
-            .map(|tool| format!("approve or deny {tool}"))
-    });
-    let active_model = tui_startup_model_label(app_state);
-
-    TuiStatusContext {
-        cwd: app_state.current_working_directory().display().to_string(),
-        mode: app_state.permission_context.mode(),
-        pending_approval,
-        next_action,
-        active_model,
-    }
 }
 
 fn tui_resume_picker_screen(
@@ -7369,54 +7336,6 @@ mod tests {
             suggestions
                 .iter()
                 .all(|suggestion| suggestion.submit_on_enter)
-        );
-    }
-
-    #[test]
-    fn live_tui_screen_uses_runtime_status_context() {
-        let app_state = test_app_state();
-        app_state.permission_context.set_pending_approval(Some(PendingApproval {
-            tool_name: "Bash".into(),
-            tool_input: r#"{"command":"cargo test"}"#.into(),
-            message: "approval required".into(),
-            code: Some("policy_escalation".into()),
-            summary: Some("Bash pending approval".into()),
-            detail: None,
-            approval_kind: Some("tool_permission".into()),
-            escalation_reasons: vec!["privileged_system".into()],
-        }));
-
-        let document = crate::interaction::cli::renderer::RenderDocument {
-            blocks: vec![crate::interaction::cli::renderer::RenderBlock::Panel(
-                crate::interaction::cli::renderer::RenderPanel {
-                    kind: crate::interaction::cli::renderer::PanelKind::TaskSummary,
-                    title: "Task update".into(),
-                    lines: vec!["[task] next_action: inspect test results".into()],
-                },
-            )],
-        };
-
-        let screen = super::build_live_tui_screen(&app_state, &document);
-
-        assert!(screen.footer.iter().any(|line| line.starts_with("cwd: ")));
-        assert!(screen.footer.iter().any(|line| line == "mode: default"));
-        assert!(
-            screen
-                .footer
-                .iter()
-                .any(|line| line == "pending approval: Bash")
-        );
-        assert!(
-            screen
-                .footer
-                .iter()
-                .any(|line| line == "next action: inspect test results")
-        );
-        assert!(
-            screen
-                .footer
-                .iter()
-                .any(|line| line == "active model: default-model")
         );
     }
 
