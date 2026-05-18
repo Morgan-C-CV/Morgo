@@ -2604,7 +2604,9 @@ fn tui_context_document(
     app_state: &AppState,
     current_turn_document: &RenderDocument,
 ) -> RenderDocument {
-    let transcript_text = tui_transcript_text(app_state);
+    let current_turn_texts = current_turn_primary_text_candidates(current_turn_document);
+    let transcript_text =
+        trim_current_turn_text_from_transcript(tui_transcript_text(app_state), &current_turn_texts);
     let mut blocks = Vec::new();
     if !transcript_text.trim().is_empty() {
         blocks.push(RenderBlock::PrimaryText(transcript_text));
@@ -2621,6 +2623,47 @@ fn tui_context_document(
     } else {
         RenderDocument { blocks }
     }
+}
+
+fn current_turn_primary_text_candidates(document: &RenderDocument) -> Vec<String> {
+    let text_blocks = document
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderBlock::PrimaryText(text) => Some(text.trim().to_string()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    if !text_blocks.is_empty() {
+        candidates.push(text_blocks.join("\n"));
+        let transcript_spaced = text_blocks.join("\n\n");
+        if candidates.first() != Some(&transcript_spaced) {
+            candidates.push(transcript_spaced);
+        }
+    }
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.len()));
+    candidates
+}
+
+fn trim_current_turn_text_from_transcript(
+    mut transcript_text: String,
+    current_turn_texts: &[String],
+) -> String {
+    let trimmed_transcript = transcript_text.trim_end();
+    let Some(prefix) = current_turn_texts
+        .iter()
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .find_map(|text| trimmed_transcript.strip_suffix(text))
+    else {
+        return transcript_text;
+    };
+
+    transcript_text.truncate(prefix.trim_end().len());
+    transcript_text
 }
 
 fn render_block_duplicates_transcript_tail(
@@ -4384,6 +4427,119 @@ mod tui_output_tests {
             .expect("user transcript");
         let activity_pos = rendered.find("• Explored").expect("activity");
         assert!(user_pos < activity_pos, "{rendered}");
+    }
+
+    #[test]
+    fn tui_content_screen_preserves_current_turn_interleaved_activity_after_history_commit() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("current user prompt"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("我先定位 TUI 计时器和流式输出的实现。"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("我已经定位到流式事件定义。"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+        let document = crate::interaction::cli::renderer::render_turn_document(
+            &crate::interaction::cli::repl::CliTurnOutput {
+                primary_text: [
+                    "我先定位 TUI 计时器和流式输出的实现。",
+                    "我已经定位到流式事件定义。",
+                ]
+                .join("\n"),
+                events: vec![
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::AssistantMessageCommitted {
+                            text: "我先定位 TUI 计时器和流式输出的实现。\n".into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Glob".into(),
+                            input: r#"{"pattern":"**/*"}"#.into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Grep".into(),
+                            input: r#"{"pattern":"stream|Streaming|timer","path":"."}"#.into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::AssistantMessageCommitted {
+                            text: "我已经定位到流式事件定义。\n".into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Read".into(),
+                            input: r#"{"file_path":"src/service/api/streaming.rs"}"#.into(),
+                        },
+                    ),
+                ],
+            },
+        );
+
+        let screen = super::tui_content_screen(&app_state, &document);
+        let rendered = strip_ansi_for_test(&super::render_fixed_tui_layout(
+            &app_state,
+            &screen,
+            "",
+            &[],
+            None,
+            0,
+            usize::MAX,
+            TuiTurnStatus::Idle,
+            0,
+            &TuiSelectionState::default(),
+        ));
+
+        let user_pos = rendered.find("> current user prompt").expect("user prompt");
+        let first_text_pos = rendered
+            .find("我先定位 TUI 计时器和流式输出的实现。")
+            .expect("first assistant text");
+        let first_activity_pos = rendered.find("LIST **/*").expect("first activity");
+        let divider_pos = first_activity_pos
+            + rendered[first_activity_pos..]
+                .find("────────────────")
+                .expect("divider after first activity");
+        let second_text_pos = rendered
+            .find("我已经定位到流式事件定义。")
+            .expect("second assistant text");
+        let second_activity_pos = rendered.find("READ streaming.rs").expect("second activity");
+
+        assert!(user_pos < first_text_pos, "{rendered}");
+        assert!(first_text_pos < first_activity_pos, "{rendered}");
+        assert!(first_activity_pos < divider_pos, "{rendered}");
+        assert!(divider_pos < second_text_pos, "{rendered}");
+        assert!(second_text_pos < second_activity_pos, "{rendered}");
+        assert_eq!(
+            rendered
+                .matches("我先定位 TUI 计时器和流式输出的实现。")
+                .count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("我已经定位到流式事件定义。").count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("• Explored").count(), 2, "{rendered}");
     }
 
     #[test]

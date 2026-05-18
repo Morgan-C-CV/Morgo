@@ -528,6 +528,7 @@ fn emit_stream_update(
         primary_text: collect_message_content(messages),
         events: runtime_events
             .iter()
+            .filter(|event| !matches!(event, CliRuntimeEvent::AssistantMessageCommitted { .. }))
             .cloned()
             .map(CliDisplayEvent::RuntimeEvent)
             .collect(),
@@ -549,8 +550,9 @@ fn collect_message_content(messages: &[Message]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_message_content;
+    use super::{CliRuntimeEvent, collect_message_content, emit_stream_update};
     use crate::core::message::{Message, MessageVisibility};
+    use crate::interaction::cli::repl::CliDisplayEvent;
 
     #[test]
     fn collect_message_content_only_keeps_visible_messages() {
@@ -567,5 +569,33 @@ mod tests {
         ];
 
         assert_eq!(collect_message_content(&messages), "Final answer");
+    }
+
+    #[test]
+    fn stream_update_filters_committed_assistant_text_events() {
+        let messages = vec![Message::assistant("Final answer")];
+        let runtime_events = vec![
+            CliRuntimeEvent::AssistantMessageCommitted {
+                text: "Final answer".into(),
+            },
+            CliRuntimeEvent::ToolCallStarted {
+                tool_name: "Read".into(),
+                input: r#"{"file_path":"renderer.rs"}"#.into(),
+            },
+        ];
+        let mut captured = None;
+
+        emit_stream_update(&messages, &runtime_events, &mut |turn| {
+            captured = Some(turn.clone());
+        });
+
+        let turn = captured.expect("stream update should be emitted");
+        assert_eq!(turn.primary_text, "Final answer");
+        assert_eq!(turn.events.len(), 1);
+        assert!(matches!(
+            &turn.events[0],
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted { tool_name, .. })
+                if tool_name == "Read"
+        ));
     }
 }
