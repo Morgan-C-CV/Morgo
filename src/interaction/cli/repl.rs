@@ -145,10 +145,14 @@ pub async fn handle_cli_input_streaming<F>(
 where
     F: FnMut(&CliTurnOutput),
 {
+    let mut on_update = on_update;
     Ok(
-        handle_cli_input_dispatch_streaming(router, engine, app_state, raw, on_update)
-            .await?
-            .output,
+        handle_cli_input_dispatch_streaming(router, engine, app_state, raw, |turn| {
+            on_update(turn);
+            true
+        })
+        .await?
+        .output,
     )
 }
 
@@ -159,7 +163,7 @@ pub async fn handle_normalized_input(
     input: NormalizedInput,
 ) -> anyhow::Result<CliTurnOutput> {
     Ok(
-        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {})
+        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| true)
             .await?
             .output,
     )
@@ -175,10 +179,14 @@ pub async fn handle_normalized_input_streaming<F>(
 where
     F: FnMut(&CliTurnOutput),
 {
+    let mut on_update = on_update;
     Ok(
-        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, on_update)
-            .await?
-            .output,
+        handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |turn| {
+            on_update(turn);
+            true
+        })
+        .await?
+        .output,
     )
 }
 
@@ -193,7 +201,7 @@ pub async fn handle_cli_input_dispatch(
         app_state.active_session_id.clone(),
         raw,
     );
-    handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| {}).await
+    handle_normalized_input_dispatch_streaming(router, engine, app_state, input, |_| true).await
 }
 
 pub async fn handle_cli_input_dispatch_streaming<F>(
@@ -204,7 +212,7 @@ pub async fn handle_cli_input_dispatch_streaming<F>(
     on_update: F,
 ) -> anyhow::Result<CliDispatchOutcome>
 where
-    F: FnMut(&CliTurnOutput),
+    F: FnMut(&CliTurnOutput) -> bool,
 {
     let input = NormalizedInput::from_session_raw(
         app_state.surface,
@@ -222,7 +230,7 @@ pub async fn handle_normalized_input_dispatch_streaming<F>(
     mut on_update: F,
 ) -> anyhow::Result<CliDispatchOutcome>
 where
-    F: FnMut(&CliTurnOutput),
+    F: FnMut(&CliTurnOutput) -> bool,
 {
     let turn_router;
     let mut turn_engine;
@@ -346,7 +354,7 @@ where
 async fn collect_stream_messages(
     engine: &mut QueryEngine,
     input: Message,
-    on_update: &mut dyn FnMut(&CliTurnOutput),
+    on_update: &mut dyn FnMut(&CliTurnOutput) -> bool,
 ) -> (Vec<Message>, Vec<CliRuntimeEvent>) {
     const STREAM_UPDATE_HEARTBEAT: Duration = Duration::from_millis(250);
 
@@ -362,7 +370,14 @@ async fn collect_stream_messages(
         let event = tokio::select! {
             event = receiver.recv() => event,
             _ = heartbeat.tick() => {
-                emit_stream_update(&messages, &runtime_events, on_update);
+                if !emit_stream_update(&messages, &runtime_events, on_update) {
+                    runtime_events.push(CliRuntimeEvent::Terminal {
+                        kind: "aborted_streaming".into(),
+                        text: "aborted_streaming".into(),
+                    });
+                    let _ = emit_stream_update(&messages, &runtime_events, on_update);
+                    break;
+                }
                 continue;
             }
         };
@@ -514,7 +529,14 @@ async fn collect_stream_messages(
                 });
             }
         }
-        emit_stream_update(&messages, &runtime_events, on_update);
+        if !emit_stream_update(&messages, &runtime_events, on_update) {
+            runtime_events.push(CliRuntimeEvent::Terminal {
+                kind: "aborted_streaming".into(),
+                text: "aborted_streaming".into(),
+            });
+            let _ = emit_stream_update(&messages, &runtime_events, on_update);
+            break;
+        }
     }
     (messages, runtime_events)
 }
@@ -522,8 +544,8 @@ async fn collect_stream_messages(
 fn emit_stream_update(
     messages: &[Message],
     runtime_events: &[CliRuntimeEvent],
-    on_update: &mut dyn FnMut(&CliTurnOutput),
-) {
+    on_update: &mut dyn FnMut(&CliTurnOutput) -> bool,
+) -> bool {
     on_update(&CliTurnOutput {
         primary_text: collect_message_content(messages),
         events: runtime_events
@@ -531,7 +553,7 @@ fn emit_stream_update(
             .cloned()
             .map(CliDisplayEvent::RuntimeEvent)
             .collect(),
-    });
+    })
 }
 
 fn service_failure_code_string(service_failure: Option<&ServiceFailureNotice>) -> Option<String> {
@@ -586,6 +608,7 @@ mod tests {
 
         emit_stream_update(&messages, &runtime_events, &mut |turn| {
             captured = Some(turn.clone());
+            true
         });
 
         let turn = captured.expect("stream update should be emitted");
@@ -601,5 +624,17 @@ mod tests {
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted { tool_name, .. })
                 if tool_name == "Read"
         ));
+    }
+
+    #[test]
+    fn stream_update_can_request_output_drain_stop() {
+        let messages = vec![Message::assistant("Partial answer")];
+        let runtime_events = vec![CliRuntimeEvent::AssistantDelta {
+            text: "Partial answer".into(),
+        }];
+
+        let keep_going = emit_stream_update(&messages, &runtime_events, &mut |_| false);
+
+        assert!(!keep_going);
     }
 }

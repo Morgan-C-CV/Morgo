@@ -2013,7 +2013,14 @@ fn tui_poll_and_interrupt_active_turn(engine: &QueryEngine) -> bool {
         Event::Key(key)
             if key.kind == KeyEventKind::Press && tui_interrupt_active_turn_for_key(&key) =>
         {
-            engine.interrupt_active_turn()
+            let interrupted = engine.interrupt_active_turn();
+            if !interrupted {
+                log_tui_runtime_issue(
+                    "tui_interrupt_without_active_turn",
+                    "Esc was pressed while turn output was draining",
+                );
+            }
+            true
         }
         _ => false,
     }
@@ -6047,7 +6054,7 @@ impl RuntimeBootstrap {
         engine: &mut QueryEngine,
         app_state: &AppState,
         line: String,
-        on_update: impl FnMut(&CliTurnOutput),
+        on_update: impl FnMut(&CliTurnOutput) -> bool,
     ) -> anyhow::Result<CliDispatchOutcome> {
         handle_cli_input_dispatch_streaming(router, engine, app_state, line, on_update).await
     }
@@ -6440,6 +6447,13 @@ impl RuntimeBootstrap {
                                     &app_state,
                                     line,
                                     |snapshot| {
+                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                            log_tui_runtime_issue(
+                                                "tui_interrupt",
+                                                "active turn interrupted by Esc during output update",
+                                            );
+                                            return false;
+                                        }
                                         let next_document = render_turn_document(snapshot);
                                         let document_changed = next_document != current_document;
                                         if document_changed {
@@ -6473,6 +6487,14 @@ impl RuntimeBootstrap {
                                             0,
                                             &selection,
                                         );
+                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                            log_tui_runtime_issue(
+                                                "tui_interrupt",
+                                                "active turn interrupted by Esc after output update",
+                                            );
+                                            return false;
+                                        }
+                                        true
                                     },
                                 );
                                 tokio::pin!(dispatch);

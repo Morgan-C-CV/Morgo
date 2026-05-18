@@ -1,7 +1,7 @@
 use crate::core::message::is_legacy_hidden_primary_line;
-use crate::core::output::{blocks_to_plain_text, OutputBlock};
+use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
-use crate::interaction::view::{build_surface_view, SurfaceItem, SurfaceView, TaskView};
+use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -1432,8 +1432,11 @@ mod tests {
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(!rendered.contains("[Activity]"));
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
-        assert!(!rendered
-            .contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
+        assert!(
+            !rendered.contains(
+                "Command: cargo test --package agent --lib -- interaction::cli::renderer"
+            )
+        );
         assert!(rendered.contains("Exit code: 0"));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
         assert!(!rendered.contains("[Tool result]"));
