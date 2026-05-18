@@ -1626,6 +1626,69 @@ mod tests {
     }
 
     #[test]
+    fn tui_merges_consecutive_activity_after_committed_message_with_user_context() {
+        let turn = CliTurnOutput {
+            primary_text: "我先直接定位 TUI/计时器/流式输出相关代码。".into(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Glob".into(),
+                    input: r#"{"pattern":"**/*"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"stream|streaming|timer","path":"LearnCCfromCC"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted {
+                    text: "我先直接定位 TUI/计时器/流式输出相关代码。\n".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Glob".into(),
+                    input: r#"{"pattern":"**/*tui*"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Glob".into(),
+                    input: r#"{"pattern":"**/*stream*"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"src/service/api/streaming.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"StreamEvent|TextDelta","path":"src"}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let first_activity_pos = rendered
+            .find("SEARCH stream|streaming|timer in LearnCCfromCC")
+            .unwrap();
+        let text_pos = rendered
+            .find("我先直接定位 TUI/计时器/流式输出相关代码。")
+            .unwrap();
+        let second_activity_pos = rendered.find("LIST **/*tui*").unwrap();
+        let read_pos = rendered.find("READ streaming.rs").unwrap();
+        let second_search_pos = rendered
+            .find("SEARCH StreamEvent|TextDelta in src")
+            .unwrap();
+
+        assert!(first_activity_pos < text_pos, "{rendered}");
+        assert!(text_pos < second_activity_pos, "{rendered}");
+        assert!(second_activity_pos < read_pos, "{rendered}");
+        assert!(read_pos < second_search_pos, "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 2, "{rendered}");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.chars().all(|ch| ch == '─') && line.len() >= 80)
+                .count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn tui_renders_edit_activity_as_colored_diff_preview() {
         let path = std::env::temp_dir().join("renderer_edit_activity_preview.rs");
         std::fs::write(

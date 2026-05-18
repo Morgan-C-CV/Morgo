@@ -1987,6 +1987,38 @@ fn tui_exit_gesture_for_key(key: &crossterm::event::KeyEvent) -> Option<TuiExitG
     }
 }
 
+fn tui_interrupt_active_turn_for_key(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(tui_exit_gesture_for_key(key), Some(TuiExitGesture::Esc))
+}
+
+fn tui_poll_and_interrupt_active_turn(engine: &QueryEngine) -> bool {
+    let has_event = match poll(Duration::from_millis(0)) {
+        Ok(has_event) => has_event,
+        Err(error) => {
+            log_tui_runtime_issue("event_poll_error", &error.to_string());
+            return false;
+        }
+    };
+    if !has_event {
+        return false;
+    }
+    let event = match read() {
+        Ok(event) => event,
+        Err(error) => {
+            log_tui_runtime_issue("event_read_error", &error.to_string());
+            return false;
+        }
+    };
+    match event {
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press && tui_interrupt_active_turn_for_key(&key) =>
+        {
+            engine.interrupt_active_turn()
+        }
+        _ => false,
+    }
+}
+
 fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
     match gesture {
         TuiExitGesture::Esc => "Esc",
@@ -4132,6 +4164,8 @@ mod tui_output_tests {
 
         assert_eq!(tui_exit_gesture_for_key(&esc), Some(TuiExitGesture::Esc));
         assert_eq!(tui_exit_gesture_for_key(&cmd_c), None);
+        assert!(super::tui_interrupt_active_turn_for_key(&esc));
+        assert!(!super::tui_interrupt_active_turn_for_key(&cmd_c));
     }
 
     #[test]
@@ -6365,12 +6399,19 @@ impl RuntimeBootstrap {
                                     system_trap: Some(SystemTrapAction::OpenResumePicker),
                                 })
                             } else {
+                                let interrupt_engine = engine.clone();
                                 self.handle_tui_input_with_loading(
                                     router,
                                     engine,
                                     &app_state,
                                     line,
                                     |snapshot| {
+                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                            log_tui_runtime_issue(
+                                                "tui_interrupt",
+                                                "active turn interrupted by Esc",
+                                            );
+                                        }
                                         let next_document = render_turn_document(snapshot);
                                         let document_changed = next_document != current_document;
                                         if document_changed {

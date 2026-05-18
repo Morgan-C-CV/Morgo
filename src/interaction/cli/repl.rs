@@ -528,7 +528,6 @@ fn emit_stream_update(
         primary_text: collect_message_content(messages),
         events: runtime_events
             .iter()
-            .filter(|event| !matches!(event, CliRuntimeEvent::AssistantMessageCommitted { .. }))
             .cloned()
             .map(CliDisplayEvent::RuntimeEvent)
             .collect(),
@@ -572,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_update_filters_committed_assistant_text_events() {
+    fn stream_update_keeps_committed_assistant_text_events_for_ordering() {
         let messages = vec![Message::assistant("Final answer")];
         let runtime_events = vec![
             CliRuntimeEvent::AssistantMessageCommitted {
@@ -591,9 +590,14 @@ mod tests {
 
         let turn = captured.expect("stream update should be emitted");
         assert_eq!(turn.primary_text, "Final answer");
-        assert_eq!(turn.events.len(), 1);
+        assert_eq!(turn.events.len(), 2);
         assert!(matches!(
             &turn.events[0],
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted { text })
+                if text == "Final answer"
+        ));
+        assert!(matches!(
+            &turn.events[1],
             CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted { tool_name, .. })
                 if tool_name == "Read"
         ));
