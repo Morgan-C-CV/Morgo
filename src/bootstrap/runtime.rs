@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -78,7 +78,7 @@ use crate::plugins::runtime_state::{
 use crate::plugins::types::{
     PluginDefinition, PluginDiagnostic, PluginDiagnosticSeverity, PluginLifecycleState,
 };
-use crate::security::approval_protocol::approval_always_allow_detail;
+use crate::security::approval_protocol::{ApprovalResponse, approval_always_allow_detail};
 use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
@@ -616,24 +616,31 @@ struct TuiResumePickerState {
     selected: usize,
 }
 
-fn clear_tui_interrupt_ui_state(
-    app_state: &AppState,
-    input: &mut String,
-    cursor_index: &mut usize,
+fn clear_tui_expanded_ui_state(
     selected_suggestion: &mut Option<usize>,
     suggestion_scroll_top: &mut usize,
     resume_picker: &mut Option<TuiResumePickerState>,
     pending_exit_gesture: &mut Option<(TuiExitGesture, Instant)>,
     selection: &mut TuiSelectionState,
 ) {
-    app_state.permission_context.set_pending_approval(None);
-    input.clear();
-    *cursor_index = 0;
     *selected_suggestion = None;
     *suggestion_scroll_top = 0;
     *resume_picker = None;
     *pending_exit_gesture = None;
     selection.clear();
+}
+
+async fn deny_tui_pending_approval(app_state: &AppState) -> bool {
+    if app_state.permission_context.pending_approval().is_none() {
+        return false;
+    }
+    if let Err(error) = app_state
+        .resolve_pending_approval_response(ApprovalResponse::Deny)
+        .await
+    {
+        log_tui_runtime_issue("tui_approval_deny_error", &error.to_string());
+    }
+    true
 }
 
 fn tui_visible_input_suggestions(
@@ -2037,7 +2044,10 @@ fn tui_interrupt_active_turn_for_key(key: &crossterm::event::KeyEvent) -> bool {
     matches!(tui_exit_gesture_for_key(key), Some(TuiExitGesture::Esc))
 }
 
-fn tui_poll_and_interrupt_active_turn(engine: &QueryEngine) -> bool {
+fn tui_poll_and_interrupt_active_turn(
+    engine: &QueryEngine,
+    queued_events: &Arc<Mutex<VecDeque<Event>>>,
+) -> bool {
     let has_event = match poll(Duration::from_millis(0)) {
         Ok(has_event) => has_event,
         Err(error) => {
@@ -2068,7 +2078,12 @@ fn tui_poll_and_interrupt_active_turn(engine: &QueryEngine) -> bool {
             }
             true
         }
-        _ => false,
+        event => {
+            if let Ok(mut queued) = queued_events.lock() {
+                queued.push_back(event);
+            }
+            false
+        }
     }
 }
 
@@ -6252,6 +6267,7 @@ impl RuntimeBootstrap {
         let mut resume_picker: Option<TuiResumePickerState> = None;
         let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
         let mut suppress_suggestions_until_input_change = false;
+        let queued_events: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
         const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
         const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
@@ -6340,23 +6356,31 @@ impl RuntimeBootstrap {
             } else {
                 Duration::from_secs(60)
             };
-            let has_event = match poll(refresh_interval) {
-                Ok(has_event) => has_event,
-                Err(error) => {
-                    log_tui_runtime_issue("event_poll_error", &error.to_string());
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+            let queued_event = queued_events
+                .lock()
+                .ok()
+                .and_then(|mut queued| queued.pop_front());
+            let event = if let Some(event) = queued_event {
+                event
+            } else {
+                let has_event = match poll(refresh_interval) {
+                    Ok(has_event) => has_event,
+                    Err(error) => {
+                        log_tui_runtime_issue("event_poll_error", &error.to_string());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                if !has_event {
                     continue;
                 }
-            };
-            if !has_event {
-                continue;
-            }
-            let event = match read() {
-                Ok(event) => event,
-                Err(error) => {
-                    log_tui_runtime_issue("event_read_error", &error.to_string());
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                match read() {
+                    Ok(event) => event,
+                    Err(error) => {
+                        log_tui_runtime_issue("event_read_error", &error.to_string());
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
                 }
             };
             match event {
@@ -6372,20 +6396,15 @@ impl RuntimeBootstrap {
                     }
 
                     if let Some(gesture) = tui_exit_gesture_for_key(&key) {
-                        if engine.has_active_turn()
-                            || app_state.permission_context.pending_approval().is_some()
-                        {
+                        if engine.has_active_turn() {
                             let interrupted = engine.interrupt_active_turn();
                             if !interrupted {
                                 log_tui_runtime_issue(
                                     "tui_interrupt_without_active_turn",
-                                    "Esc cleared pending TUI state without an active turn",
+                                    "Esc was pressed while turn output was draining",
                                 );
                             }
-                            clear_tui_interrupt_ui_state(
-                                &app_state,
-                                &mut input,
-                                &mut cursor_index,
+                            clear_tui_expanded_ui_state(
                                 &mut selected_suggestion,
                                 &mut suggestion_scroll_top,
                                 &mut resume_picker,
@@ -6401,15 +6420,54 @@ impl RuntimeBootstrap {
                             self.print_tui_interactive_frame(
                                 &app_state,
                                 &current_document,
-                                "",
+                                &input,
                                 &[],
                                 None,
                                 0,
                                 0,
                                 TuiTurnStatus::Idle,
-                                0,
+                                cursor_index,
                                 &selection,
                             );
+                            continue;
+                        }
+                        if deny_tui_pending_approval(&app_state).await {
+                            clear_tui_expanded_ui_state(
+                                &mut selected_suggestion,
+                                &mut suggestion_scroll_top,
+                                &mut resume_picker,
+                                &mut pending_exit_gesture,
+                                &mut selection,
+                            );
+                            suppress_suggestions_until_input_change = true;
+                            active_turn_started_at = None;
+                            last_turn_duration = None;
+                            follow_content_tail = true;
+                            content_scroll_top = usize::MAX;
+                            current_document = render_turn_document(&tui_interrupted_turn_output());
+                            self.print_tui_interactive_frame(
+                                &app_state,
+                                &current_document,
+                                &input,
+                                &[],
+                                None,
+                                0,
+                                0,
+                                TuiTurnStatus::Idle,
+                                cursor_index,
+                                &selection,
+                            );
+                            continue;
+                        }
+                        if resume_picker.is_some() {
+                            clear_tui_expanded_ui_state(
+                                &mut selected_suggestion,
+                                &mut suggestion_scroll_top,
+                                &mut resume_picker,
+                                &mut pending_exit_gesture,
+                                &mut selection,
+                            );
+                            suppress_suggestions_until_input_change = true;
                             continue;
                         }
                         if input.starts_with('/')
@@ -6417,14 +6475,19 @@ impl RuntimeBootstrap {
                             && selected_suggestion.is_some()
                         {
                             selected_suggestion = None;
+                            suggestion_scroll_top = 0;
                             pending_exit_gesture = None;
+                            suppress_suggestions_until_input_change = true;
                             continue;
                         }
                         if !input.is_empty() {
-                            input.clear();
-                            cursor_index = 0;
-                            selected_suggestion = None;
-                            pending_exit_gesture = None;
+                            clear_tui_expanded_ui_state(
+                                &mut selected_suggestion,
+                                &mut suggestion_scroll_top,
+                                &mut resume_picker,
+                                &mut pending_exit_gesture,
+                                &mut selection,
+                            );
                             suppress_suggestions_until_input_change = true;
                             continue;
                         }
@@ -6552,6 +6615,7 @@ impl RuntimeBootstrap {
                                 break;
                             }
 
+                            let turn_interrupted = Arc::new(AtomicBool::new(false));
                             let dispatch = if is_resume_picker_command {
                                 Ok(CliDispatchOutcome {
                                     output: CliTurnOutput {
@@ -6562,8 +6626,8 @@ impl RuntimeBootstrap {
                                 })
                             } else {
                                 let interrupt_engine = engine.clone();
-                                let turn_interrupted = Arc::new(AtomicBool::new(false));
                                 let update_turn_interrupted = Arc::clone(&turn_interrupted);
+                                let update_queued_events = Arc::clone(&queued_events);
                                 let dispatch = self.handle_tui_input_with_loading(
                                     router,
                                     engine,
@@ -6572,10 +6636,12 @@ impl RuntimeBootstrap {
                                     |snapshot| {
                                         let interrupted = update_turn_interrupted
                                             .load(Ordering::SeqCst)
-                                            || tui_poll_and_interrupt_active_turn(&interrupt_engine);
+                                            || tui_poll_and_interrupt_active_turn(
+                                                &interrupt_engine,
+                                                &update_queued_events,
+                                            );
                                         if interrupted {
                                             update_turn_interrupted.store(true, Ordering::SeqCst);
-                                            app_state.permission_context.set_pending_approval(None);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc during output update",
@@ -6631,9 +6697,11 @@ impl RuntimeBootstrap {
                                             0,
                                             &selection,
                                         );
-                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                        if tui_poll_and_interrupt_active_turn(
+                                            &interrupt_engine,
+                                            &update_queued_events,
+                                        ) {
                                             update_turn_interrupted.store(true, Ordering::SeqCst);
-                                            app_state.permission_context.set_pending_approval(None);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc after output update",
@@ -6664,9 +6732,11 @@ impl RuntimeBootstrap {
                                     tokio::select! {
                                         result = &mut dispatch => break result,
                                         _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                                            if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                            if tui_poll_and_interrupt_active_turn(
+                                                &interrupt_engine,
+                                                &queued_events,
+                                            ) {
                                                 turn_interrupted.store(true, Ordering::SeqCst);
-                                                app_state.permission_context.set_pending_approval(None);
                                                 log_tui_runtime_issue(
                                                     "tui_interrupt",
                                                     "active turn interrupted by Esc",
@@ -6696,13 +6766,10 @@ impl RuntimeBootstrap {
                                     continue;
                                 }
                             };
-                            let dispatch_was_interrupted =
-                                tui_turn_output_is_interrupted(&dispatch.output);
+                            let dispatch_was_interrupted = turn_interrupted.load(Ordering::SeqCst)
+                                || tui_turn_output_is_interrupted(&dispatch.output);
                             if dispatch_was_interrupted {
-                                clear_tui_interrupt_ui_state(
-                                    &app_state,
-                                    &mut input,
-                                    &mut cursor_index,
+                                clear_tui_expanded_ui_state(
                                     &mut selected_suggestion,
                                     &mut suggestion_scroll_top,
                                     &mut resume_picker,
@@ -8638,7 +8705,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_interrupt_reset_clears_pending_approval_and_expanded_lists() {
+    fn tui_escape_collapse_preserves_draft_and_pending_approval() {
         let app_state = test_app_state();
         app_state
             .permission_context
@@ -8657,8 +8724,8 @@ mod tests {
             3
         );
 
-        let mut input = "approve".to_string();
-        let mut cursor_index = input.chars().count();
+        let input = "approve".to_string();
+        let cursor_index = input.chars().count();
         let mut selected_suggestion = Some(1);
         let mut suggestion_scroll_top = 2usize;
         let mut resume_picker = Some(super::TuiResumePickerState {
@@ -8674,10 +8741,7 @@ mod tests {
             dragging: true,
         };
 
-        super::clear_tui_interrupt_ui_state(
-            &app_state,
-            &mut input,
-            &mut cursor_index,
+        super::clear_tui_expanded_ui_state(
             &mut selected_suggestion,
             &mut suggestion_scroll_top,
             &mut resume_picker,
@@ -8685,16 +8749,56 @@ mod tests {
             &mut selection,
         );
 
-        assert!(app_state.permission_context.pending_approval().is_none());
-        assert!(input.is_empty());
-        assert_eq!(cursor_index, 0);
+        assert!(app_state.permission_context.pending_approval().is_some());
+        assert_eq!(input, "approve");
+        assert_eq!(cursor_index, "approve".chars().count());
         assert_eq!(selected_suggestion, None);
         assert_eq!(suggestion_scroll_top, 0);
         assert!(resume_picker.is_none());
         assert!(pending_exit_gesture.is_none());
         assert_eq!(selection, super::TuiSelectionState::default());
         assert!(super::tui_visible_input_suggestions(&app_state, "", false, true).is_empty());
+        assert_eq!(
+            super::tui_visible_input_suggestions(&app_state, "", false, false).len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_escape_pending_approval_uses_deny_resolution() {
+        let app_state = test_app_state();
+        app_state
+            .permission_context
+            .set_pending_approval(Some(PendingApproval {
+                tool_name: "Bash".into(),
+                tool_input: r#"{"command":"pwd *"}"#.into(),
+                message: "approval required".into(),
+                code: Some("policy_escalation".into()),
+                summary: Some("Bash pending approval".into()),
+                detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["shell_operator.wildcard".into()],
+            }));
+
+        assert!(super::deny_tui_pending_approval(&app_state).await);
+        assert!(app_state.permission_context.pending_approval().is_none());
         assert!(super::tui_visible_input_suggestions(&app_state, "", false, false).is_empty());
+        assert!(!super::deny_tui_pending_approval(&app_state).await);
+    }
+
+    #[test]
+    fn tui_suggestions_reappear_after_escape_suppression_changes_input() {
+        let app_state = test_app_state();
+        let mut input = "/".to_string();
+        let mut cursor_index = input.chars().count();
+
+        assert!(super::tui_visible_input_suggestions(&app_state, &input, false, true).is_empty());
+        super::insert_input_char(&mut input, &mut cursor_index, 'e');
+        assert!(
+            super::tui_visible_input_suggestions(&app_state, &input, false, false)
+                .iter()
+                .any(|suggestion| suggestion.label == "/exit")
+        );
     }
 
     #[test]
