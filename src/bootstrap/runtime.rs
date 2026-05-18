@@ -4375,14 +4375,14 @@ mod tui_output_tests {
             &TuiSelectionState::default(),
         ));
 
-        assert!(rendered.contains("[Activity]"), "{rendered}");
+        assert!(rendered.contains("• Explored"), "{rendered}");
         assert!(rendered.contains("READ renderer.rs"), "{rendered}");
         assert!(rendered.contains("────────────────"), "{rendered}");
         assert!(rendered.contains("> older user message"), "{rendered}");
         let user_pos = rendered
             .find("> older user message")
             .expect("user transcript");
-        let activity_pos = rendered.find("[Activity]").expect("activity");
+        let activity_pos = rendered.find("• Explored").expect("activity");
         assert!(user_pos < activity_pos, "{rendered}");
     }
 

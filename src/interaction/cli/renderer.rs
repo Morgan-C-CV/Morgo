@@ -27,11 +27,19 @@ pub struct TuiPanelSection {
     pub lines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiMainFlowKind {
+    Text,
+    Activity,
+    Divider,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderBlock {
     PrimaryText(String),
     Panel(RenderPanel),
     RawRuntime(String),
+    Divider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +113,7 @@ pub fn build_tui_loading_screen(request: &str, _frame_index: usize) -> TuiScreen
 pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
     let mut main = Vec::new();
     let mut panel_entries = Vec::new();
+    let mut last_main_flow_kind = None::<TuiMainFlowKind>;
 
     for (index, block) in document.blocks.iter().enumerate() {
         match block {
@@ -112,6 +121,13 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
                 let visible_lines = visible_tui_primary_lines(text);
                 if !visible_lines.is_empty() {
                     main.extend(visible_lines);
+                    last_main_flow_kind = Some(TuiMainFlowKind::Text);
+                }
+            }
+            RenderBlock::Divider => {
+                if !main.is_empty() {
+                    main.push(activity_stage_divider_line());
+                    last_main_flow_kind = Some(TuiMainFlowKind::Divider);
                 }
             }
             RenderBlock::RawRuntime(text) => {
@@ -124,6 +140,15 @@ pub fn build_tui_screen(document: &RenderDocument) -> TuiScreen {
                             lines,
                         },
                     ));
+                }
+            }
+            RenderBlock::Panel(panel) if panel.kind == PanelKind::ToolActivity => {
+                if !panel.lines.is_empty() {
+                    if last_main_flow_kind == Some(TuiMainFlowKind::Activity) && !main.is_empty() {
+                        main.push(activity_stage_divider_line());
+                    }
+                    main.extend(panel.lines.clone());
+                    last_main_flow_kind = Some(TuiMainFlowKind::Activity);
                 }
             }
             RenderBlock::Panel(panel) => panel_entries.push((
@@ -205,6 +230,10 @@ fn panel_priority(kind: Option<PanelKind>) -> u8 {
 }
 
 fn build_render_document(view: &SurfaceView) -> RenderDocument {
+    if should_render_interleaved_activity(view) {
+        return build_interleaved_render_document(view);
+    }
+
     let mut blocks = Vec::new();
     let primary_text = if view.primary_text.is_empty() {
         streaming_delta_text(&view.items)
@@ -214,7 +243,7 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
     if !primary_text.is_empty() {
         blocks.push(RenderBlock::PrimaryText(primary_text));
     }
-    if let Some(activity_panel) = build_tool_activity_panel(&view.items) {
+    for activity_panel in build_tool_activity_panels(&view.items) {
         blocks.push(RenderBlock::Panel(activity_panel));
     }
     for item in &view.items {
@@ -223,6 +252,132 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         }
     }
     RenderDocument { blocks }
+}
+
+fn should_render_interleaved_activity(view: &SurfaceView) -> bool {
+    view.items.iter().any(|item| {
+        matches!(
+            item,
+            SurfaceItem::ToolCallStarted { .. } | SurfaceItem::ToolResult { .. }
+        )
+    }) && view
+        .items
+        .iter()
+        .any(|item| matches!(item, SurfaceItem::AssistantDelta { text } if !text.is_empty()))
+}
+
+fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
+    let mut builder = InterleavedRenderBuilder::default();
+
+    for item in &view.items {
+        match item {
+            SurfaceItem::AssistantDelta { text } => builder.push_text(text),
+            SurfaceItem::ToolCallStarted { tool_name, input } => {
+                builder.flush_text();
+                builder.push_tool_call(tool_name, input);
+            }
+            SurfaceItem::ToolResult {
+                tool_name,
+                content,
+                summary,
+                detail,
+            } => {
+                builder.flush_text();
+                builder.push_tool_result(tool_name, content, summary.as_deref(), detail.as_deref());
+            }
+            _ => {
+                builder.flush_activity_before_non_activity();
+                if let Some(block) = render_block_for_surface_item(item) {
+                    builder.push_non_activity_block(block);
+                }
+            }
+        }
+    }
+
+    builder.finish_with_fallback_primary(&view.primary_text)
+}
+
+#[derive(Default)]
+struct InterleavedRenderBuilder {
+    blocks: Vec<RenderBlock>,
+    text_buffer: String,
+    activity: ActivityStageBuilder,
+    last_flushed_activity: bool,
+}
+
+impl InterleavedRenderBuilder {
+    fn push_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.activity.has_pending_activity() {
+            self.flush_activity();
+        }
+        if self.last_flushed_activity && !self.blocks.is_empty() {
+            self.blocks.push(RenderBlock::Divider);
+        }
+        self.last_flushed_activity = false;
+        self.text_buffer.push_str(text);
+    }
+
+    fn push_tool_call(&mut self, tool_name: &str, input: &str) {
+        self.activity.push_tool_call(tool_name, input);
+        self.last_flushed_activity = false;
+    }
+
+    fn push_tool_result(
+        &mut self,
+        tool_name: &str,
+        content: &str,
+        summary: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        self.activity
+            .push_tool_result(tool_name, content, summary, detail);
+        self.last_flushed_activity = false;
+    }
+
+    fn push_non_activity_block(&mut self, block: RenderBlock) {
+        self.flush_text();
+        self.blocks.push(block);
+        self.last_flushed_activity = false;
+    }
+
+    fn flush_text(&mut self) {
+        if self.text_buffer.is_empty() {
+            return;
+        }
+        self.blocks.push(RenderBlock::PrimaryText(std::mem::take(
+            &mut self.text_buffer,
+        )));
+        self.last_flushed_activity = false;
+    }
+
+    fn flush_activity(&mut self) {
+        for panel in self.activity.take_panels() {
+            self.blocks.push(RenderBlock::Panel(panel));
+            self.last_flushed_activity = true;
+        }
+    }
+
+    fn flush_activity_before_non_activity(&mut self) {
+        self.flush_text();
+        self.flush_activity();
+    }
+
+    fn finish_with_fallback_primary(mut self, primary_text: &str) -> RenderDocument {
+        self.flush_text();
+        self.flush_activity();
+
+        if self.blocks.is_empty() && !primary_text.is_empty() {
+            self.blocks
+                .push(RenderBlock::PrimaryText(primary_text.into()));
+        }
+
+        RenderDocument {
+            blocks: self.blocks,
+        }
+    }
 }
 
 fn streaming_delta_text(items: &[SurfaceItem]) -> String {
@@ -454,6 +609,84 @@ fn render_exploration_stage(entries: &[ExplorationEntry]) -> Vec<String> {
     lines
 }
 
+#[derive(Default)]
+struct ActivityStageBuilder {
+    stages: Vec<Vec<String>>,
+    exploration_entries: Vec<ExplorationEntry>,
+    current_stage_lines: Vec<String>,
+    in_exploration_stage: bool,
+}
+
+impl ActivityStageBuilder {
+    fn has_pending_activity(&self) -> bool {
+        self.in_exploration_stage
+            || !self.exploration_entries.is_empty()
+            || !self.current_stage_lines.is_empty()
+            || !self.stages.is_empty()
+    }
+
+    fn push_tool_call(&mut self, tool_name: &str, input: &str) {
+        if is_exploration_tool(tool_name) {
+            if !self.in_exploration_stage {
+                flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
+                self.in_exploration_stage = true;
+            }
+            if let Some(entry) = ExplorationEntry::from_tool_call(tool_name, input) {
+                entry.merge_into(&mut self.exploration_entries);
+            }
+        } else if let Some(line) = tool_call_activity_line(tool_name, input) {
+            self.finish_exploration_stage();
+            self.current_stage_lines.push(format!("• {line}"));
+        }
+    }
+
+    fn push_tool_result(
+        &mut self,
+        tool_name: &str,
+        content: &str,
+        summary: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        if let Some((headline, detail_lines)) =
+            tool_result_activity_block(tool_name, content, summary, detail)
+        {
+            self.finish_exploration_stage();
+            let detail_lines = detail_lines
+                .into_iter()
+                .filter(|line| !is_low_signal_tool_detail(line))
+                .collect::<Vec<_>>();
+            if !headline.trim().is_empty() {
+                self.current_stage_lines.push(format!("• {headline}"));
+            }
+            for detail_line in detail_lines {
+                self.current_stage_lines.push(format!("  └ {detail_line}"));
+            }
+        }
+    }
+
+    fn take_panels(&mut self) -> Vec<RenderPanel> {
+        self.finish_exploration_stage();
+        flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
+        std::mem::take(&mut self.stages)
+            .into_iter()
+            .map(|stage| render_panel(PanelKind::ToolActivity, "Activity", stage))
+            .collect()
+    }
+
+    fn finish_exploration_stage(&mut self) {
+        if !self.in_exploration_stage {
+            return;
+        }
+        if !self.exploration_entries.is_empty() {
+            self.current_stage_lines
+                .extend(render_exploration_stage(&self.exploration_entries));
+            self.exploration_entries.clear();
+        }
+        flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
+        self.in_exploration_stage = false;
+    }
+}
+
 fn flush_activity_stage(stages: &mut Vec<Vec<String>>, stage_lines: &mut Vec<String>) {
     if stage_lines.is_empty() {
         return;
@@ -461,35 +694,13 @@ fn flush_activity_stage(stages: &mut Vec<Vec<String>>, stage_lines: &mut Vec<Str
     stages.push(std::mem::take(stage_lines));
 }
 
-fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
-    let mut stages: Vec<Vec<String>> = Vec::new();
-    let mut exploration_entries: Vec<ExplorationEntry> = Vec::new();
-    let mut current_stage_lines: Vec<String> = Vec::new();
-    let mut in_exploration_stage = false;
+fn build_tool_activity_panels(items: &[SurfaceItem]) -> Vec<RenderPanel> {
+    let mut builder = ActivityStageBuilder::default();
 
     for item in items {
         match item {
             SurfaceItem::ToolCallStarted { tool_name, input } => {
-                if is_exploration_tool(tool_name) {
-                    if !in_exploration_stage {
-                        flush_activity_stage(&mut stages, &mut current_stage_lines);
-                        in_exploration_stage = true;
-                    }
-                    if let Some(entry) = ExplorationEntry::from_tool_call(tool_name, input) {
-                        entry.merge_into(&mut exploration_entries);
-                    }
-                } else if let Some(line) = tool_call_activity_line(tool_name, input) {
-                    if in_exploration_stage {
-                        if !exploration_entries.is_empty() {
-                            current_stage_lines
-                                .extend(render_exploration_stage(&exploration_entries));
-                            exploration_entries.clear();
-                        }
-                        flush_activity_stage(&mut stages, &mut current_stage_lines);
-                        in_exploration_stage = false;
-                    }
-                    current_stage_lines.push(format!("• {line}"));
-                }
+                builder.push_tool_call(tool_name, input);
             }
             SurfaceItem::ToolResult {
                 tool_name,
@@ -497,54 +708,13 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                 summary,
                 detail,
             } => {
-                if let Some((headline, detail_lines)) = tool_result_activity_block(
-                    tool_name,
-                    content,
-                    summary.as_deref(),
-                    detail.as_deref(),
-                ) {
-                    if in_exploration_stage {
-                        if !exploration_entries.is_empty() {
-                            current_stage_lines
-                                .extend(render_exploration_stage(&exploration_entries));
-                            exploration_entries.clear();
-                        }
-                        flush_activity_stage(&mut stages, &mut current_stage_lines);
-                        in_exploration_stage = false;
-                    }
-                    let detail_lines = detail_lines
-                        .into_iter()
-                        .filter(|line| !is_low_signal_tool_detail(line))
-                        .collect::<Vec<_>>();
-                    if !headline.trim().is_empty() {
-                        current_stage_lines.push(format!("• {headline}"));
-                    }
-                    for detail_line in detail_lines {
-                        current_stage_lines.push(format!("  └ {detail_line}"));
-                    }
-                }
+                builder.push_tool_result(tool_name, content, summary.as_deref(), detail.as_deref());
             }
             _ => {}
         }
     }
 
-    if in_exploration_stage && !exploration_entries.is_empty() {
-        current_stage_lines.extend(render_exploration_stage(&exploration_entries));
-    }
-    flush_activity_stage(&mut stages, &mut current_stage_lines);
-
-    if stages.is_empty() {
-        None
-    } else {
-        let mut lines = Vec::new();
-        for stage in stages {
-            if !lines.is_empty() {
-                lines.push(activity_stage_divider_line());
-            }
-            lines.extend(stage);
-        }
-        Some(render_panel(PanelKind::ToolActivity, "Activity", lines))
-    }
+    builder.take_panels()
 }
 
 fn is_exploration_tool(tool_name: &str) -> bool {
@@ -1102,6 +1272,10 @@ fn render_block_to_text(block: &RenderBlock) -> String {
     match block {
         RenderBlock::PrimaryText(text) => text.clone(),
         RenderBlock::RawRuntime(text) => text.clone(),
+        RenderBlock::Divider => activity_stage_divider_line(),
+        RenderBlock::Panel(panel) if panel.kind == PanelKind::ToolActivity => {
+            panel.lines.join("\n")
+        }
         RenderBlock::Panel(panel) => render_panel_to_text(panel),
     }
 }
@@ -1248,7 +1422,7 @@ mod tests {
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
-        assert!(rendered.contains("[Activity]"));
+        assert!(!rendered.contains("[Activity]"));
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
         assert!(
             !rendered.contains(
@@ -1281,15 +1455,15 @@ mod tests {
         };
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
-        assert!(rendered.contains("[Activity]"));
-        assert!(rendered.contains("EXPLORED"));
+        assert!(!rendered.contains("[Activity]"));
+        assert!(rendered.contains("• Explored"));
         assert!(rendered.contains("READ renderer.rs"));
         assert!(rendered.contains("SEARCH delta|tool use in reference"));
         assert_eq!(rendered.matches("READ renderer.rs").count(), 1);
     }
 
     #[test]
-    fn tui_places_activity_above_final_answer_without_duplication() {
+    fn tui_places_primary_text_before_activity_without_duplication() {
         let turn = CliTurnOutput {
             primary_text: "### 方案 B：直接给你一个“改造优先级清单”".into(),
             events: vec![
@@ -1308,9 +1482,9 @@ mod tests {
         let answer_pos = rendered
             .find("### 方案 B：直接给你一个“改造优先级清单”")
             .expect("final answer text");
-        let activity_pos = rendered.find("[Activity]").expect("activity section");
+        let activity_pos = rendered.find("• Explored").expect("activity section");
         assert!(answer_pos < activity_pos, "{rendered}");
-        assert_eq!(rendered.matches("[Activity]").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
         assert!(rendered.contains(
             "SEARCH createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr in src"
         ));
@@ -1359,6 +1533,49 @@ mod tests {
     }
 
     #[test]
+    fn tui_interleaves_activity_between_streamed_assistant_messages() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                    text: "我先核对 TUI 启动链路。\n".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Glob".into(),
+                    input: r#"{"pattern":"logs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"tui-runtime.log"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantDelta {
+                    text: "日志已经把关键点钉住了。\n".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"PTY Host|sighup","path":"runtime.rs"}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let first_text_pos = rendered.find("我先核对 TUI 启动链路。").unwrap();
+        let first_activity_pos = rendered.find("LIST logs").unwrap();
+        let divider_pos = rendered.find("────────────────").unwrap();
+        let second_text_pos = rendered.find("日志已经把关键点钉住了。").unwrap();
+        let second_activity_pos = rendered
+            .find("SEARCH PTY Host|sighup in runtime.rs")
+            .unwrap();
+
+        assert!(first_text_pos < first_activity_pos, "{rendered}");
+        assert!(first_activity_pos < divider_pos, "{rendered}");
+        assert!(divider_pos < second_text_pos, "{rendered}");
+        assert!(second_text_pos < second_activity_pos, "{rendered}");
+        assert!(!rendered.contains("[Activity]"), "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 2, "{rendered}");
+    }
+
+    #[test]
     fn tui_renders_edit_activity_as_colored_diff_preview() {
         let path = std::env::temp_dir().join("renderer_edit_activity_preview.rs");
         std::fs::write(
@@ -1383,7 +1600,7 @@ mod tests {
 
         let rendered = render_turn_tui_output(&turn);
         let plain = strip_ansi(&rendered);
-        assert!(plain.contains("[Activity]"));
+        assert!(!plain.contains("[Activity]"));
         assert!(plain.contains("EDITED"));
         assert!(plain.contains("(+1 -1)"));
         assert!(plain.contains("renderer_edit_activity_preview.rs"));
