@@ -15,6 +15,9 @@ pub enum CliRuntimeEvent {
     AssistantDelta {
         text: String,
     },
+    AssistantMessageCommitted {
+        text: String,
+    },
     ToolCallStarted {
         tool_name: String,
         input: String,
@@ -63,6 +66,7 @@ impl CliRuntimeEvent {
     pub fn to_legacy_line(&self) -> String {
         match self {
             Self::AssistantDelta { text } => format!("[delta] {text}"),
+            Self::AssistantMessageCommitted { text } => format!("[assistant] {text}"),
             Self::ToolCallStarted { tool_name, input } => {
                 format!("[tool-start] {tool_name}: {input}")
             }
@@ -353,6 +357,7 @@ async fn collect_stream_messages(
 
     let mut messages = Vec::new();
     let mut runtime_events = Vec::new();
+    let mut pending_delta_text = String::new();
     loop {
         let event = tokio::select! {
             event = receiver.recv() => event,
@@ -365,8 +370,20 @@ async fn collect_stream_messages(
             break;
         };
         match event {
-            EngineEvent::MessageCommitted(message) => messages.push(message),
+            EngineEvent::MessageCommitted(message) => {
+                if message.has_visible_text() {
+                    let text = message.text();
+                    if !pending_delta_text.is_empty() && pending_delta_text == text {
+                        pending_delta_text.clear();
+                    } else {
+                        pending_delta_text.clear();
+                        runtime_events.push(CliRuntimeEvent::AssistantMessageCommitted { text });
+                    }
+                }
+                messages.push(message);
+            }
             EngineEvent::AssistantDelta(delta) => {
+                pending_delta_text.push_str(&delta);
                 runtime_events.push(CliRuntimeEvent::AssistantDelta { text: delta });
             }
             EngineEvent::ToolCallStarted { tool_name, input } => {

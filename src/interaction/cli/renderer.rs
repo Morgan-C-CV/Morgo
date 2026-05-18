@@ -1579,6 +1579,53 @@ mod tests {
     }
 
     #[test]
+    fn tui_interleaves_committed_messages_in_completed_turn_output() {
+        let turn = CliTurnOutput {
+            primary_text: [
+                "我先确认 TUI 渲染入口。",
+                "现在根因已经定位：最终态丢了事件顺序。",
+            ]
+            .join("\n"),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted {
+                    text: "我先确认 TUI 渲染入口。\n".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"renderer.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"build_render_document","path":"renderer.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted {
+                    text: "现在根因已经定位：最终态丢了事件顺序。\n".into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let first_text_pos = rendered.find("我先确认 TUI 渲染入口。").unwrap();
+        let activity_pos = rendered.find("READ renderer.rs").unwrap();
+        let divider_pos = rendered.find("────────────────").unwrap();
+        let second_text_pos = rendered
+            .find("现在根因已经定位：最终态丢了事件顺序。")
+            .unwrap();
+
+        assert!(first_text_pos < activity_pos, "{rendered}");
+        assert!(activity_pos < divider_pos, "{rendered}");
+        assert!(divider_pos < second_text_pos, "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("我先确认 TUI 渲染入口。").count(), 1);
+        assert_eq!(
+            rendered
+                .matches("现在根因已经定位：最终态丢了事件顺序。")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn tui_renders_edit_activity_as_colored_diff_preview() {
         let path = std::env::temp_dir().join("renderer_edit_activity_preview.rs");
         std::fs::write(

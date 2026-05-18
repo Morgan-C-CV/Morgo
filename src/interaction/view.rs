@@ -104,6 +104,9 @@ fn surface_item_from_runtime_event(event: &CliRuntimeEvent) -> SurfaceItem {
         CliRuntimeEvent::AssistantDelta { text } => {
             SurfaceItem::AssistantDelta { text: text.clone() }
         }
+        CliRuntimeEvent::AssistantMessageCommitted { text } => {
+            SurfaceItem::AssistantDelta { text: text.clone() }
+        }
         CliRuntimeEvent::ToolCallStarted { tool_name, input } => SurfaceItem::ToolCallStarted {
             tool_name: tool_name.clone(),
             input: input.clone(),
