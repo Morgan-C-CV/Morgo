@@ -611,32 +611,25 @@ fn render_exploration_stage(entries: &[ExplorationEntry]) -> Vec<String> {
 
 #[derive(Default)]
 struct ActivityStageBuilder {
-    stages: Vec<Vec<String>>,
+    lines: Vec<String>,
     exploration_entries: Vec<ExplorationEntry>,
-    current_stage_lines: Vec<String>,
     in_exploration_stage: bool,
 }
 
 impl ActivityStageBuilder {
     fn has_pending_activity(&self) -> bool {
-        self.in_exploration_stage
-            || !self.exploration_entries.is_empty()
-            || !self.current_stage_lines.is_empty()
-            || !self.stages.is_empty()
+        self.in_exploration_stage || !self.exploration_entries.is_empty() || !self.lines.is_empty()
     }
 
     fn push_tool_call(&mut self, tool_name: &str, input: &str) {
         if is_exploration_tool(tool_name) {
-            if !self.in_exploration_stage {
-                flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
-                self.in_exploration_stage = true;
-            }
+            self.in_exploration_stage = true;
             if let Some(entry) = ExplorationEntry::from_tool_call(tool_name, input) {
                 entry.merge_into(&mut self.exploration_entries);
             }
         } else if let Some(line) = tool_call_activity_line(tool_name, input) {
             self.finish_exploration_stage();
-            self.current_stage_lines.push(format!("• {line}"));
+            self.lines.push(format!("• {line}"));
         }
     }
 
@@ -656,21 +649,25 @@ impl ActivityStageBuilder {
                 .filter(|line| !is_low_signal_tool_detail(line))
                 .collect::<Vec<_>>();
             if !headline.trim().is_empty() {
-                self.current_stage_lines.push(format!("• {headline}"));
+                self.lines.push(format!("• {headline}"));
             }
             for detail_line in detail_lines {
-                self.current_stage_lines.push(format!("  └ {detail_line}"));
+                self.lines.push(format!("  └ {detail_line}"));
             }
         }
     }
 
     fn take_panels(&mut self) -> Vec<RenderPanel> {
         self.finish_exploration_stage();
-        flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
-        std::mem::take(&mut self.stages)
-            .into_iter()
-            .map(|stage| render_panel(PanelKind::ToolActivity, "Activity", stage))
-            .collect()
+        if self.lines.is_empty() {
+            Vec::new()
+        } else {
+            vec![render_panel(
+                PanelKind::ToolActivity,
+                "Activity",
+                std::mem::take(&mut self.lines),
+            )]
+        }
     }
 
     fn finish_exploration_stage(&mut self) {
@@ -678,20 +675,12 @@ impl ActivityStageBuilder {
             return;
         }
         if !self.exploration_entries.is_empty() {
-            self.current_stage_lines
+            self.lines
                 .extend(render_exploration_stage(&self.exploration_entries));
             self.exploration_entries.clear();
         }
-        flush_activity_stage(&mut self.stages, &mut self.current_stage_lines);
         self.in_exploration_stage = false;
     }
-}
-
-fn flush_activity_stage(stages: &mut Vec<Vec<String>>, stage_lines: &mut Vec<String>) {
-    if stage_lines.is_empty() {
-        return;
-    }
-    stages.push(std::mem::take(stage_lines));
 }
 
 fn build_tool_activity_panels(items: &[SurfaceItem]) -> Vec<RenderPanel> {
@@ -1491,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_groups_exploration_into_stages_with_dividers() {
+    fn tui_merges_consecutive_activity_without_dividers() {
         let turn = CliTurnOutput {
             primary_text: String::new(),
             events: vec![
@@ -1528,7 +1517,7 @@ mod tests {
         assert!(rendered.contains("SEARCH struct ModelProviderConfig in client.rs"));
         assert!(rendered.contains("READ client.rs"));
         assert!(rendered.contains("RAN cargo test --lib"));
-        assert!(rendered.contains("────────────────"), "{rendered}");
+        assert!(!rendered.contains("────────────────"), "{rendered}");
         assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
     }
 
@@ -1555,6 +1544,10 @@ mod tests {
                     tool_name: "Grep".into(),
                     input: r#"{"pattern":"PTY Host|sighup","path":"runtime.rs"}"#.into(),
                 }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"runtime.rs"}"#.into(),
+                }),
             ],
         };
 
@@ -1566,12 +1559,22 @@ mod tests {
         let second_activity_pos = rendered
             .find("SEARCH PTY Host|sighup in runtime.rs")
             .unwrap();
+        let second_read_pos = rendered.find("READ runtime.rs").unwrap();
 
         assert!(first_text_pos < first_activity_pos, "{rendered}");
         assert!(first_activity_pos < divider_pos, "{rendered}");
         assert!(divider_pos < second_text_pos, "{rendered}");
         assert!(second_text_pos < second_activity_pos, "{rendered}");
+        assert!(second_activity_pos < second_read_pos, "{rendered}");
         assert!(!rendered.contains("[Activity]"), "{rendered}");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.chars().all(|ch| ch == '─') && line.len() >= 80)
+                .count(),
+            1,
+            "{rendered}"
+        );
         assert_eq!(rendered.matches("• Explored").count(), 2, "{rendered}");
     }
 
