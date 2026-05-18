@@ -55,8 +55,8 @@ use crate::interaction::cli::renderer::{
     render_turn_document,
 };
 use crate::interaction::cli::repl::{
-    CliDispatchOutcome, CliTurnOutput, handle_cli_input, handle_cli_input_dispatch_streaming,
-    handle_normalized_input,
+    CliDispatchOutcome, CliDisplayEvent, CliRuntimeEvent, CliTurnOutput, handle_cli_input,
+    handle_cli_input_dispatch_streaming, handle_normalized_input,
 };
 use crate::interaction::dispatcher::NotificationDispatcher;
 use crate::interaction::envelope::NormalizedInput;
@@ -614,6 +614,50 @@ enum TuiExitGesture {
 struct TuiResumePickerState {
     sessions: Vec<SessionSummary>,
     selected: usize,
+}
+
+fn clear_tui_interrupt_ui_state(
+    app_state: &AppState,
+    input: &mut String,
+    cursor_index: &mut usize,
+    selected_suggestion: &mut Option<usize>,
+    suggestion_scroll_top: &mut usize,
+    resume_picker: &mut Option<TuiResumePickerState>,
+    pending_exit_gesture: &mut Option<(TuiExitGesture, Instant)>,
+    selection: &mut TuiSelectionState,
+) {
+    app_state.permission_context.set_pending_approval(None);
+    input.clear();
+    *cursor_index = 0;
+    *selected_suggestion = None;
+    *suggestion_scroll_top = 0;
+    *resume_picker = None;
+    *pending_exit_gesture = None;
+    selection.clear();
+}
+
+fn tui_visible_input_suggestions(
+    app_state: &AppState,
+    input: &str,
+    resume_picker_open: bool,
+    suppress_suggestions: bool,
+) -> Vec<TuiSuggestion> {
+    if resume_picker_open || suppress_suggestions {
+        Vec::new()
+    } else {
+        tui_input_suggestions(app_state, input)
+    }
+}
+
+fn tui_turn_output_is_interrupted(output: &CliTurnOutput) -> bool {
+    output.primary_text == CONVERSATION_INTERRUPTED_MESSAGE
+        || output.events.iter().any(|event| {
+            matches!(
+                event,
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { kind, .. })
+                    if kind == "aborted_streaming" || kind == "aborted_tools"
+            )
+        })
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -6207,6 +6251,7 @@ impl RuntimeBootstrap {
         let mut click_state = TuiClickState::default();
         let mut resume_picker: Option<TuiResumePickerState> = None;
         let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
+        let mut suppress_suggestions_until_input_change = false;
         const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
         const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
@@ -6224,11 +6269,12 @@ impl RuntimeBootstrap {
             {
                 pending_exit_gesture = None;
             }
-            let suggestions = if resume_picker.is_some() {
-                Vec::new()
-            } else {
-                tui_input_suggestions(&app_state, &input)
-            };
+            let suggestions = tui_visible_input_suggestions(
+                &app_state,
+                &input,
+                resume_picker.is_some(),
+                suppress_suggestions_until_input_change,
+            );
             selected_suggestion = if !suggestions.is_empty() {
                 Some(
                     selected_suggestion
@@ -6326,6 +6372,46 @@ impl RuntimeBootstrap {
                     }
 
                     if let Some(gesture) = tui_exit_gesture_for_key(&key) {
+                        if engine.has_active_turn()
+                            || app_state.permission_context.pending_approval().is_some()
+                        {
+                            let interrupted = engine.interrupt_active_turn();
+                            if !interrupted {
+                                log_tui_runtime_issue(
+                                    "tui_interrupt_without_active_turn",
+                                    "Esc cleared pending TUI state without an active turn",
+                                );
+                            }
+                            clear_tui_interrupt_ui_state(
+                                &app_state,
+                                &mut input,
+                                &mut cursor_index,
+                                &mut selected_suggestion,
+                                &mut suggestion_scroll_top,
+                                &mut resume_picker,
+                                &mut pending_exit_gesture,
+                                &mut selection,
+                            );
+                            suppress_suggestions_until_input_change = true;
+                            active_turn_started_at = None;
+                            last_turn_duration = None;
+                            follow_content_tail = true;
+                            content_scroll_top = usize::MAX;
+                            current_document = render_turn_document(&tui_interrupted_turn_output());
+                            self.print_tui_interactive_frame(
+                                &app_state,
+                                &current_document,
+                                "",
+                                &[],
+                                None,
+                                0,
+                                0,
+                                TuiTurnStatus::Idle,
+                                0,
+                                &selection,
+                            );
+                            continue;
+                        }
                         if input.starts_with('/')
                             && !suggestions.is_empty()
                             && selected_suggestion.is_some()
@@ -6339,6 +6425,7 @@ impl RuntimeBootstrap {
                             cursor_index = 0;
                             selected_suggestion = None;
                             pending_exit_gesture = None;
+                            suppress_suggestions_until_input_change = true;
                             continue;
                         }
                         let should_exit = pending_exit_gesture
@@ -6439,6 +6526,7 @@ impl RuntimeBootstrap {
                             cursor_index = 0;
                             selected_suggestion = None;
                             suggestion_scroll_top = 0;
+                            suppress_suggestions_until_input_change = false;
                             follow_content_tail = true;
                             content_scroll_top = usize::MAX;
                             active_turn_started_at = Some(Instant::now());
@@ -6487,6 +6575,7 @@ impl RuntimeBootstrap {
                                             || tui_poll_and_interrupt_active_turn(&interrupt_engine);
                                         if interrupted {
                                             update_turn_interrupted.store(true, Ordering::SeqCst);
+                                            app_state.permission_context.set_pending_approval(None);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc during output update",
@@ -6544,6 +6633,7 @@ impl RuntimeBootstrap {
                                         );
                                         if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
                                             update_turn_interrupted.store(true, Ordering::SeqCst);
+                                            app_state.permission_context.set_pending_approval(None);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc after output update",
@@ -6576,6 +6666,7 @@ impl RuntimeBootstrap {
                                         _ = tokio::time::sleep(Duration::from_millis(50)) => {
                                             if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
                                                 turn_interrupted.store(true, Ordering::SeqCst);
+                                                app_state.permission_context.set_pending_approval(None);
                                                 log_tui_runtime_issue(
                                                     "tui_interrupt",
                                                     "active turn interrupted by Esc",
@@ -6605,42 +6696,58 @@ impl RuntimeBootstrap {
                                     continue;
                                 }
                             };
-                            match dispatch.system_trap.clone() {
-                                Some(SystemTrapAction::NewSession) => {
-                                    match self.create_new_session(&mut app_state, engine) {
-                                        Ok(new_session_id) => {
-                                            current_document =
-                                                render_turn_document(&CliTurnOutput {
-                                                    primary_text: format!(
-                                                        "Started new session {new_session_id}."
-                                                    ),
-                                                    events: vec![],
-                                                });
-                                        }
-                                        Err(error) => {
-                                            log_tui_runtime_issue(
-                                                "new_session_error",
-                                                &error.to_string(),
-                                            );
-                                            current_document =
-                                                render_turn_document(&CliTurnOutput {
-                                                    primary_text: format!(
-                                                        "Could not start a new session: {error}"
-                                                    ),
-                                                    events: vec![],
-                                                });
+                            let dispatch_was_interrupted =
+                                tui_turn_output_is_interrupted(&dispatch.output);
+                            if dispatch_was_interrupted {
+                                clear_tui_interrupt_ui_state(
+                                    &app_state,
+                                    &mut input,
+                                    &mut cursor_index,
+                                    &mut selected_suggestion,
+                                    &mut suggestion_scroll_top,
+                                    &mut resume_picker,
+                                    &mut pending_exit_gesture,
+                                    &mut selection,
+                                );
+                                suppress_suggestions_until_input_change = true;
+                            }
+                            if dispatch_was_interrupted {
+                                current_document =
+                                    render_turn_document(&tui_interrupted_turn_output());
+                            } else {
+                                match dispatch.system_trap.clone() {
+                                    Some(SystemTrapAction::NewSession) => {
+                                        match self.create_new_session(&mut app_state, engine) {
+                                            Ok(new_session_id) => {
+                                                current_document =
+                                                    render_turn_document(&CliTurnOutput {
+                                                        primary_text: format!(
+                                                            "Started new session {new_session_id}."
+                                                        ),
+                                                        events: vec![],
+                                                    });
+                                            }
+                                            Err(error) => {
+                                                log_tui_runtime_issue(
+                                                    "new_session_error",
+                                                    &error.to_string(),
+                                                );
+                                                current_document =
+                                                    render_turn_document(&CliTurnOutput {
+                                                        primary_text: format!(
+                                                            "Could not start a new session: {error}"
+                                                        ),
+                                                        events: vec![],
+                                                    });
+                                            }
                                         }
                                     }
-                                }
-                                Some(SystemTrapAction::OpenResumePicker) => {
-                                    resume_picker = Some(self.open_resume_picker(&app_state));
-                                }
-                                Some(SystemTrapAction::ResumeSession(session_id)) => {
-                                    match self.switch_to_session_id(
-                                        &mut app_state,
-                                        engine,
-                                        &session_id,
-                                    ) {
+                                    Some(SystemTrapAction::OpenResumePicker) => {
+                                        resume_picker = Some(self.open_resume_picker(&app_state));
+                                    }
+                                    Some(SystemTrapAction::ResumeSession(session_id)) => match self
+                                        .switch_to_session_id(&mut app_state, engine, &session_id)
+                                    {
                                         Ok(resumed_id) => {
                                             current_document =
                                                 render_turn_document(&CliTurnOutput {
@@ -6664,23 +6771,23 @@ impl RuntimeBootstrap {
                                                 },
                                             );
                                         }
-                                    }
-                                }
-                                Some(SystemTrapAction::RequireReboot) => {
-                                    current_document = render_turn_document(&CliTurnOutput {
-                                        primary_text: "A reboot is required.".into(),
-                                        events: vec![],
-                                    });
-                                }
-                                None => {
-                                    current_document = if is_clear_command {
-                                        render_turn_document(&CliTurnOutput {
-                                            primary_text: String::new(),
+                                    },
+                                    Some(SystemTrapAction::RequireReboot) => {
+                                        current_document = render_turn_document(&CliTurnOutput {
+                                            primary_text: "A reboot is required.".into(),
                                             events: vec![],
-                                        })
-                                    } else {
-                                        render_turn_document(&dispatch.output)
-                                    };
+                                        });
+                                    }
+                                    None => {
+                                        current_document = if is_clear_command {
+                                            render_turn_document(&CliTurnOutput {
+                                                primary_text: String::new(),
+                                                events: vec![],
+                                            })
+                                        } else {
+                                            render_turn_document(&dispatch.output)
+                                        };
+                                    }
                                 }
                             }
                             if follow_content_tail {
@@ -6690,8 +6797,11 @@ impl RuntimeBootstrap {
                                     max_tui_scroll_top_for_document(&current_document, "", &[]);
                                 content_scroll_top = content_scroll_top.min(max_scroll_top);
                             }
-                            last_turn_duration =
-                                active_turn_started_at.map(|started_at| started_at.elapsed());
+                            last_turn_duration = if dispatch_was_interrupted {
+                                None
+                            } else {
+                                active_turn_started_at.map(|started_at| started_at.elapsed())
+                            };
                             active_turn_started_at = None;
                         }
                         KeyCode::Backspace => {
@@ -6699,6 +6809,7 @@ impl RuntimeBootstrap {
                                 continue;
                             }
                             if backspace_input_char(&mut input, &mut cursor_index) {
+                                suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
                             }
@@ -6708,6 +6819,7 @@ impl RuntimeBootstrap {
                                 continue;
                             }
                             if delete_input_char(&mut input, cursor_index) {
+                                suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
                             }
@@ -6721,6 +6833,7 @@ impl RuntimeBootstrap {
                             {
                                 input = completed;
                                 cursor_index = input.chars().count();
+                                suppress_suggestions_until_input_change = false;
                             }
                         }
                         KeyCode::Left => {
@@ -6860,6 +6973,7 @@ impl RuntimeBootstrap {
                             }
                             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                                 insert_input_char(&mut input, &mut cursor_index, ch);
+                                suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
                             }
@@ -6873,6 +6987,7 @@ impl RuntimeBootstrap {
                     }
                     pending_exit_gesture = None;
                     insert_input_text(&mut input, &mut cursor_index, &data);
+                    suppress_suggestions_until_input_change = false;
                     selected_suggestion = Some(0);
                     suggestion_scroll_top = 0;
                 }
@@ -8520,6 +8635,83 @@ mod tests {
                 .iter()
                 .all(|suggestion| suggestion.submit_on_enter)
         );
+    }
+
+    #[test]
+    fn tui_interrupt_reset_clears_pending_approval_and_expanded_lists() {
+        let app_state = test_app_state();
+        app_state
+            .permission_context
+            .set_pending_approval(Some(PendingApproval {
+                tool_name: "Bash".into(),
+                tool_input: r#"{"command":"pwd *"}"#.into(),
+                message: "approval required".into(),
+                code: Some("policy_escalation".into()),
+                summary: Some("Bash pending approval".into()),
+                detail: None,
+                approval_kind: Some("tool_permission".into()),
+                escalation_reasons: vec!["shell_operator.wildcard".into()],
+            }));
+        assert_eq!(
+            super::tui_visible_input_suggestions(&app_state, "", false, false).len(),
+            3
+        );
+
+        let mut input = "approve".to_string();
+        let mut cursor_index = input.chars().count();
+        let mut selected_suggestion = Some(1);
+        let mut suggestion_scroll_top = 2usize;
+        let mut resume_picker = Some(super::TuiResumePickerState {
+            sessions: Vec::new(),
+            selected: 0,
+        });
+        let mut pending_exit_gesture =
+            Some((super::TuiExitGesture::Esc, std::time::Instant::now()));
+        let mut selection = super::TuiSelectionState {
+            anchor: Some(super::TuiDocumentPosition { line: 1, unit: 2 }),
+            focus: Some(super::TuiDocumentPosition { line: 3, unit: 4 }),
+            mode: super::TuiSelectionMode::Line,
+            dragging: true,
+        };
+
+        super::clear_tui_interrupt_ui_state(
+            &app_state,
+            &mut input,
+            &mut cursor_index,
+            &mut selected_suggestion,
+            &mut suggestion_scroll_top,
+            &mut resume_picker,
+            &mut pending_exit_gesture,
+            &mut selection,
+        );
+
+        assert!(app_state.permission_context.pending_approval().is_none());
+        assert!(input.is_empty());
+        assert_eq!(cursor_index, 0);
+        assert_eq!(selected_suggestion, None);
+        assert_eq!(suggestion_scroll_top, 0);
+        assert!(resume_picker.is_none());
+        assert!(pending_exit_gesture.is_none());
+        assert_eq!(selection, super::TuiSelectionState::default());
+        assert!(super::tui_visible_input_suggestions(&app_state, "", false, true).is_empty());
+        assert!(super::tui_visible_input_suggestions(&app_state, "", false, false).is_empty());
+    }
+
+    #[test]
+    fn tui_turn_output_interruption_detection_catches_terminal_abort() {
+        let output = crate::interaction::cli::repl::CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                    crate::interaction::cli::repl::CliRuntimeEvent::Terminal {
+                        kind: "aborted_tools".into(),
+                        text: "aborted_tools".into(),
+                    },
+                ),
+            ],
+        };
+
+        assert!(super::tui_turn_output_is_interrupted(&output));
     }
 
     #[test]
