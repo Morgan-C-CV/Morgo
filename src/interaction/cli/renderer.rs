@@ -1,7 +1,7 @@
 use crate::core::message::is_legacy_hidden_primary_line;
-use crate::core::output::{OutputBlock, blocks_to_plain_text};
+use crate::core::output::{blocks_to_plain_text, OutputBlock};
 use crate::interaction::cli::repl::CliTurnOutput;
-use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
+use crate::interaction::view::{build_surface_view, SurfaceItem, SurfaceView, TaskView};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -260,10 +260,14 @@ fn should_render_interleaved_activity(view: &SurfaceView) -> bool {
             item,
             SurfaceItem::ToolCallStarted { .. } | SurfaceItem::ToolResult { .. }
         )
-    }) && view
-        .items
-        .iter()
-        .any(|item| matches!(item, SurfaceItem::AssistantDelta { text } if !text.is_empty()))
+    }) && (!view.primary_text.is_empty()
+        || view
+            .items
+            .iter()
+            .any(|item| matches!(item, SurfaceItem::AssistantDelta { text } if !text.is_empty()))
+        || view.items.iter().any(|item| {
+            matches!(item, SurfaceItem::Terminal { kind, .. } if terminal_interrupt_message(kind).is_some())
+        }))
 }
 
 fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
@@ -272,6 +276,11 @@ fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
     for item in &view.items {
         match item {
             SurfaceItem::AssistantDelta { text } => builder.push_text(text),
+            SurfaceItem::Terminal { kind, .. } if terminal_interrupt_message(kind).is_some() => {
+                if let Some(message) = terminal_interrupt_message(kind) {
+                    builder.push_text(message);
+                }
+            }
             SurfaceItem::ToolCallStarted { tool_name, input } => {
                 builder.flush_text();
                 builder.push_tool_call(tool_name, input);
@@ -286,8 +295,8 @@ fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
                 builder.push_tool_result(tool_name, content, summary.as_deref(), detail.as_deref());
             }
             _ => {
-                builder.flush_activity_before_non_activity();
                 if let Some(block) = render_block_for_surface_item(item) {
+                    builder.flush_activity_before_non_activity();
                     builder.push_non_activity_block(block);
                 }
             }
@@ -303,6 +312,7 @@ struct InterleavedRenderBuilder {
     text_buffer: String,
     activity: ActivityStageBuilder,
     last_flushed_activity: bool,
+    saw_text: bool,
 }
 
 impl InterleavedRenderBuilder {
@@ -350,6 +360,7 @@ impl InterleavedRenderBuilder {
         self.blocks.push(RenderBlock::PrimaryText(std::mem::take(
             &mut self.text_buffer,
         )));
+        self.saw_text = true;
         self.last_flushed_activity = false;
     }
 
@@ -369,9 +380,9 @@ impl InterleavedRenderBuilder {
         self.flush_text();
         self.flush_activity();
 
-        if self.blocks.is_empty() && !primary_text.is_empty() {
-            self.blocks
-                .push(RenderBlock::PrimaryText(primary_text.into()));
+        if !primary_text.is_empty() && !self.saw_text {
+            self.push_text(primary_text);
+            self.flush_text();
         }
 
         RenderDocument {
@@ -408,9 +419,17 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
         | SurfaceItem::ToolCallStarted { .. }
         | SurfaceItem::AssistantDelta { .. } => None,
         SurfaceItem::ToolResult { .. } => None,
-        SurfaceItem::Transition { .. }
-        | SurfaceItem::Terminal { .. }
-        | SurfaceItem::SessionMilestone { .. } => None,
+        SurfaceItem::Terminal { kind, .. } => {
+            terminal_interrupt_message(kind).map(|message| RenderBlock::PrimaryText(message.into()))
+        }
+        SurfaceItem::Transition { .. } | SurfaceItem::SessionMilestone { .. } => None,
+    }
+}
+
+fn terminal_interrupt_message(kind: &str) -> Option<&'static str> {
+    match kind {
+        "aborted_streaming" | "aborted_tools" => Some("Request interrupted."),
+        _ => None,
     }
 }
 
@@ -1413,11 +1432,8 @@ mod tests {
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(!rendered.contains("[Activity]"));
         assert!(rendered.contains("• RAN cargo test -- --nocapture"));
-        assert!(
-            !rendered.contains(
-                "Command: cargo test --package agent --lib -- interaction::cli::renderer"
-            )
-        );
+        assert!(!rendered
+            .contains("Command: cargo test --package agent --lib -- interaction::cli::renderer"));
         assert!(rendered.contains("Exit code: 0"));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
         assert!(!rendered.contains("[Tool result]"));
@@ -1452,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_places_primary_text_before_activity_without_duplication() {
+    fn tui_places_primary_text_after_activity_when_message_events_are_missing() {
         let turn = CliTurnOutput {
             primary_text: "### 方案 B：直接给你一个“改造优先级清单”".into(),
             events: vec![
@@ -1472,7 +1488,9 @@ mod tests {
             .find("### 方案 B：直接给你一个“改造优先级清单”")
             .expect("final answer text");
         let activity_pos = rendered.find("• Explored").expect("activity section");
-        assert!(answer_pos < activity_pos, "{rendered}");
+        let divider_pos = rendered.find("────────────────").expect("divider");
+        assert!(activity_pos < divider_pos, "{rendered}");
+        assert!(divider_pos < answer_pos, "{rendered}");
         assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
         assert!(rendered.contains(
             "SEARCH createBridgeLogger|bridgeUI|BridgeLogger|spawnMode|sessionDisplayInfo|qr in src"
@@ -1685,6 +1703,135 @@ mod tests {
                 .count(),
             1,
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn tui_invisible_runtime_events_do_not_split_activity_groups() {
+        let turn = CliTurnOutput {
+            primary_text: "我继续只读关键路径。".into(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted {
+                    text: "我继续只读关键路径。\n".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"tick|frame|render","path":"runtime.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::SessionMilestone {
+                    kind: "tool_result_committed".into(),
+                    text: "Tool result committed".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Transition {
+                    kind: "continue".into(),
+                    text: "Continuing".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"stream|delta|partial","path":"runtime.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::SessionMilestone {
+                    kind: "tool_result_committed".into(),
+                    text: "Tool result committed".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"runtime.rs"}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let first_search_pos = rendered
+            .find("SEARCH tick|frame|render in runtime.rs")
+            .unwrap();
+        let second_search_pos = rendered
+            .find("SEARCH stream|delta|partial in runtime.rs")
+            .unwrap();
+        let read_pos = rendered.find("READ runtime.rs").unwrap();
+
+        assert!(first_search_pos < second_search_pos, "{rendered}");
+        assert!(second_search_pos < read_pos, "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
+        assert!(!rendered.contains("────────────────"), "{rendered}");
+    }
+
+    #[test]
+    fn tui_keeps_activity_before_primary_text_when_message_events_are_missing() {
+        let turn = CliTurnOutput {
+            primary_text: "我已经把关键路径收敛到 runtime.rs。".into(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"tick|render|stream","path":"runtime.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::SessionMilestone {
+                    kind: "tool_result_committed".into(),
+                    text: "Tool result committed".into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Read".into(),
+                    input: r#"{"file_path":"runtime.rs"}"#.into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        let activity_pos = rendered
+            .find("SEARCH tick|render|stream in runtime.rs")
+            .unwrap();
+        let read_pos = rendered.find("READ runtime.rs").unwrap();
+        let divider_pos = rendered.find("────────────────").unwrap();
+        let text_pos = rendered
+            .find("我已经把关键路径收敛到 runtime.rs。")
+            .unwrap();
+
+        assert!(activity_pos < read_pos, "{rendered}");
+        assert!(read_pos < divider_pos, "{rendered}");
+        assert!(divider_pos < text_pos, "{rendered}");
+        assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
+    }
+
+    #[test]
+    fn tui_renders_interrupted_terminal_events_but_hides_completed_terminal() {
+        let interrupted = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Grep".into(),
+                    input: r#"{"pattern":"stream","path":"runtime.rs"}"#.into(),
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal {
+                    kind: "aborted_streaming".into(),
+                    text: "aborted_streaming".into(),
+                }),
+            ],
+        };
+        let completed = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal {
+                kind: "completed".into(),
+                text: "completed".into(),
+            })],
+        };
+
+        let interrupted_rendered = strip_ansi(&render_turn_tui_output(&interrupted));
+        let activity_pos = interrupted_rendered
+            .find("SEARCH stream in runtime.rs")
+            .unwrap();
+        let divider_pos = interrupted_rendered.find("────────────────").unwrap();
+        let message_pos = interrupted_rendered.find("Request interrupted.").unwrap();
+        assert!(activity_pos < divider_pos, "{interrupted_rendered}");
+        assert!(divider_pos < message_pos, "{interrupted_rendered}");
+
+        let completed_rendered = strip_ansi(&render_turn_tui_output(&completed));
+        assert!(
+            !completed_rendered.contains("completed"),
+            "{completed_rendered}"
+        );
+        assert!(
+            !completed_rendered.contains("Request interrupted."),
+            "{completed_rendered}"
         );
     }
 
