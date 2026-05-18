@@ -2301,14 +2301,59 @@ fn place_activity_below_startup_card(screen: &mut crate::interaction::cli::rende
 }
 
 fn render_command_suggestion_line(suggestion: &TuiSuggestion, selected: bool) -> String {
-    let label = colorize_ansi(&suggestion.label, suggestion.accent_color);
-    let body = format!("{} {}", label, colorize_ansi(&suggestion.detail, "2;37"));
+    render_command_suggestion_line_with_theme(
+        suggestion,
+        selected,
+        tui_should_use_light_input_palette(),
+    )
+}
+
+fn render_command_suggestion_line_with_theme(
+    suggestion: &TuiSuggestion,
+    selected: bool,
+    light_mode: bool,
+) -> String {
+    let label_color = tui_suggestion_label_color_code(suggestion.accent_color, light_mode);
+    let detail_color = tui_suggestion_detail_color_code(light_mode);
+
+    if selected && light_mode {
+        return format!(
+            "\x1b[48;5;250;1;30m> \x1b[48;5;250;{}m{}\x1b[48;5;250;{}m {}\x1b[0m",
+            label_color, suggestion.label, detail_color, suggestion.detail
+        );
+    }
+
+    let label = colorize_ansi(&suggestion.label, label_color);
+    let body = format!(
+        "{} {}",
+        label,
+        colorize_ansi(&suggestion.detail, detail_color)
+    );
 
     if selected {
         colorize_ansi(&format!("> {body}"), "1;97;44")
     } else {
         format!("  {body}")
     }
+}
+
+fn tui_suggestion_label_color_code(accent_color: &'static str, light_mode: bool) -> &'static str {
+    if !light_mode {
+        return accent_color;
+    }
+    match accent_color {
+        "31" => "38;5;124",
+        "32" => "38;5;28",
+        "33" => "38;5;136",
+        "34" => "38;5;24",
+        "35" => "38;5;90",
+        "36" => "38;5;30",
+        _ => "30",
+    }
+}
+
+fn tui_suggestion_detail_color_code(light_mode: bool) -> &'static str {
+    if light_mode { "30" } else { "2;37" }
 }
 
 fn colorize_ansi(text: &str, code: &str) -> String {
@@ -4929,6 +4974,28 @@ mod tui_output_tests {
         assert!(rendered.contains("Balanced speed and quality"));
         assert!(!rendered.contains("reasoning tier"));
         assert!(!rendered.contains("当前组合"));
+    }
+
+    #[test]
+    fn tui_model_menu_uses_readable_light_theme_colors() {
+        let app_state = test_app_state();
+        let suggestions =
+            heuristic_tui_suggestions(&app_state, "/model use ").expect("model use suggestions");
+        let rendered = suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                super::render_command_suggestion_line_with_theme(item, index == 0, true)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Fastest and most cost-efficient"));
+        assert!(rendered.contains("\x1b[30m"));
+        assert!(rendered.contains("\x1b[48;5;250;1;30m> "));
+        assert!(!rendered.contains("\x1b[2;37m"));
+        assert!(!rendered.contains(";44m"));
+        assert!(!rendered.contains("1;97;44"));
     }
 
     #[test]
