@@ -416,9 +416,7 @@ fn check_turn_limits(
             if state.transition == Some(Continue::FinalUserReport) {
                 return None;
             }
-            let count = state
-                .max_turn_terminal_count
-                .unwrap_or(state.turn_count);
+            let count = state.max_turn_terminal_count.unwrap_or(state.turn_count);
             let events = EventCollector::from_events(events.clone_events(), events.sink_clone());
             return Some(query_result_with_synthetic_final_report_terminal(
                 state.clone(),
@@ -2325,9 +2323,7 @@ fn finalize_normal_turn(
         if !is_result_successful(&state) {
             commit_max_turn_synthetic_report(&mut state, &mut events);
         }
-        let count = state
-            .max_turn_terminal_count
-            .unwrap_or(state.turn_count);
+        let count = state.max_turn_terminal_count.unwrap_or(state.turn_count);
         return result_with_terminal(state, events, Terminal::MaxTurns { count });
     }
 
@@ -2426,10 +2422,12 @@ fn is_result_successful(state: &LoopState) -> bool {
 }
 
 fn latest_result_message(messages: &[Message]) -> Option<&Message> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.role, crate::core::message::Role::Assistant | crate::core::message::Role::User))
+    messages.iter().rev().find(|message| {
+        matches!(
+            message.role,
+            crate::core::message::Role::Assistant | crate::core::message::Role::User
+        )
+    })
 }
 
 fn is_tool_result_user_message(message: &Message) -> bool {
@@ -2971,12 +2969,12 @@ mod tests {
     use super::{
         LoopState, QueryParams, apply_tool_report_context, batch_follow_up_message,
         classify_pre_stream_failure_code, classify_stream_failure_code, extract_read_target_path,
-        extract_verified_target_from_messages, is_broad_discovery_tool, is_result_successful,
-        is_prompt_only_discovery_gate_record, prompt_only_discovery_gate_outcome,
-        prompt_only_output_contract_from_messages, report_detail_or_summary,
-        should_discourage_repeated_discovery_search, should_gate_prompt_only_discovery,
-        should_lock_prompt_only_discovery, should_return_terminal_after_recovery_exhausted,
-        tool_follow_up_message,
+        extract_verified_target_from_messages, is_broad_discovery_tool,
+        is_prompt_only_discovery_gate_record, is_result_successful,
+        prompt_only_discovery_gate_outcome, prompt_only_output_contract_from_messages,
+        report_detail_or_summary, should_discourage_repeated_discovery_search,
+        should_gate_prompt_only_discovery, should_lock_prompt_only_discovery,
+        should_return_terminal_after_recovery_exhausted, tool_follow_up_message,
     };
     use crate::core::events::ServiceFailureCode;
     use crate::core::message::Message;
@@ -3258,7 +3256,9 @@ mod tests {
         assert!(is_result_successful(&state));
 
         let mut failed = LoopState::new(&QueryParams::default());
-        failed.messages.push(Message::user("plain note from runtime"));
+        failed
+            .messages
+            .push(Message::user("plain note from runtime"));
         failed.last_stop_reason = Some(crate::service::api::streaming::StopReason::EndTurn);
         assert!(!is_result_successful(&failed));
 

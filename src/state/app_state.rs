@@ -610,11 +610,7 @@ fn prepend_notice(notice: Option<String>, body: String) -> String {
     }
 }
 
-fn approval_continuation_prompt(
-    tool_name: &str,
-    tool_input: &str,
-    tool_result: String,
-) -> String {
+fn approval_continuation_prompt(tool_name: &str, tool_input: &str, tool_result: String) -> String {
     format!(
         "Approval resolved for tool {tool_name}.\n\
          The approved tool has now run.\n\n\

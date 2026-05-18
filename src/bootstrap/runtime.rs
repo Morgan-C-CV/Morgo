@@ -475,15 +475,8 @@ fn restore_tui_control_sequences(stdout: &mut io::Stdout, control_options: TuiCo
 
 fn tui_control_options() -> TuiControlOptions {
     let term_program = std::env::var("TERM_PROGRAM").ok();
-    let vscode_ipc_hook_present = std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some();
     TuiControlOptions {
-        keyboard_enhancements_enabled: tui_should_enable_keyboard_enhancements_for(
-            std::env::var("MORGO_TUI_KEYBOARD_ENHANCEMENTS")
-                .ok()
-                .as_deref(),
-            term_program.as_deref(),
-            vscode_ipc_hook_present,
-        ),
+        keyboard_enhancements_enabled: tui_should_enable_keyboard_enhancements(),
         mouse_capture_enabled: tui_should_enable_mouse_capture_for(
             std::env::var("MORGO_TUI_MOUSE_CAPTURE").ok().as_deref(),
             term_program.as_deref(),
@@ -2001,23 +1994,24 @@ fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
 }
 
 fn format_tui_model_and_cwd(app_state: &AppState) -> String {
-    let (model_label, model_level) = if let Some(runtime) = app_state.active_model_runtime.as_ref() {
+    let (model_label, model_level) = if let Some(runtime) = app_state.active_model_runtime.as_ref()
+    {
         let snapshot = runtime.snapshot_blocking();
         (
             snapshot.config.model_id,
             snapshot.active_level.map(|level| level.as_str()),
         )
     } else {
-        (
-            app_state.active_model_provider_summary.model.clone(),
-            None,
-        )
+        (app_state.active_model_provider_summary.model.clone(), None)
     };
     let cwd_label = shorten_home_path(&app_state.current_working_directory());
     let light_mode = tui_should_use_light_input_palette();
     format!(
         "{} · {}",
-        colorize_ansi(&model_label, model_level_color_code(model_level, light_mode)),
+        colorize_ansi(
+            &model_label,
+            model_level_color_code(model_level, light_mode)
+        ),
         colorize_ansi(&cwd_label, cwd_color_code(light_mode))
     )
 }
@@ -2043,11 +2037,7 @@ fn model_level_color_code(level: Option<&str>, light_mode: bool) -> &'static str
 }
 
 fn cwd_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;72;145;96"
-    } else {
-        "2;92"
-    }
+    if light_mode { "38;2;72;145;96" } else { "2;92" }
 }
 
 fn shorten_home_path(path: &std::path::Path) -> String {
@@ -2218,35 +2208,19 @@ fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
 }
 
 fn tui_startup_title_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;0;82;135"
-    } else {
-        "1;34"
-    }
+    if light_mode { "38;2;0;82;135" } else { "1;34" }
 }
 
 fn tui_startup_muted_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;68;82;94"
-    } else {
-        "90"
-    }
+    if light_mode { "38;2;68;82;94" } else { "90" }
 }
 
 fn tui_startup_face_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;0;120;145"
-    } else {
-        "1;36"
-    }
+    if light_mode { "38;2;0;120;145" } else { "1;36" }
 }
 
 fn tui_startup_label_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;25;92;145"
-    } else {
-        "34"
-    }
+    if light_mode { "38;2;25;92;145" } else { "34" }
 }
 
 fn tui_startup_separator_color_code(light_mode: bool) -> &'static str {
@@ -2258,11 +2232,7 @@ fn tui_startup_separator_color_code(light_mode: bool) -> &'static str {
 }
 
 fn tui_startup_value_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;45;55;65"
-    } else {
-        "2;37"
-    }
+    if light_mode { "38;2;45;55;65" } else { "2;37" }
 }
 
 fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::renderer::TuiScreen {
@@ -2396,7 +2366,7 @@ fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInpu
 fn tui_input_palette_for_light_mode(light_mode: bool) -> TuiInputPalette {
     if light_mode {
         TuiInputPalette {
-            background_code: "48;2;216;230;242",
+            background_code: "48;2;190;218;240",
             text_code: "30",
             prefix_code: "38;2;20;104;150",
         }
@@ -2530,11 +2500,7 @@ fn tui_separator_color_code(light_mode: bool) -> &'static str {
 }
 
 fn tui_meta_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;82;94;105"
-    } else {
-        "2;37"
-    }
+    if light_mode { "38;2;82;94;105" } else { "2;37" }
 }
 
 fn render_tui_content_line_with_palette(
@@ -3629,6 +3595,12 @@ fn tui_terminal_program_is_ide(value: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn tui_terminal_program_is_macos_native(term_program: Option<&str>) -> bool {
+    term_program
+        .map(|value| value.eq_ignore_ascii_case("Apple_Terminal"))
+        .unwrap_or(false)
+}
+
 fn tui_detect_ide_terminal() -> bool {
     tui_terminal_context_is_ide(
         std::env::var("TERM_PROGRAM").ok().as_deref(),
@@ -3658,6 +3630,20 @@ fn tui_should_enable_keyboard_enhancements_for(
             _ => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
         },
         None => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
+    }
+}
+
+fn tui_should_enable_mouse_capture_for(
+    override_value: Option<&str>,
+    term_program: Option<&str>,
+) -> bool {
+    match override_value {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => !tui_terminal_program_is_macos_native(term_program),
+        },
+        None => !tui_terminal_program_is_macos_native(term_program),
     }
 }
 
@@ -3731,15 +3717,15 @@ mod tui_output_tests {
     use super::{
         ModelLevel, TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState,
         TuiTurnStatus, backspace_input_char, begin_selection, build_tui_rendered_content,
-        delete_input_char, format_tui_model_and_cwd, heuristic_tui_suggestions,
-        insert_input_char, insert_input_text, normalize_tui_newlines, normalize_tui_pasted_text,
-        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
-        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
-        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_context_document,
-        tui_exit_gesture_for_key, tui_input_viewport, tui_is_copy_key,
-        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
-        tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
-        tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
+        delete_input_char, format_tui_model_and_cwd, heuristic_tui_suggestions, insert_input_char,
+        insert_input_text, normalize_tui_newlines, normalize_tui_pasted_text, osc52_copy_sequence,
+        render_command_suggestion_line, render_fixed_tui_layout, render_tui_rendered_line,
+        select_line_at, select_word_at, selected_text, shift_selection_for_scroll,
+        status_line_for_tui, strip_ansi_text, tui_context_document, tui_exit_gesture_for_key,
+        tui_input_viewport, tui_is_copy_key, tui_move_suggestion_selection_down,
+        tui_move_suggestion_selection_up, tui_should_enable_keyboard_enhancements_for,
+        tui_startup_face, tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
+        tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
@@ -4003,13 +3989,9 @@ mod tui_output_tests {
         let rendered = format_tui_model_and_cwd(&app_state);
 
         assert!(
-            rendered.contains("\u{1b}[38;5;208m")
-                || rendered.contains("\u{1b}[38;2;190;80;20m")
+            rendered.contains("\u{1b}[38;5;208m") || rendered.contains("\u{1b}[38;2;190;80;20m")
         );
-        assert!(
-            rendered.contains("\u{1b}[2;92m")
-                || rendered.contains("\u{1b}[38;2;72;145;96m")
-        );
+        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;2;72;145;96m"));
     }
 
     #[test]
@@ -4054,14 +4036,8 @@ mod tui_output_tests {
             &TuiSelectionState::default(),
         );
 
-        assert!(
-            rendered.contains("\u{1b}[32m")
-                || rendered.contains("\u{1b}[38;2;30;130;75m")
-        );
-        assert!(
-            rendered.contains("\u{1b}[2;92m")
-                || rendered.contains("\u{1b}[38;2;72;145;96m")
-        );
+        assert!(rendered.contains("\u{1b}[32m") || rendered.contains("\u{1b}[38;2;30;130;75m"));
+        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;2;72;145;96m"));
     }
 
     #[test]
@@ -4116,12 +4092,14 @@ mod tui_output_tests {
             Some(super::TuiThemePreference::Light),
             Some(0),
             false,
+            false,
             Some(false),
         ));
         assert!(!super::tui_should_use_light_input_palette_with_context(
             Some(super::TuiThemePreference::Dark),
             Some(15),
             true,
+            false,
             Some(true),
         ));
     }
@@ -4132,28 +4110,50 @@ mod tui_output_tests {
             None,
             None,
             true,
+            false,
             Some(true),
         ));
         assert!(!super::tui_should_use_light_input_palette_with_context(
             None,
             None,
             true,
+            false,
             Some(false),
         ));
     }
 
     #[test]
-    fn tui_light_palette_uses_macos_appearance_for_terminal_app_without_colorfgbg() {
+    fn tui_light_palette_uses_macos_appearance_for_apple_terminal_without_colorfgbg() {
         assert!(super::tui_should_use_light_input_palette_with_context(
             None,
             None,
             false,
+            true,
             Some(true),
         ));
         assert!(!super::tui_should_use_light_input_palette_with_context(
             None,
             None,
             false,
+            true,
+            Some(false),
+        ));
+    }
+
+    #[test]
+    fn tui_light_palette_prefers_macos_appearance_over_colorfgbg_for_apple_terminal() {
+        assert!(super::tui_should_use_light_input_palette_with_context(
+            None,
+            Some(0),
+            false,
+            true,
+            Some(true),
+        ));
+        assert!(!super::tui_should_use_light_input_palette_with_context(
+            None,
+            Some(15),
+            false,
+            true,
             Some(false),
         ));
     }
@@ -4167,7 +4167,7 @@ mod tui_output_tests {
         assert_eq!(
             light,
             super::TuiInputPalette {
-                background_code: "48;2;216;230;242",
+                background_code: "48;2;190;218;240",
                 text_code: "30",
                 prefix_code: "38;2;20;104;150",
             }
@@ -4423,9 +4423,9 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;216;230;242;30m"));
+        assert!(rendered.contains("\x1b[48;2;190;218;240;30m"));
         assert!(rendered.contains("\x1b[38;2;20;104;150m>"));
-        assert!(rendered.contains("\x1b[48;2;216;230;242;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;190;218;240;30m older user message"));
     }
 
     #[test]
@@ -4436,8 +4436,8 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;216;230;242;30m"));
-        assert!(rendered.contains("\x1b[48;2;216;230;242;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;190;218;240;30m"));
+        assert!(rendered.contains("\x1b[48;2;190;218;240;30m older user message"));
     }
 
     #[test]
@@ -4665,6 +4665,39 @@ mod tui_output_tests {
             Some("Apple_Terminal"),
             false
         ));
+    }
+
+    #[test]
+    fn tui_mouse_capture_defaults_off_for_apple_terminal_copy_interop() {
+        assert!(!super::tui_should_enable_mouse_capture_for(
+            None,
+            Some("Apple_Terminal")
+        ));
+        assert!(super::tui_should_enable_mouse_capture_for(
+            None,
+            Some("vscode")
+        ));
+        assert!(super::tui_should_enable_mouse_capture_for(
+            Some("1"),
+            Some("Apple_Terminal")
+        ));
+        assert!(!super::tui_should_enable_mouse_capture_for(
+            Some("0"),
+            Some("vscode")
+        ));
+    }
+
+    #[test]
+    fn tui_startup_card_uses_high_contrast_colors_on_light_terminals() {
+        assert_eq!(super::tui_startup_title_color_code(true), "38;2;0;82;135");
+        assert_eq!(super::tui_startup_muted_color_code(true), "38;2;68;82;94");
+        assert_eq!(super::tui_startup_face_color_code(true), "38;2;0;120;145");
+        assert_eq!(super::tui_startup_label_color_code(true), "38;2;25;92;145");
+        assert_eq!(
+            super::tui_startup_separator_color_code(true),
+            "38;2;105;124;140"
+        );
+        assert_eq!(super::tui_startup_value_color_code(true), "38;2;45;55;65");
     }
 
     #[test]

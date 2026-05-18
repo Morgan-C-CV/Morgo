@@ -430,7 +430,9 @@ impl ExplorationEntry {
 
     fn render(&self) -> String {
         match self {
-            Self::Read { paths } => format!("{} {}", style_activity_action("READ"), paths.join(", ")),
+            Self::Read { paths } => {
+                format!("{} {}", style_activity_action("READ"), paths.join(", "))
+            }
             Self::Line(line) => line.clone(),
         }
     }
@@ -479,7 +481,8 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                 } else if let Some(line) = tool_call_activity_line(tool_name, input) {
                     if in_exploration_stage {
                         if !exploration_entries.is_empty() {
-                            current_stage_lines.extend(render_exploration_stage(&exploration_entries));
+                            current_stage_lines
+                                .extend(render_exploration_stage(&exploration_entries));
                             exploration_entries.clear();
                         }
                         flush_activity_stage(&mut stages, &mut current_stage_lines);
@@ -502,7 +505,8 @@ fn build_tool_activity_panel(items: &[SurfaceItem]) -> Option<RenderPanel> {
                 ) {
                     if in_exploration_stage {
                         if !exploration_entries.is_empty() {
-                            current_stage_lines.extend(render_exploration_stage(&exploration_entries));
+                            current_stage_lines
+                                .extend(render_exploration_stage(&exploration_entries));
                             exploration_entries.clear();
                         }
                         flush_activity_stage(&mut stages, &mut current_stage_lines);
