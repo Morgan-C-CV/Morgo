@@ -2019,11 +2019,11 @@ fn format_tui_model_and_cwd(app_state: &AppState) -> String {
 fn model_level_color_code(level: Option<&str>, light_mode: bool) -> &'static str {
     if light_mode {
         match level {
-            Some("xhigh") => "38;2;190;80;20",
-            Some("high") => "38;2;150;110;0",
-            Some("medium") => "38;2;30;130;75",
-            Some("low") => "38;2;90;78;190",
-            _ => "38;2;80;88;96",
+            Some("xhigh") => "38;5;130",
+            Some("high") => "38;5;136",
+            Some("medium") => "38;5;28",
+            Some("low") => "38;5;60",
+            _ => "90",
         }
     } else {
         match level {
@@ -2037,7 +2037,7 @@ fn model_level_color_code(level: Option<&str>, light_mode: bool) -> &'static str
 }
 
 fn cwd_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;72;145;96" } else { "2;92" }
+    if light_mode { "38;5;65" } else { "2;92" }
 }
 
 fn shorten_home_path(path: &std::path::Path) -> String {
@@ -2208,31 +2208,27 @@ fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
 }
 
 fn tui_startup_title_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;0;82;135" } else { "1;34" }
+    if light_mode { "1;30" } else { "1;34" }
 }
 
 fn tui_startup_muted_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;68;82;94" } else { "90" }
+    if light_mode { "90" } else { "90" }
 }
 
 fn tui_startup_face_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;0;120;145" } else { "1;36" }
+    if light_mode { "90" } else { "1;36" }
 }
 
 fn tui_startup_label_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;25;92;145" } else { "34" }
+    if light_mode { "30" } else { "34" }
 }
 
 fn tui_startup_separator_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;105;124;140"
-    } else {
-        "2;36"
-    }
+    if light_mode { "90" } else { "2;36" }
 }
 
 fn tui_startup_value_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;45;55;65" } else { "2;37" }
+    if light_mode { "30" } else { "2;37" }
 }
 
 fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::renderer::TuiScreen {
@@ -2366,9 +2362,9 @@ fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInpu
 fn tui_input_palette_for_light_mode(light_mode: bool) -> TuiInputPalette {
     if light_mode {
         TuiInputPalette {
-            background_code: "48;2;190;218;240",
+            background_code: "48;5;252",
             text_code: "30",
-            prefix_code: "38;2;20;104;150",
+            prefix_code: "1;30",
         }
     } else {
         TuiInputPalette {
@@ -2492,15 +2488,11 @@ fn render_tui_bottom_panel_meta_line(content: &str, width: usize) -> String {
 }
 
 fn tui_separator_color_code(light_mode: bool) -> &'static str {
-    if light_mode {
-        "38;2;136;158;172"
-    } else {
-        "2;36"
-    }
+    if light_mode { "90" } else { "2;36" }
 }
 
 fn tui_meta_color_code(light_mode: bool) -> &'static str {
-    if light_mode { "38;2;82;94;105" } else { "2;37" }
+    if light_mode { "90" } else { "2;37" }
 }
 
 fn render_tui_content_line_with_palette(
@@ -3988,10 +3980,8 @@ mod tui_output_tests {
         let app_state = test_app_state_with_model_level(Some(ModelLevel::Xhigh));
         let rendered = format_tui_model_and_cwd(&app_state);
 
-        assert!(
-            rendered.contains("\u{1b}[38;5;208m") || rendered.contains("\u{1b}[38;2;190;80;20m")
-        );
-        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;2;72;145;96m"));
+        assert!(rendered.contains("\u{1b}[38;5;208m") || rendered.contains("\u{1b}[38;5;130m"));
+        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;5;65m"));
     }
 
     #[test]
@@ -4002,15 +3992,15 @@ mod tui_output_tests {
         );
         assert_eq!(
             super::model_level_color_code(Some("xhigh"), true),
-            "38;2;190;80;20"
+            "38;5;130"
         );
         assert_eq!(super::model_level_color_code(Some("medium"), false), "32");
         assert_eq!(
             super::model_level_color_code(Some("medium"), true),
-            "38;2;30;130;75"
+            "38;5;28"
         );
         assert_eq!(super::cwd_color_code(false), "2;92");
-        assert_eq!(super::cwd_color_code(true), "38;2;72;145;96");
+        assert_eq!(super::cwd_color_code(true), "38;5;65");
     }
 
     #[test]
@@ -4036,8 +4026,8 @@ mod tui_output_tests {
             &TuiSelectionState::default(),
         );
 
-        assert!(rendered.contains("\u{1b}[32m") || rendered.contains("\u{1b}[38;2;30;130;75m"));
-        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;2;72;145;96m"));
+        assert!(rendered.contains("\u{1b}[32m") || rendered.contains("\u{1b}[38;5;28m"));
+        assert!(rendered.contains("\u{1b}[2;92m") || rendered.contains("\u{1b}[38;5;65m"));
     }
 
     #[test]
@@ -4167,9 +4157,9 @@ mod tui_output_tests {
         assert_eq!(
             light,
             super::TuiInputPalette {
-                background_code: "48;2;190;218;240",
+                background_code: "48;5;252",
                 text_code: "30",
-                prefix_code: "38;2;20;104;150",
+                prefix_code: "1;30",
             }
         );
         assert_eq!(
@@ -4423,9 +4413,9 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;190;218;240;30m"));
-        assert!(rendered.contains("\x1b[38;2;20;104;150m>"));
-        assert!(rendered.contains("\x1b[48;2;190;218;240;30m older user message"));
+        assert!(rendered.contains("\x1b[48;5;252;30m"));
+        assert!(rendered.contains("\x1b[1;30m>"));
+        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
     }
 
     #[test]
@@ -4436,8 +4426,8 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;190;218;240;30m"));
-        assert!(rendered.contains("\x1b[48;2;190;218;240;30m older user message"));
+        assert!(rendered.contains("\x1b[48;5;252;30m"));
+        assert!(rendered.contains("\x1b[48;5;252;30m older user message"));
     }
 
     #[test]
@@ -4689,15 +4679,12 @@ mod tui_output_tests {
 
     #[test]
     fn tui_startup_card_uses_high_contrast_colors_on_light_terminals() {
-        assert_eq!(super::tui_startup_title_color_code(true), "38;2;0;82;135");
-        assert_eq!(super::tui_startup_muted_color_code(true), "38;2;68;82;94");
-        assert_eq!(super::tui_startup_face_color_code(true), "38;2;0;120;145");
-        assert_eq!(super::tui_startup_label_color_code(true), "38;2;25;92;145");
-        assert_eq!(
-            super::tui_startup_separator_color_code(true),
-            "38;2;105;124;140"
-        );
-        assert_eq!(super::tui_startup_value_color_code(true), "38;2;45;55;65");
+        assert_eq!(super::tui_startup_title_color_code(true), "1;30");
+        assert_eq!(super::tui_startup_muted_color_code(true), "90");
+        assert_eq!(super::tui_startup_face_color_code(true), "90");
+        assert_eq!(super::tui_startup_label_color_code(true), "30");
+        assert_eq!(super::tui_startup_separator_color_code(true), "90");
+        assert_eq!(super::tui_startup_value_color_code(true), "30");
     }
 
     #[test]
@@ -6626,10 +6613,11 @@ impl RuntimeBootstrap {
         } else {
             tui_content_screen(app_state, document)
         };
+        let input_palette = tui_input_palette();
         screen.prompt = vec![
             format!(
                 "{} {}",
-                colorize_ansi(">", "1;36"),
+                colorize_ansi(">", input_palette.prefix_code),
                 if input.is_empty() { "" } else { input }
             )
             .trim_end()
