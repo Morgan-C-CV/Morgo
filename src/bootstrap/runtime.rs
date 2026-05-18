@@ -287,26 +287,29 @@ fn tui_is_resume_picker_command(input: &str) -> bool {
     )
 }
 
-struct TuiRawModeGuard {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TuiControlOptions {
     keyboard_enhancements_enabled: bool,
+    mouse_capture_enabled: bool,
+}
+
+struct TuiRawModeGuard {
+    control_options: TuiControlOptions,
 }
 
 impl TuiRawModeGuard {
     fn activate() -> anyhow::Result<Self> {
         let mut stdout = io::stdout();
-        let keyboard_enhancements_enabled = tui_should_enable_keyboard_enhancements();
-        if let Err(error) = enter_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled)
-        {
-            restore_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled);
+        let control_options = tui_control_options();
+        if let Err(error) = enter_tui_control_sequences(&mut stdout, control_options) {
+            restore_tui_control_sequences(&mut stdout, control_options);
             return Err(error.into());
         }
         if let Err(error) = enable_raw_mode() {
-            restore_tui_control_sequences(&mut stdout, keyboard_enhancements_enabled);
+            restore_tui_control_sequences(&mut stdout, control_options);
             return Err(error.into());
         }
-        Ok(Self {
-            keyboard_enhancements_enabled,
-        })
+        Ok(Self { control_options })
     }
 }
 
@@ -389,16 +392,19 @@ impl Drop for TuiRawModeGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        restore_tui_control_sequences(&mut stdout, self.keyboard_enhancements_enabled);
+        restore_tui_control_sequences(&mut stdout, self.control_options);
     }
 }
 
 fn enter_tui_control_sequences(
     stdout: &mut io::Stdout,
-    keyboard_enhancements_enabled: bool,
+    control_options: TuiControlOptions,
 ) -> io::Result<()> {
-    if keyboard_enhancements_enabled {
-        execute!(
+    match (
+        control_options.keyboard_enhancements_enabled,
+        control_options.mouse_capture_enabled,
+    ) {
+        (true, true) => execute!(
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
@@ -409,33 +415,79 @@ fn enter_tui_control_sequences(
                     | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
             )
-        )
-    } else {
-        execute!(
+        ),
+        (true, false) => execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        ),
+        (false, true) => execute!(
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
             EnableMouseCapture
-        )
+        ),
+        (false, false) => execute!(stdout, EnterAlternateScreen, EnableBracketedPaste),
     }
 }
 
-fn restore_tui_control_sequences(stdout: &mut io::Stdout, keyboard_enhancements_enabled: bool) {
-    if keyboard_enhancements_enabled {
-        let _ = execute!(
-            stdout,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-    } else {
-        let _ = execute!(
-            stdout,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
+fn restore_tui_control_sequences(stdout: &mut io::Stdout, control_options: TuiControlOptions) {
+    match (
+        control_options.keyboard_enhancements_enabled,
+        control_options.mouse_capture_enabled,
+    ) {
+        (true, true) => {
+            let _ = execute!(
+                stdout,
+                PopKeyboardEnhancementFlags,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+        }
+        (true, false) => {
+            let _ = execute!(
+                stdout,
+                PopKeyboardEnhancementFlags,
+                DisableBracketedPaste,
+                LeaveAlternateScreen
+            );
+        }
+        (false, true) => {
+            let _ = execute!(
+                stdout,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+        }
+        (false, false) => {
+            let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+        }
+    }
+}
+
+fn tui_control_options() -> TuiControlOptions {
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let vscode_ipc_hook_present = std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some();
+    TuiControlOptions {
+        keyboard_enhancements_enabled: tui_should_enable_keyboard_enhancements_for(
+            std::env::var("MORGO_TUI_KEYBOARD_ENHANCEMENTS")
+                .ok()
+                .as_deref(),
+            term_program.as_deref(),
+            vscode_ipc_hook_present,
+        ),
+        mouse_capture_enabled: tui_should_enable_mouse_capture_for(
+            std::env::var("MORGO_TUI_MOUSE_CAPTURE").ok().as_deref(),
+            term_program.as_deref(),
+        ),
     }
 }
 
@@ -1962,20 +2014,39 @@ fn format_tui_model_and_cwd(app_state: &AppState) -> String {
         )
     };
     let cwd_label = shorten_home_path(&app_state.current_working_directory());
+    let light_mode = tui_should_use_light_input_palette();
     format!(
         "{} · {}",
-        colorize_ansi(&model_label, model_level_color_code(model_level)),
-        colorize_ansi(&cwd_label, "2;92")
+        colorize_ansi(&model_label, model_level_color_code(model_level, light_mode)),
+        colorize_ansi(&cwd_label, cwd_color_code(light_mode))
     )
 }
 
-fn model_level_color_code(level: Option<&str>) -> &'static str {
-    match level {
-        Some("xhigh") => "38;5;208",
-        Some("high") => "33",
-        Some("medium") => "32",
-        Some("low") => "38;5;99",
-        _ => "2;37",
+fn model_level_color_code(level: Option<&str>, light_mode: bool) -> &'static str {
+    if light_mode {
+        match level {
+            Some("xhigh") => "38;2;190;80;20",
+            Some("high") => "38;2;150;110;0",
+            Some("medium") => "38;2;30;130;75",
+            Some("low") => "38;2;90;78;190",
+            _ => "38;2;80;88;96",
+        }
+    } else {
+        match level {
+            Some("xhigh") => "38;5;208",
+            Some("high") => "33",
+            Some("medium") => "32",
+            Some("low") => "38;5;99",
+            _ => "2;37",
+        }
+    }
+}
+
+fn cwd_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;72;145;96"
+    } else {
+        "2;92"
     }
 }
 
@@ -2091,22 +2162,32 @@ fn tui_box_line(content: &str, width: usize) -> String {
 }
 
 fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
-    let title = colorize_ansi(">_ Morgo", "1;34");
-    let greeting = colorize_ansi(tui_startup_greeting(&app_state.active_session_id), "90");
-    let face = colorize_ansi(tui_startup_face_frame(&app_state.active_session_id), "1;36");
+    let light_mode = tui_should_use_light_input_palette();
+    let title = colorize_ansi(">_ Morgo", tui_startup_title_color_code(light_mode));
+    let greeting = colorize_ansi(
+        tui_startup_greeting(&app_state.active_session_id),
+        tui_startup_muted_color_code(light_mode),
+    );
+    let face = colorize_ansi(
+        tui_startup_face_frame(&app_state.active_session_id),
+        tui_startup_face_color_code(light_mode),
+    );
     let model_value = tui_startup_model_label(app_state);
     let directory_value = shorten_home_path(&app_state.current_working_directory());
     let model_line = format!(
         "{}{}     {}",
-        colorize_ansi("model", "34"),
-        colorize_ansi(":", "2;36"),
-        colorize_ansi(&format!("{model_value}   /model to change"), "2;37")
+        colorize_ansi("model", tui_startup_label_color_code(light_mode)),
+        colorize_ansi(":", tui_startup_separator_color_code(light_mode)),
+        colorize_ansi(
+            &format!("{model_value}   /model to change"),
+            tui_startup_value_color_code(light_mode)
+        )
     );
     let directory_line = format!(
         "{}{} {}",
-        colorize_ansi("directory", "34"),
-        colorize_ansi(":", "2;36"),
-        colorize_ansi(&directory_value, "2;37")
+        colorize_ansi("directory", tui_startup_label_color_code(light_mode)),
+        colorize_ansi(":", tui_startup_separator_color_code(light_mode)),
+        colorize_ansi(&directory_value, tui_startup_value_color_code(light_mode))
     );
     let content_width = [
         tui_visible_width(&title) + tui_visible_width(&face) + 1,
@@ -2134,6 +2215,54 @@ fn build_tui_startup_card(app_state: &AppState) -> Vec<String> {
         tui_box_line("", content_width),
         bottom,
     ]
+}
+
+fn tui_startup_title_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;0;82;135"
+    } else {
+        "1;34"
+    }
+}
+
+fn tui_startup_muted_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;68;82;94"
+    } else {
+        "90"
+    }
+}
+
+fn tui_startup_face_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;0;120;145"
+    } else {
+        "1;36"
+    }
+}
+
+fn tui_startup_label_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;25;92;145"
+    } else {
+        "34"
+    }
+}
+
+fn tui_startup_separator_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;105;124;140"
+    } else {
+        "2;36"
+    }
+}
+
+fn tui_startup_value_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;45;55;65"
+    } else {
+        "2;37"
+    }
 }
 
 fn build_initial_tui_screen(app_state: &AppState) -> crate::interaction::cli::renderer::TuiScreen {
@@ -2224,6 +2353,7 @@ fn colorize_ansi(text: &str, code: &str) -> String {
 struct TuiInputPalette {
     background_code: &'static str,
     text_code: &'static str,
+    prefix_code: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2237,6 +2367,7 @@ fn tui_input_palette() -> TuiInputPalette {
 }
 
 fn tui_should_use_light_input_palette() -> bool {
+    let term_program = std::env::var("TERM_PROGRAM").ok();
     tui_should_use_light_input_palette_with_context(
         std::env::var("MORGO_TUI_THEME")
             .ok()
@@ -2244,7 +2375,11 @@ fn tui_should_use_light_input_palette() -> bool {
         std::env::var("COLORFGBG")
             .ok()
             .and_then(|value| tui_colorfgbg_background_code(&value)),
-        tui_detect_ide_terminal(),
+        tui_terminal_context_is_ide(
+            term_program.as_deref(),
+            std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some(),
+        ),
+        tui_terminal_program_is_macos_native(term_program.as_deref()),
         tui_detect_macos_light_appearance(),
     )
 }
@@ -2261,13 +2396,15 @@ fn tui_input_palette_for_background_code(background_code: Option<u8>) -> TuiInpu
 fn tui_input_palette_for_light_mode(light_mode: bool) -> TuiInputPalette {
     if light_mode {
         TuiInputPalette {
-            background_code: "48;2;228;228;228",
+            background_code: "48;2;216;230;242",
             text_code: "30",
+            prefix_code: "38;2;20;104;150",
         }
     } else {
         TuiInputPalette {
             background_code: "48;5;238",
             text_code: "97",
+            prefix_code: "1;36",
         }
     }
 }
@@ -2276,14 +2413,23 @@ fn tui_should_use_light_input_palette_with_context(
     forced_theme: Option<TuiThemePreference>,
     colorfgbg_background_code: Option<u8>,
     ide_terminal: bool,
+    macos_native_terminal: bool,
     macos_light_appearance: Option<bool>,
 ) -> bool {
     match forced_theme {
         Some(TuiThemePreference::Light) => true,
         Some(TuiThemePreference::Dark) => false,
         None => {
+            if macos_native_terminal {
+                if let Some(light_mode) = macos_light_appearance {
+                    return light_mode;
+                }
+            }
             if let Some(background_code) = colorfgbg_background_code {
                 return tui_background_code_is_light(background_code);
+            }
+            if let Some(light_mode) = macos_light_appearance {
+                return light_mode;
             }
             if ide_terminal {
                 return macos_light_appearance.unwrap_or(false);
@@ -2343,9 +2489,10 @@ fn render_tui_input_text_line(
     input_palette: TuiInputPalette,
 ) -> String {
     format!(
-        "\x1b[{};{}m\x1b[1;36m{}\x1b[{};{}m {}{}\x1b[0m",
+        "\x1b[{};{}m\x1b[{}m{}\x1b[{};{}m {}{}\x1b[0m",
         input_palette.background_code,
         input_palette.text_code,
+        input_palette.prefix_code,
         prefix,
         input_palette.background_code,
         input_palette.text_code,
@@ -2355,13 +2502,39 @@ fn render_tui_input_text_line(
 }
 
 fn render_tui_bottom_panel_separator(width: usize) -> String {
-    colorize_ansi(&"─".repeat(width), "2;36")
+    colorize_ansi(
+        &"─".repeat(width),
+        tui_separator_color_code(tui_should_use_light_input_palette()),
+    )
 }
 
 fn render_tui_bottom_panel_meta_line(content: &str, width: usize) -> String {
     let visible_width = tui_visible_width(content);
     let padding = " ".repeat(width.saturating_sub(visible_width));
-    format!("{}{}", colorize_ansi(content, "2;37"), padding)
+    format!(
+        "{}{}",
+        colorize_ansi(
+            content,
+            tui_meta_color_code(tui_should_use_light_input_palette())
+        ),
+        padding
+    )
+}
+
+fn tui_separator_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;136;158;172"
+    } else {
+        "2;36"
+    }
+}
+
+fn tui_meta_color_code(light_mode: bool) -> &'static str {
+    if light_mode {
+        "38;2;82;94;105"
+    } else {
+        "2;37"
+    }
 }
 
 fn render_tui_content_line_with_palette(
@@ -3829,8 +4002,33 @@ mod tui_output_tests {
         let app_state = test_app_state_with_model_level(Some(ModelLevel::Xhigh));
         let rendered = format_tui_model_and_cwd(&app_state);
 
-        assert!(rendered.contains("\u{1b}[38;5;208m"));
-        assert!(rendered.contains("\u{1b}[2;92m"));
+        assert!(
+            rendered.contains("\u{1b}[38;5;208m")
+                || rendered.contains("\u{1b}[38;2;190;80;20m")
+        );
+        assert!(
+            rendered.contains("\u{1b}[2;92m")
+                || rendered.contains("\u{1b}[38;2;72;145;96m")
+        );
+    }
+
+    #[test]
+    fn tui_model_and_cwd_colors_are_theme_specific() {
+        assert_eq!(
+            super::model_level_color_code(Some("xhigh"), false),
+            "38;5;208"
+        );
+        assert_eq!(
+            super::model_level_color_code(Some("xhigh"), true),
+            "38;2;190;80;20"
+        );
+        assert_eq!(super::model_level_color_code(Some("medium"), false), "32");
+        assert_eq!(
+            super::model_level_color_code(Some("medium"), true),
+            "38;2;30;130;75"
+        );
+        assert_eq!(super::cwd_color_code(false), "2;92");
+        assert_eq!(super::cwd_color_code(true), "38;2;72;145;96");
     }
 
     #[test]
@@ -3856,8 +4054,14 @@ mod tui_output_tests {
             &TuiSelectionState::default(),
         );
 
-        assert!(rendered.contains("\u{1b}[32m"));
-        assert!(rendered.contains("\u{1b}[2;92m"));
+        assert!(
+            rendered.contains("\u{1b}[32m")
+                || rendered.contains("\u{1b}[38;2;30;130;75m")
+        );
+        assert!(
+            rendered.contains("\u{1b}[2;92m")
+                || rendered.contains("\u{1b}[38;2;72;145;96m")
+        );
     }
 
     #[test]
@@ -3936,16 +4140,26 @@ mod tui_output_tests {
             true,
             Some(false),
         ));
-        assert!(!super::tui_should_use_light_input_palette_with_context(
+    }
+
+    #[test]
+    fn tui_light_palette_uses_macos_appearance_for_terminal_app_without_colorfgbg() {
+        assert!(super::tui_should_use_light_input_palette_with_context(
             None,
             None,
             false,
             Some(true),
         ));
+        assert!(!super::tui_should_use_light_input_palette_with_context(
+            None,
+            None,
+            false,
+            Some(false),
+        ));
     }
 
     #[test]
-    fn tui_input_palette_uses_light_gray_on_light_backgrounds() {
+    fn tui_input_palette_uses_visible_light_background_on_light_terminals() {
         let light = super::tui_input_palette_for_background_code(Some(15));
         let dark = super::tui_input_palette_for_background_code(Some(0));
         let fallback = super::tui_input_palette_for_background_code(None);
@@ -3953,8 +4167,9 @@ mod tui_output_tests {
         assert_eq!(
             light,
             super::TuiInputPalette {
-                background_code: "48;2;228;228;228",
+                background_code: "48;2;216;230;242",
                 text_code: "30",
+                prefix_code: "38;2;20;104;150",
             }
         );
         assert_eq!(
@@ -3962,6 +4177,7 @@ mod tui_output_tests {
             super::TuiInputPalette {
                 background_code: "48;5;238",
                 text_code: "97",
+                prefix_code: "1;36",
             }
         );
         assert_eq!(fallback, dark);
@@ -4207,9 +4423,9 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;228;228;228;30m"));
-        assert!(rendered.contains("\x1b[1;36m>"));
-        assert!(rendered.contains("\x1b[48;2;228;228;228;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;216;230;242;30m"));
+        assert!(rendered.contains("\x1b[38;2;20;104;150m>"));
+        assert!(rendered.contains("\x1b[48;2;216;230;242;30m older user message"));
     }
 
     #[test]
@@ -4220,8 +4436,8 @@ mod tui_output_tests {
             super::tui_input_palette_for_background_code(Some(15)),
         );
 
-        assert!(rendered.contains("\x1b[48;2;228;228;228;30m"));
-        assert!(rendered.contains("\x1b[48;2;228;228;228;30m older user message"));
+        assert!(rendered.contains("\x1b[48;2;216;230;242;30m"));
+        assert!(rendered.contains("\x1b[48;2;216;230;242;30m older user message"));
     }
 
     #[test]
