@@ -4193,10 +4193,15 @@ mod tui_output_tests {
 
     #[test]
     fn tui_interrupted_turn_output_renders_requested_notice() {
-        let rendered =
-            strip_ansi_for_test(&crate::interaction::cli::renderer::render_turn_tui_output(
-                &tui_interrupted_turn_output(),
-            ));
+        let raw_rendered = crate::interaction::cli::renderer::render_turn_tui_output(
+            &tui_interrupted_turn_output(),
+        );
+        assert!(raw_rendered.contains(&format!(
+            "\x1b[31m{}\x1b[0m",
+            crate::interaction::cli::renderer::CONVERSATION_INTERRUPTED_MESSAGE
+        )));
+
+        let rendered = strip_ansi_for_test(&raw_rendered);
 
         assert!(
             rendered.contains(crate::interaction::cli::renderer::CONVERSATION_INTERRUPTED_MESSAGE)

@@ -195,7 +195,7 @@ fn visible_tui_primary_lines(text: &str) -> Vec<String> {
             continue;
         }
 
-        let line = raw_line.to_string();
+        let line = style_tui_primary_line(raw_line);
         let is_blank = line.trim().is_empty();
         if is_blank && previous_blank {
             continue;
@@ -218,6 +218,14 @@ fn visible_tui_primary_lines(text: &str) -> Vec<String> {
 
 fn is_hidden_tui_primary_line(line: &str) -> bool {
     is_legacy_hidden_primary_line(line)
+}
+
+fn style_tui_primary_line(line: &str) -> String {
+    if line == CONVERSATION_INTERRUPTED_MESSAGE {
+        format!("\x1b[31m{line}\x1b[0m")
+    } else {
+        line.to_string()
+    }
 }
 
 fn panel_priority(kind: Option<PanelKind>) -> u8 {
@@ -1820,7 +1828,15 @@ mod tests {
             })],
         };
 
-        let interrupted_rendered = strip_ansi(&render_turn_tui_output(&interrupted));
+        let raw_interrupted_rendered = render_turn_tui_output(&interrupted);
+        assert!(
+            raw_interrupted_rendered.contains(&format!(
+                "\x1b[31m{CONVERSATION_INTERRUPTED_MESSAGE}\x1b[0m"
+            )),
+            "{raw_interrupted_rendered}"
+        );
+
+        let interrupted_rendered = strip_ansi(&raw_interrupted_rendered);
         let activity_pos = interrupted_rendered
             .find("SEARCH stream in runtime.rs")
             .unwrap();
