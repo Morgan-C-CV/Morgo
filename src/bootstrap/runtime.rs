@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -49,8 +50,9 @@ use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    RenderBlock, RenderDocument, build_tui_screen, render_document_output,
-    render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
+    CONVERSATION_INTERRUPTED_MESSAGE, RenderBlock, RenderDocument, build_tui_screen,
+    render_document_output, render_document_tui_output, render_output, render_tui_screen_output,
+    render_turn_document,
 };
 use crate::interaction::cli::repl::{
     CliDispatchOutcome, CliTurnOutput, handle_cli_input, handle_cli_input_dispatch_streaming,
@@ -2026,6 +2028,20 @@ fn tui_poll_and_interrupt_active_turn(engine: &QueryEngine) -> bool {
     }
 }
 
+fn tui_interrupted_turn_output() -> CliTurnOutput {
+    CliTurnOutput {
+        primary_text: CONVERSATION_INTERRUPTED_MESSAGE.into(),
+        events: vec![],
+    }
+}
+
+fn tui_interrupted_dispatch_outcome() -> CliDispatchOutcome {
+    CliDispatchOutcome {
+        output: tui_interrupted_turn_output(),
+        system_trap: None,
+    }
+}
+
 fn tui_exit_gesture_label(gesture: TuiExitGesture) -> &'static str {
     match gesture {
         TuiExitGesture::Esc => "Esc",
@@ -3841,10 +3857,10 @@ mod tui_output_tests {
         render_command_suggestion_line, render_fixed_tui_layout, render_tui_rendered_line,
         select_line_at, select_word_at, selected_text, shift_selection_for_scroll,
         status_line_for_tui, strip_ansi_text, tui_context_document, tui_exit_gesture_for_key,
-        tui_input_viewport, tui_is_copy_key, tui_move_suggestion_selection_down,
-        tui_move_suggestion_selection_up, tui_should_enable_keyboard_enhancements_for,
-        tui_startup_face, tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
-        tui_terminal_program_is_ide,
+        tui_input_viewport, tui_interrupted_turn_output, tui_is_copy_key,
+        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
+        tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
+        tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
@@ -4173,6 +4189,18 @@ mod tui_output_tests {
         assert_eq!(tui_exit_gesture_for_key(&cmd_c), None);
         assert!(super::tui_interrupt_active_turn_for_key(&esc));
         assert!(!super::tui_interrupt_active_turn_for_key(&cmd_c));
+    }
+
+    #[test]
+    fn tui_interrupted_turn_output_renders_requested_notice() {
+        let rendered =
+            strip_ansi_for_test(&crate::interaction::cli::renderer::render_turn_tui_output(
+                &tui_interrupted_turn_output(),
+            ));
+
+        assert!(
+            rendered.contains(crate::interaction::cli::renderer::CONVERSATION_INTERRUPTED_MESSAGE)
+        );
     }
 
     #[test]
@@ -6441,16 +6469,38 @@ impl RuntimeBootstrap {
                                 })
                             } else {
                                 let interrupt_engine = engine.clone();
+                                let turn_interrupted = Arc::new(AtomicBool::new(false));
+                                let update_turn_interrupted = Arc::clone(&turn_interrupted);
                                 let dispatch = self.handle_tui_input_with_loading(
                                     router,
                                     engine,
                                     &app_state,
                                     line,
                                     |snapshot| {
-                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                        let interrupted = update_turn_interrupted
+                                            .load(Ordering::SeqCst)
+                                            || tui_poll_and_interrupt_active_turn(&interrupt_engine);
+                                        if interrupted {
+                                            update_turn_interrupted.store(true, Ordering::SeqCst);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc during output update",
+                                            );
+                                            current_document =
+                                                render_turn_document(&tui_interrupted_turn_output());
+                                            follow_content_tail = true;
+                                            content_scroll_top = usize::MAX;
+                                            self.print_tui_interactive_frame(
+                                                &app_state,
+                                                &current_document,
+                                                "",
+                                                &[],
+                                                None,
+                                                0,
+                                                0,
+                                                TuiTurnStatus::Idle,
+                                                0,
+                                                &selection,
                                             );
                                             return false;
                                         }
@@ -6488,9 +6538,26 @@ impl RuntimeBootstrap {
                                             &selection,
                                         );
                                         if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                            update_turn_interrupted.store(true, Ordering::SeqCst);
                                             log_tui_runtime_issue(
                                                 "tui_interrupt",
                                                 "active turn interrupted by Esc after output update",
+                                            );
+                                            current_document =
+                                                render_turn_document(&tui_interrupted_turn_output());
+                                            follow_content_tail = true;
+                                            content_scroll_top = usize::MAX;
+                                            self.print_tui_interactive_frame(
+                                                &app_state,
+                                                &current_document,
+                                                "",
+                                                &[],
+                                                None,
+                                                0,
+                                                0,
+                                                TuiTurnStatus::Idle,
+                                                0,
+                                                &selection,
                                             );
                                             return false;
                                         }
@@ -6503,10 +6570,12 @@ impl RuntimeBootstrap {
                                         result = &mut dispatch => break result,
                                         _ = tokio::time::sleep(Duration::from_millis(50)) => {
                                             if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                                turn_interrupted.store(true, Ordering::SeqCst);
                                                 log_tui_runtime_issue(
                                                     "tui_interrupt",
                                                     "active turn interrupted by Esc",
                                                 );
+                                                break Ok(tui_interrupted_dispatch_outcome());
                                             }
                                         }
                                     }

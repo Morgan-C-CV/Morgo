@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
+pub const CONVERSATION_INTERRUPTED_MESSAGE: &str =
+    "■ Conversation interrupted - tell the model what to do differently.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderDocument {
@@ -428,7 +430,7 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
 
 fn terminal_interrupt_message(kind: &str) -> Option<&'static str> {
     match kind {
-        "aborted_streaming" | "aborted_tools" => Some("Request interrupted."),
+        "aborted_streaming" | "aborted_tools" => Some(CONVERSATION_INTERRUPTED_MESSAGE),
         _ => None,
     }
 }
@@ -1823,7 +1825,9 @@ mod tests {
             .find("SEARCH stream in runtime.rs")
             .unwrap();
         let divider_pos = interrupted_rendered.find("────────────────").unwrap();
-        let message_pos = interrupted_rendered.find("Request interrupted.").unwrap();
+        let message_pos = interrupted_rendered
+            .find(CONVERSATION_INTERRUPTED_MESSAGE)
+            .unwrap();
         assert!(activity_pos < divider_pos, "{interrupted_rendered}");
         assert!(divider_pos < message_pos, "{interrupted_rendered}");
 
@@ -1833,7 +1837,7 @@ mod tests {
             "{completed_rendered}"
         );
         assert!(
-            !completed_rendered.contains("Request interrupted."),
+            !completed_rendered.contains(CONVERSATION_INTERRUPTED_MESSAGE),
             "{completed_rendered}"
         );
     }
