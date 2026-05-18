@@ -4520,6 +4520,18 @@ mod tui_output_tests {
                     ),
                     crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
                         crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Glob".into(),
+                            input: r#"{"pattern":"**/*tui*"}"#.into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
+                            tool_name: "Glob".into(),
+                            input: r#"{"pattern":"**/*stream*"}"#.into(),
+                        },
+                    ),
+                    crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                        crate::interaction::cli::repl::CliRuntimeEvent::ToolCallStarted {
                             tool_name: "Read".into(),
                             input: r#"{"file_path":"src/service/api/streaming.rs"}"#.into(),
                         },
@@ -4529,6 +4541,24 @@ mod tui_output_tests {
         );
 
         let screen = super::tui_content_screen(&app_state, &document);
+        let second_activity_line = screen
+            .main
+            .iter()
+            .position(|line| line.contains("**/*tui*"))
+            .expect("second activity line");
+        let second_read_line = screen
+            .main
+            .iter()
+            .position(|line| line.contains("streaming.rs"))
+            .expect("second read line");
+        assert!(
+            screen.main[second_activity_line..=second_read_line]
+                .iter()
+                .all(|line| !line.chars().all(|ch| ch == '─')),
+            "{:?}",
+            screen.main
+        );
+
         let rendered = strip_ansi_for_test(&super::render_fixed_tui_layout(
             &app_state,
             &screen,
@@ -4554,13 +4584,17 @@ mod tui_output_tests {
         let second_text_pos = rendered
             .find("我已经定位到流式事件定义。")
             .expect("second assistant text");
-        let second_activity_pos = rendered.find("READ streaming.rs").expect("second activity");
+        let second_activity_pos = rendered.find("LIST **/*tui*").expect("second activity");
+        let second_stream_list_pos = rendered.find("LIST **/*stream*").expect("stream list");
+        let second_read_pos = rendered.find("READ streaming.rs").expect("second read");
 
         assert!(user_pos < first_text_pos, "{rendered}");
         assert!(first_text_pos < first_activity_pos, "{rendered}");
         assert!(first_activity_pos < divider_pos, "{rendered}");
         assert!(divider_pos < second_text_pos, "{rendered}");
         assert!(second_text_pos < second_activity_pos, "{rendered}");
+        assert!(second_activity_pos < second_stream_list_pos, "{rendered}");
+        assert!(second_stream_list_pos < second_read_pos, "{rendered}");
         assert_eq!(
             rendered
                 .matches("我先定位 TUI 计时器和流式输出的实现。")
@@ -6400,18 +6434,12 @@ impl RuntimeBootstrap {
                                 })
                             } else {
                                 let interrupt_engine = engine.clone();
-                                self.handle_tui_input_with_loading(
+                                let dispatch = self.handle_tui_input_with_loading(
                                     router,
                                     engine,
                                     &app_state,
                                     line,
                                     |snapshot| {
-                                        if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
-                                            log_tui_runtime_issue(
-                                                "tui_interrupt",
-                                                "active turn interrupted by Esc",
-                                            );
-                                        }
                                         let next_document = render_turn_document(snapshot);
                                         let document_changed = next_document != current_document;
                                         if document_changed {
@@ -6446,8 +6474,21 @@ impl RuntimeBootstrap {
                                             &selection,
                                         );
                                     },
-                                )
-                                .await
+                                );
+                                tokio::pin!(dispatch);
+                                loop {
+                                    tokio::select! {
+                                        result = &mut dispatch => break result,
+                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                                            if tui_poll_and_interrupt_active_turn(&interrupt_engine) {
+                                                log_tui_runtime_issue(
+                                                    "tui_interrupt",
+                                                    "active turn interrupted by Esc",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             };
                             let dispatch = match dispatch {
                                 Ok(dispatch) => dispatch,
