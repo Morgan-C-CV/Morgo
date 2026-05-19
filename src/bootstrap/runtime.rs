@@ -3514,12 +3514,37 @@ fn osc52_copy_sequence(text: &str) -> String {
     format!("\u{1b}]52;c;{encoded}\u{7}\u{1b}]52;c;{encoded}\u{1b}\\")
 }
 
-fn set_clipboard(text: &str) -> anyhow::Result<()> {
+fn set_clipboard_osc52(text: &str) -> anyhow::Result<()> {
     let sequence = osc52_copy_sequence(text);
     let mut stdout = io::stdout().lock();
     stdout.write_all(sequence.as_bytes())?;
     stdout.flush()?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_clipboard_platform(text: &str) -> anyhow::Result<()> {
+    let mut child = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("pbcopy exited with {status}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_clipboard_platform(_text: &str) -> anyhow::Result<()> {
+    anyhow::bail!("no platform clipboard integration");
+}
+
+fn set_clipboard(text: &str) -> anyhow::Result<()> {
+    set_clipboard_platform(text).or_else(|_| set_clipboard_osc52(text))
 }
 
 fn copy_selected_text(
@@ -3850,15 +3875,15 @@ fn tui_should_enable_keyboard_enhancements_for(
 
 fn tui_should_enable_mouse_capture_for(
     override_value: Option<&str>,
-    term_program: Option<&str>,
+    _term_program: Option<&str>,
 ) -> bool {
     match override_value {
         Some(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,
-            _ => !tui_terminal_program_is_macos_native(term_program),
+            _ => true,
         },
-        None => !tui_terminal_program_is_macos_native(term_program),
+        None => true,
     }
 }
 
@@ -5114,8 +5139,8 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_mouse_capture_defaults_off_for_apple_terminal_copy_interop() {
-        assert!(!super::tui_should_enable_mouse_capture_for(
+    fn tui_mouse_capture_defaults_on_for_apple_terminal_tui_scrollback() {
+        assert!(super::tui_should_enable_mouse_capture_for(
             None,
             Some("Apple_Terminal")
         ));
@@ -5129,7 +5154,7 @@ mod tui_output_tests {
         ));
         assert!(!super::tui_should_enable_mouse_capture_for(
             Some("0"),
-            Some("vscode")
+            Some("Apple_Terminal")
         ));
         assert!(super::tui_should_enable_mouse_capture_for(
             Some("1"),
