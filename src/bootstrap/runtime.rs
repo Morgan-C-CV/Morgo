@@ -2045,6 +2045,16 @@ fn tui_exit_gesture_for_key(key: &crossterm::event::KeyEvent) -> Option<TuiExitG
     }
 }
 
+fn tui_exit_gesture_is_confirmed(
+    pending_exit_gesture: Option<(TuiExitGesture, Instant)>,
+    gesture: TuiExitGesture,
+    confirm_window: Duration,
+) -> bool {
+    pending_exit_gesture
+        .map(|(pending, started_at)| pending == gesture && started_at.elapsed() <= confirm_window)
+        .unwrap_or(false)
+}
+
 fn tui_interrupt_active_turn_for_key(key: &crossterm::event::KeyEvent) -> bool {
     matches!(tui_exit_gesture_for_key(key), Some(TuiExitGesture::Esc))
 }
@@ -3984,7 +3994,7 @@ mod tui_output_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -4294,6 +4304,30 @@ mod tui_output_tests {
         assert_eq!(tui_exit_gesture_for_key(&cmd_c), None);
         assert!(super::tui_interrupt_active_turn_for_key(&esc));
         assert!(!super::tui_interrupt_active_turn_for_key(&cmd_c));
+    }
+
+    #[test]
+    fn tui_exit_gesture_confirmation_respects_window() {
+        let now = Instant::now();
+
+        assert!(super::tui_exit_gesture_is_confirmed(
+            Some((super::TuiExitGesture::Esc, now - Duration::from_millis(100))),
+            super::TuiExitGesture::Esc,
+            Duration::from_millis(900),
+        ));
+        assert!(!super::tui_exit_gesture_is_confirmed(
+            Some((
+                super::TuiExitGesture::Esc,
+                now - Duration::from_millis(1000)
+            )),
+            super::TuiExitGesture::Esc,
+            Duration::from_millis(900),
+        ));
+        assert!(!super::tui_exit_gesture_is_confirmed(
+            None,
+            super::TuiExitGesture::Esc,
+            Duration::from_millis(900),
+        ));
     }
 
     #[test]
@@ -6588,13 +6622,22 @@ impl RuntimeBootstrap {
                             suppress_suggestions_until_input_change = true;
                             continue;
                         }
+                        if tui_exit_gesture_is_confirmed(
+                            pending_exit_gesture,
+                            gesture,
+                            TUI_EXIT_CONFIRM_WINDOW,
+                        ) {
+                            self.print_tui_message(&app_state, "Exiting TUI session.");
+                            execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
+                            break;
+                        }
                         if input.starts_with('/')
                             && !suggestions.is_empty()
                             && selected_suggestion.is_some()
                         {
                             selected_suggestion = None;
                             suggestion_scroll_top = 0;
-                            pending_exit_gesture = None;
+                            pending_exit_gesture = Some((gesture, Instant::now()));
                             suppress_suggestions_until_input_change = true;
                             continue;
                         }
@@ -6606,19 +6649,9 @@ impl RuntimeBootstrap {
                                 &mut pending_exit_gesture,
                                 &mut selection,
                             );
+                            pending_exit_gesture = Some((gesture, Instant::now()));
                             suppress_suggestions_until_input_change = true;
                             continue;
-                        }
-                        let should_exit = pending_exit_gesture
-                            .map(|(pending, started_at)| {
-                                pending == gesture
-                                    && started_at.elapsed() <= TUI_EXIT_CONFIRM_WINDOW
-                            })
-                            .unwrap_or(false);
-                        if should_exit {
-                            self.print_tui_message(&app_state, "Exiting TUI session.");
-                            execute_runtime_shutdown(app_state.clone(), "interactive_exit").await;
-                            break;
                         }
                         pending_exit_gesture = Some((gesture, Instant::now()));
                         continue;
