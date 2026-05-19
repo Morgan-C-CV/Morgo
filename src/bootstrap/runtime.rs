@@ -50,9 +50,9 @@ use crate::history::transcript::Transcript;
 use crate::hook::executor::run_hook;
 use crate::hook::registry::{HookEvent, HookRegistry, load_hook_registry_from_root};
 use crate::interaction::cli::renderer::{
-    CONVERSATION_INTERRUPTED_MESSAGE, RenderBlock, RenderDocument, build_tui_screen,
-    render_document_output, render_document_tui_output, render_output, render_tui_screen_output,
-    render_turn_document,
+    CONVERSATION_INTERRUPTED_MESSAGE, RenderBlock, RenderDocument,
+    approval_continuation_activity_lines, build_tui_screen, render_document_output,
+    render_document_tui_output, render_output, render_tui_screen_output, render_turn_document,
 };
 use crate::interaction::cli::repl::{
     CliDispatchOutcome, CliDisplayEvent, CliRuntimeEvent, CliTurnOutput, handle_cli_input,
@@ -2693,7 +2693,13 @@ fn tui_transcript_text(app_state: &AppState) -> String {
             continue;
         }
         match entry.message.role {
-            crate::core::message::Role::User => lines.extend(tui_user_message_lines(&text)),
+            crate::core::message::Role::User => {
+                if let Some(activity_lines) = approval_continuation_activity_lines(&text) {
+                    lines.extend(activity_lines);
+                } else {
+                    lines.extend(tui_user_message_lines(&text));
+                }
+            }
             crate::core::message::Role::Assistant => {
                 lines.extend(text.lines().map(|line| line.to_string()))
             }
@@ -4833,6 +4839,45 @@ mod tui_output_tests {
         assert!(!transcript.contains("tool batch result:"));
         assert!(!transcript.contains("Glob succeeded"));
         assert!(transcript.contains("older assistant reply"));
+    }
+
+    #[test]
+    fn tui_transcript_summarizes_approval_continuation_prompt() {
+        let mut app_state = test_app_state();
+        let prompt = [
+            "Approval resolved for tool Bash.",
+            "The approved tool has now run.",
+            "",
+            "Tool input:",
+            r#"{"command":"pwd && git status --short && ls -la","description":"Inspect repo root and status"}"#,
+            "",
+            "Tool result:",
+            "description: Inspect repo root and status",
+            "command: pwd && git status --short && ls -la",
+            "exit_code: 0",
+            "stdout:",
+            "/Users/wangmorgan/MProject/LearnCCfromCC",
+            " M RustAgent/Agent/src/bootstrap/runtime.rs",
+            "",
+            "Continue the interrupted user task using this tool result. Do not repeat the same approved tool call unless more evidence is needed.",
+        ]
+        .join("\n");
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![crate::history::session::SessionHistoryEntry {
+                message: Message::user(prompt),
+                timestamp: None,
+                tool_refs: Vec::new(),
+                milestone: None,
+            }],
+        });
+
+        let transcript = strip_ansi_for_test(&super::tui_transcript_text(&app_state));
+
+        assert!(transcript.contains("• Ran pwd && git status --short && ls -la"));
+        assert!(transcript.contains("└ /Users/wangmorgan/MProject/LearnCCfromCC"));
+        assert!(transcript.contains("└ M RustAgent/Agent/src/bootstrap/runtime.rs"));
+        assert!(!transcript.contains("Approval resolved for tool Bash"));
+        assert!(!transcript.contains("Continue the interrupted user task"));
     }
 
     #[test]

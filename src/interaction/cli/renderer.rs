@@ -9,6 +9,11 @@ const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
 pub const CONVERSATION_INTERRUPTED_MESSAGE: &str =
     "■ Conversation interrupted - tell the model what to do differently.";
+const APPROVAL_CONTINUATION_PREFIX: &str = "Approval resolved for tool ";
+const APPROVAL_CONTINUATION_MIDDLE: &str = "\n\nTool input:\n";
+const APPROVAL_CONTINUATION_RESULT: &str = "\n\nTool result:\n";
+const APPROVAL_CONTINUATION_SUFFIX: &str =
+    "\n\nContinue the interrupted user task using this tool result.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderDocument {
@@ -251,7 +256,15 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         view.primary_text.clone()
     };
     if !primary_text.is_empty() {
-        blocks.push(RenderBlock::PrimaryText(primary_text));
+        if let Some(lines) = approval_continuation_activity_lines(&primary_text) {
+            blocks.push(RenderBlock::Panel(render_panel(
+                PanelKind::ToolActivity,
+                "Activity",
+                lines,
+            )));
+        } else {
+            blocks.push(RenderBlock::PrimaryText(primary_text));
+        }
     }
     for activity_panel in build_tool_activity_panels(&view.items) {
         blocks.push(RenderBlock::Panel(activity_panel));
@@ -627,7 +640,7 @@ fn activity_stage_divider_line() -> String {
 }
 
 fn render_exploration_stage(entries: &[ExplorationEntry]) -> Vec<String> {
-    let mut lines = vec!["• Explored".to_string()];
+    let mut lines = vec![activity_status_line(ActivityStatus::Succeeded, "Explored")];
     for (index, entry) in entries.iter().enumerate() {
         if index == 0 {
             lines.push(format!("  └ {}", entry.render()));
@@ -638,27 +651,62 @@ fn render_exploration_stage(entries: &[ExplorationEntry]) -> Vec<String> {
     lines
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+fn activity_status_line(status: ActivityStatus, text: &str) -> String {
+    let bullet_color = match status {
+        ActivityStatus::Running => "2;37",
+        ActivityStatus::Succeeded => "32",
+        ActivityStatus::Failed => "31",
+    };
+    format!("{} {text}", colorize_activity_bullet(bullet_color))
+}
+
+fn colorize_activity_bullet(color: &str) -> String {
+    format!("\x1b[{color}m•\x1b[0m")
+}
+
 #[derive(Default)]
 struct ActivityStageBuilder {
     lines: Vec<String>,
     exploration_entries: Vec<ExplorationEntry>,
     in_exploration_stage: bool,
+    pending_tool_call: Option<PendingActivityToolCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingActivityToolCall {
+    tool_name: String,
+    input: String,
 }
 
 impl ActivityStageBuilder {
     fn has_pending_activity(&self) -> bool {
-        self.in_exploration_stage || !self.exploration_entries.is_empty() || !self.lines.is_empty()
+        self.in_exploration_stage
+            || !self.exploration_entries.is_empty()
+            || !self.lines.is_empty()
+            || self.pending_tool_call.is_some()
     }
 
     fn push_tool_call(&mut self, tool_name: &str, input: &str) {
         if is_exploration_tool(tool_name) {
+            self.flush_pending_tool_call();
             self.in_exploration_stage = true;
             if let Some(entry) = ExplorationEntry::from_tool_call(tool_name, input) {
                 entry.merge_into(&mut self.exploration_entries);
             }
-        } else if let Some(line) = tool_call_activity_line(tool_name, input) {
+        } else if tool_call_activity_line(tool_name, input).is_some() {
             self.finish_exploration_stage();
-            self.lines.push(format!("• {line}"));
+            self.flush_pending_tool_call();
+            self.pending_tool_call = Some(PendingActivityToolCall {
+                tool_name: tool_name.to_string(),
+                input: input.to_string(),
+            });
         }
     }
 
@@ -669,16 +717,26 @@ impl ActivityStageBuilder {
         summary: Option<&str>,
         detail: Option<&str>,
     ) {
-        if let Some((headline, detail_lines)) =
-            tool_result_activity_block(tool_name, content, summary, detail)
-        {
+        let pending = self.pending_tool_call.take();
+        let (pending_input, restore_pending) = match pending {
+            Some(pending) if pending.tool_name == tool_name => (Some(pending.input), None),
+            other => (None, other),
+        };
+        self.pending_tool_call = restore_pending;
+        if let Some((headline, status, detail_lines)) = tool_result_activity_block(
+            tool_name,
+            pending_input.as_deref(),
+            content,
+            summary,
+            detail,
+        ) {
             self.finish_exploration_stage();
             let detail_lines = detail_lines
                 .into_iter()
                 .filter(|line| !is_low_signal_tool_detail(line))
                 .collect::<Vec<_>>();
             if !headline.trim().is_empty() {
-                self.lines.push(format!("• {headline}"));
+                self.lines.push(activity_status_line(status, &headline));
             }
             for detail_line in detail_lines {
                 self.lines.push(format!("  └ {detail_line}"));
@@ -688,6 +746,7 @@ impl ActivityStageBuilder {
 
     fn take_panels(&mut self) -> Vec<RenderPanel> {
         self.finish_exploration_stage();
+        self.flush_pending_tool_call();
         if self.lines.is_empty() {
             Vec::new()
         } else {
@@ -709,6 +768,16 @@ impl ActivityStageBuilder {
             self.exploration_entries.clear();
         }
         self.in_exploration_stage = false;
+    }
+
+    fn flush_pending_tool_call(&mut self) {
+        let Some(pending) = self.pending_tool_call.take() else {
+            return;
+        };
+        if let Some(line) = tool_call_activity_line(&pending.tool_name, &pending.input) {
+            self.lines
+                .push(activity_status_line(ActivityStatus::Running, &line));
+        }
     }
 }
 
@@ -735,6 +804,47 @@ fn build_tool_activity_panels(items: &[SurfaceItem]) -> Vec<RenderPanel> {
     builder.take_panels()
 }
 
+pub fn approval_continuation_activity_lines(text: &str) -> Option<Vec<String>> {
+    let text = text.trim();
+    let after_prefix = text.strip_prefix(APPROVAL_CONTINUATION_PREFIX)?;
+    let (tool_name, after_tool) = after_prefix.split_once(".\n")?;
+    let (_, after_middle) = after_tool.split_once(APPROVAL_CONTINUATION_MIDDLE)?;
+    let (tool_input, after_result) = after_middle.split_once(APPROVAL_CONTINUATION_RESULT)?;
+    let (tool_result, _) = after_result.split_once(APPROVAL_CONTINUATION_SUFFIX)?;
+
+    let mut builder = ActivityStageBuilder::default();
+    builder.push_tool_call(tool_name.trim(), tool_input.trim());
+    let summary = approval_continuation_summary(tool_name.trim(), tool_input.trim(), tool_result);
+    builder.push_tool_result(
+        tool_name.trim(),
+        tool_result.trim(),
+        Some(&summary),
+        Some(tool_result.trim()),
+    );
+    builder
+        .take_panels()
+        .into_iter()
+        .next()
+        .map(|panel| panel.lines)
+}
+
+fn approval_continuation_summary(tool_name: &str, tool_input: &str, tool_result: &str) -> String {
+    if tool_name == "Bash" {
+        let status = activity_status_from_tool_result("Bash succeeded", tool_result);
+        let command = bash_activity_command(Some(tool_input), tool_result, "Bash succeeded")
+            .unwrap_or_else(|| "Bash".into());
+        return match status {
+            ActivityStatus::Failed => format!("{command} failed"),
+            _ => format!("{command} succeeded"),
+        };
+    }
+    if tool_result.to_ascii_lowercase().contains("failed") {
+        format!("{tool_name} failed")
+    } else {
+        format!("{tool_name} succeeded")
+    }
+}
+
 fn is_exploration_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -747,71 +857,72 @@ fn tool_call_activity_line(tool_name: &str, input: &str) -> Option<String> {
         "Bash" => {
             let parsed = serde_json::from_str::<Value>(input).ok();
             let command = json_string_field(parsed.as_ref(), &["command", "cmd"])?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("RAN"),
-                truncate_for_tui(&command, 72)
-            ))
+            Some(format!("Running {}", truncate_for_tui(&command, 72)))
         }
         "Edit" | "Write" | "FileEdit" | "FileWrite" => {
             let parsed = serde_json::from_str::<Value>(input).ok();
             let path = json_string_field(parsed.as_ref(), &["path", "file_path"])?;
-            Some(format!(
-                "{} {}",
-                style_activity_action("UPDATED"),
-                short_path(&path)
-            ))
+            Some(format!("Running update {}", short_path(&path)))
         }
-        _ => Some(format!("{} {tool_name}", style_activity_action("USED"))),
+        _ => Some(format!("Running {tool_name}")),
     }
 }
 
 fn tool_result_activity_block(
     tool_name: &str,
+    input: Option<&str>,
     content: &str,
     summary: Option<&str>,
     detail: Option<&str>,
-) -> Option<(String, Vec<String>)> {
+) -> Option<(String, ActivityStatus, Vec<String>)> {
     let summary = summary.map(str::trim).filter(|value| !value.is_empty())?;
     if is_exploration_tool(tool_name) {
         return None;
     }
 
     if matches!(tool_name, "Edit" | "FileEdit") {
-        return render_edit_activity_block(content, detail);
+        return render_edit_activity_block(content, detail)
+            .map(|(headline, detail)| (headline, activity_status_from_summary(summary), detail));
     }
 
+    let detail_source = detail.unwrap_or(content);
+    let status = activity_status_from_tool_result(summary, detail_source);
     let headline = match tool_name {
-        "Bash" => summary
-            .strip_suffix(" succeeded")
-            .map(|value| {
-                format!(
-                    "{} {}",
-                    style_activity_action("RAN"),
-                    truncate_for_tui(value, 72)
-                )
-            })
-            .unwrap_or_else(|| truncate_for_tui(summary, 72)),
+        "Bash" => bash_activity_command(input, detail_source, summary)
+            .map(|command| format!("Ran {}", truncate_for_tui(&command, 72)))
+            .unwrap_or_else(|| format!("Ran {}", truncate_for_tui(summary, 72))),
         "Edit" | "Write" | "FileEdit" | "FileWrite" => truncate_for_tui(summary, 72),
         _ => truncate_for_tui(summary, 72),
     };
 
-    let detail_source = detail.unwrap_or(content);
     let detail_lines = if tool_name == "Bash" {
         summarize_bash_activity_detail(detail_source)
     } else {
         compact_tool_detail_lines(detail_source.lines().map(|line| line.to_string()).collect())
     };
 
-    Some((headline, detail_lines))
+    Some((headline, status, detail_lines))
 }
 
 fn summarize_bash_activity_detail(content: &str) -> Vec<String> {
-    let lines = render_bash_result_lines(content)
-        .into_iter()
-        .filter(|line| !line.starts_with("Command:"))
-        .collect::<Vec<_>>();
-    compact_tool_detail_lines(lines)
+    let parsed = parse_bash_result(content);
+    let mut lines = Vec::new();
+    if let Some(exit_code) = parsed.exit_code.as_deref().filter(|code| *code != "0") {
+        lines.push(format!("Exit code: {exit_code}"));
+    }
+    if !parsed.stdout.is_empty() {
+        lines.extend(compact_tool_detail_lines(parsed.stdout));
+    }
+    if !parsed.stderr.is_empty() {
+        if !lines.is_empty() {
+            lines.push("stderr:".into());
+        }
+        lines.extend(compact_tool_detail_lines(parsed.stderr));
+    }
+    if lines.is_empty() && !parsed.body.is_empty() {
+        lines.extend(compact_tool_detail_lines(parsed.body));
+    }
+    lines
 }
 
 fn render_edit_activity_block(
@@ -971,22 +1082,27 @@ fn is_low_signal_tool_detail(line: &str) -> bool {
         || trimmed.starts_with("New text: ")
 }
 
-fn render_bash_result_lines(content: &str) -> Vec<String> {
-    let mut command = None;
-    let mut exit_code = None;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut body = Vec::new();
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BashResultParts {
+    command: Option<String>,
+    exit_code: Option<String>,
+    stdout: Vec<String>,
+    stderr: Vec<String>,
+    body: Vec<String>,
+}
+
+fn parse_bash_result(content: &str) -> BashResultParts {
+    let mut parsed = BashResultParts::default();
     let mut section = None::<&str>;
 
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("command:") {
-            command = Some(format!("Command: {}", value.trim()));
+            parsed.command = Some(value.trim().to_string());
             section = None;
             continue;
         }
         if let Some(value) = line.strip_prefix("exit_code:") {
-            exit_code = Some(format!("Exit code: {}", value.trim()));
+            parsed.exit_code = Some(value.trim().to_string());
             section = None;
             continue;
         }
@@ -1000,156 +1116,48 @@ fn render_bash_result_lines(content: &str) -> Vec<String> {
         }
 
         match section {
-            Some("stdout") => stdout.push(line.to_string()),
-            Some("stderr") => stderr.push(line.to_string()),
-            _ => body.push(line.to_string()),
+            Some("stdout") => parsed.stdout.push(line.to_string()),
+            Some("stderr") => parsed.stderr.push(line.to_string()),
+            _ => parsed.body.push(line.to_string()),
         }
     }
 
-    let mut lines = Vec::new();
-    if let Some(command) = command {
-        lines.push(command);
-    }
-    if let Some(exit_code) = exit_code {
-        lines.push(exit_code);
-    }
-    if !stdout.is_empty() {
-        lines.push("stdout:".into());
-        lines.extend(compact_tool_body_lines(stdout));
-    }
-    if !stderr.is_empty() {
-        lines.push("stderr:".into());
-        lines.extend(compact_tool_body_lines(stderr));
-    }
-    if !body.is_empty() {
-        lines.push("Output:".into());
-        lines.extend(compact_tool_body_lines(body));
-    }
-    lines
+    parsed
 }
 
-fn render_tool_result_panel(
-    tool_name: &str,
-    content: &str,
-    summary: Option<&str>,
-    detail: Option<&str>,
-) -> RenderPanel {
-    let detail_source = detail.unwrap_or(content);
-    let lines = match tool_name {
-        "Bash" => render_bash_tool_result_lines(tool_name, detail_source),
-        "Read" => render_read_tool_result_lines(tool_name, detail_source),
-        "Edit" | "FileEdit" => render_edit_tool_result_lines(tool_name, detail_source),
-        _ => render_generic_tool_result_lines(tool_name, content, summary, detail),
-    };
-
-    render_panel(PanelKind::ToolResult, "Tool result", lines)
+fn bash_activity_command(input: Option<&str>, detail: &str, summary: &str) -> Option<String> {
+    input
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|value| json_string_field(Some(&value), &["command", "cmd"]))
+        .or_else(|| parse_bash_result(detail).command)
+        .or_else(|| {
+            summary
+                .strip_suffix(" succeeded")
+                .or_else(|| summary.strip_suffix(" failed"))
+                .map(str::to_string)
+        })
 }
 
-fn render_bash_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
-    let mut lines = vec![format!("Tool: {tool_name}")];
-    lines.extend(render_bash_result_lines(detail));
-    lines
+fn activity_status_from_summary(summary: &str) -> ActivityStatus {
+    let lowered = summary.to_ascii_lowercase();
+    if lowered.contains("failed") || lowered.contains("denied") || lowered.contains("error") {
+        ActivityStatus::Failed
+    } else {
+        ActivityStatus::Succeeded
+    }
 }
 
-fn render_read_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
-    let fields = parse_key_value_lines(detail);
-    let mut lines = vec![format!("Tool: {tool_name}")];
-
-    if let Some(path) = fields.get("path") {
-        lines.push(format!("Path: {path}"));
+fn activity_status_from_tool_result(summary: &str, detail: &str) -> ActivityStatus {
+    let parsed = parse_bash_result(detail);
+    if parsed
+        .exit_code
+        .as_deref()
+        .is_some_and(|code| code.trim() != "0")
+    {
+        ActivityStatus::Failed
+    } else {
+        activity_status_from_summary(summary)
     }
-    if let Some(offset) = fields.get("offset") {
-        lines.push(format!("Offset: {offset}"));
-    }
-    if let Some(returned_chars) = fields.get("returned_chars") {
-        lines.push(format!("Returned chars: {returned_chars}"));
-    }
-
-    let mut body_lines = Vec::new();
-    let mut truncation = None;
-    for line in detail.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with("path=")
-            || trimmed.starts_with("offset=")
-            || trimmed.starts_with("returned_chars=")
-        {
-            continue;
-        }
-        if let Some(value) = trimmed
-            .strip_prefix("[Read truncated:")
-            .map(|value| value.trim_end_matches(']').trim())
-        {
-            truncation = Some(format!("Truncation: {value}"));
-            continue;
-        }
-        body_lines.push(line.to_string());
-    }
-
-    if let Some(truncation) = truncation {
-        lines.push(truncation);
-    }
-    if !body_lines.is_empty() {
-        lines.push("Content:".into());
-        lines.extend(compact_tool_body_lines(body_lines));
-    }
-    lines
-}
-
-fn render_edit_tool_result_lines(tool_name: &str, detail: &str) -> Vec<String> {
-    let fields = parse_key_value_lines(detail);
-    let mut lines = vec![format!("Tool: {tool_name}")];
-
-    if let Some(path) = fields.get("path") {
-        lines.push(format!("Path: {path}"));
-    }
-    if let Some(replacements) = fields.get("replacements") {
-        lines.push(format!("Replacements: {replacements}"));
-    }
-    if let Some(replace_all) = fields.get("replace_all") {
-        lines.push(format!("Replace all: {replace_all}"));
-    }
-    if let Some(old_text) = fields.get("old_text") {
-        let preview = truncate_for_tui(&decode_tool_preview_text(old_text), MAX_TOOL_DETAIL_WIDTH);
-        lines.push(format!("Old text: {preview}"));
-        lines.push("Before:".into());
-        lines.push(format!("  - {preview}"));
-    }
-    if let Some(new_text) = fields.get("new_text") {
-        let preview = truncate_for_tui(&decode_tool_preview_text(new_text), MAX_TOOL_DETAIL_WIDTH);
-        lines.push(format!("New text: {preview}"));
-        lines.push("After:".into());
-        lines.push(format!("  + {preview}"));
-    }
-
-    lines
-}
-
-fn render_generic_tool_result_lines(
-    tool_name: &str,
-    content: &str,
-    summary: Option<&str>,
-    detail: Option<&str>,
-) -> Vec<String> {
-    let mut lines = vec![format!("Tool: {tool_name}")];
-    if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
-        lines.push(format!(
-            "Summary: {}",
-            truncate_for_tui(summary, MAX_TOOL_DETAIL_WIDTH)
-        ));
-    }
-
-    let preview_source = detail.unwrap_or(content);
-    let preview_lines = compact_tool_detail_lines(
-        preview_source
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>(),
-    );
-    lines.extend(preview_lines);
-    lines
 }
 
 fn compact_tool_detail_lines(lines: Vec<String>) -> Vec<String> {
@@ -1169,13 +1177,6 @@ fn compact_tool_detail_lines(lines: Vec<String>) -> Vec<String> {
         .collect::<Vec<_>>();
     truncated.push("...".into());
     truncated
-}
-
-fn compact_tool_body_lines(lines: Vec<String>) -> Vec<String> {
-    compact_tool_detail_lines(lines)
-        .into_iter()
-        .map(|line| format!("  {line}"))
-        .collect()
 }
 
 fn render_panel(kind: PanelKind, title: impl Into<String>, lines: Vec<String>) -> RenderPanel {
@@ -1441,15 +1442,91 @@ mod tests {
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         assert!(!rendered.contains("[Activity]"));
-        assert!(rendered.contains("• RAN cargo test -- --nocapture"));
+        assert!(rendered.contains("• Ran cargo test -- --nocapture"));
         assert!(
             !rendered.contains(
                 "Command: cargo test --package agent --lib -- interaction::cli::renderer"
             )
         );
-        assert!(rendered.contains("Exit code: 0"));
+        assert!(!rendered.contains("Exit code: 0"));
         assert!(!rendered.contains("\"timeout_ms\":120000"));
         assert!(!rendered.contains("[Tool result]"));
+    }
+
+    #[test]
+    fn tui_bash_activity_uses_status_colored_bullet() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Bash".into(),
+                content: "command: cargo test\nexit_code: 1\nstderr:\nfailed".into(),
+                summary: Some("cargo test failed".into()),
+                detail: Some("command: cargo test\nexit_code: 1\nstderr:\nfailed".into()),
+            })],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("• Ran cargo test"));
+        assert!(plain.contains("Exit code: 1"));
+        assert!(plain.contains("failed"));
+        assert!(rendered.contains("\x1b[31m•\x1b[0m"));
+    }
+
+    #[test]
+    fn tui_running_activity_uses_gray_bullet_and_running_label() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(
+                CliRuntimeEvent::ToolCallStarted {
+                    tool_name: "Bash".into(),
+                    input: r#"{"command":"cargo build --bin morgo"}"#.into(),
+                },
+            )],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("• Running cargo build --bin morgo"));
+        assert!(rendered.contains("\x1b[2;37m•\x1b[0m"));
+    }
+
+    #[test]
+    fn tui_approval_continuation_renders_as_activity_summary() {
+        let prompt = [
+            "Approval resolved for tool Bash.",
+            "The approved tool has now run.",
+            "",
+            "Tool input:",
+            r#"{"command":"pwd && git status --short && ls -la","description":"Inspect repo root and status"}"#,
+            "",
+            "Tool result:",
+            "description: Inspect repo root and status",
+            "command: pwd && git status --short && ls -la",
+            "normalized_variants: [\"pwd && git status --short && ls -la\"]",
+            "cwd: /Users/wangmorgan/MProject/LearnCCfromCC",
+            "sandbox_policy: WorkspaceWrite",
+            "exit_code: 0",
+            "stdout:",
+            "/Users/wangmorgan/MProject/LearnCCfromCC",
+            " M RustAgent/Agent/src/bootstrap/runtime.rs",
+            "",
+            "Continue the interrupted user task using this tool result. Do not repeat the same approved tool call unless more evidence is needed.",
+        ]
+        .join("\n");
+        let turn = CliTurnOutput {
+            primary_text: prompt,
+            events: vec![],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("• Ran pwd && git status --short && ls -la"));
+        assert!(plain.contains("└ /Users/wangmorgan/MProject/LearnCCfromCC"));
+        assert!(plain.contains("└ M RustAgent/Agent/src/bootstrap/runtime.rs"));
+        assert!(!plain.contains("Approval resolved for tool Bash"));
+        assert!(!plain.contains("Continue the interrupted user task"));
+        assert!(rendered.contains("\x1b[32m•\x1b[0m"));
     }
 
     #[test]
@@ -1547,7 +1624,7 @@ mod tests {
         assert!(rendered.contains("READ active_model_runtime.rs, model_profiles.rs"));
         assert!(rendered.contains("SEARCH struct ModelProviderConfig in client.rs"));
         assert!(rendered.contains("READ client.rs"));
-        assert!(rendered.contains("RAN cargo test --lib"));
+        assert!(rendered.contains("Running cargo test --lib"));
         assert!(!rendered.contains("────────────────"), "{rendered}");
         assert_eq!(rendered.matches("• Explored").count(), 1, "{rendered}");
     }
