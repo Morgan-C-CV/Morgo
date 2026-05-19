@@ -657,14 +657,19 @@ fn tui_visible_input_suggestions(
 }
 
 fn tui_turn_output_is_interrupted(output: &CliTurnOutput) -> bool {
-    output.primary_text == CONVERSATION_INTERRUPTED_MESSAGE
-        || output.events.iter().any(|event| {
-            matches!(
-                event,
-                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { kind, .. })
-                    if kind == "aborted_streaming" || kind == "aborted_tools"
-            )
-        })
+    let has_pending_approval = output.events.iter().any(|event| {
+        matches!(
+            event,
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval { .. })
+        )
+    });
+    output.primary_text == CONVERSATION_INTERRUPTED_MESSAGE || output.events.iter().any(|event| {
+        matches!(
+            event,
+            CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal { kind, .. })
+                if kind == "aborted_streaming" || (kind == "aborted_tools" && !has_pending_approval)
+        )
+    })
 }
 
 fn tui_command_suggestions(app_state: &AppState, input: &str) -> Vec<TuiSuggestion> {
@@ -2090,6 +2095,13 @@ fn tui_poll_and_interrupt_active_turn(
 fn tui_interrupted_turn_output() -> CliTurnOutput {
     CliTurnOutput {
         primary_text: CONVERSATION_INTERRUPTED_MESSAGE.into(),
+        events: vec![],
+    }
+}
+
+fn tui_approval_denied_turn_output() -> CliTurnOutput {
+    CliTurnOutput {
+        primary_text: "Approval denied.".into(),
         events: vec![],
     }
 }
@@ -6524,7 +6536,8 @@ impl RuntimeBootstrap {
                             last_turn_duration = None;
                             follow_content_tail = true;
                             content_scroll_top = usize::MAX;
-                            current_document = render_turn_document(&tui_interrupted_turn_output());
+                            current_document =
+                                render_turn_document(&tui_approval_denied_turn_output());
                             self.print_tui_interactive_frame(
                                 &app_state,
                                 &current_document,
@@ -8896,6 +8909,42 @@ mod tests {
         };
 
         assert!(super::tui_turn_output_is_interrupted(&output));
+    }
+
+    #[test]
+    fn tui_turn_output_interruption_detection_ignores_approval_pause() {
+        let output = crate::interaction::cli::repl::CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                    crate::interaction::cli::repl::CliRuntimeEvent::PendingApproval {
+                        tool_name: "Bash".into(),
+                        message: "approval required".into(),
+                        code: None,
+                        summary: Some("approval required".into()),
+                        detail: None,
+                        approval_kind: Some("tool_permission".into()),
+                        escalation_reasons: Vec::new(),
+                    },
+                ),
+                crate::interaction::cli::repl::CliDisplayEvent::RuntimeEvent(
+                    crate::interaction::cli::repl::CliRuntimeEvent::Terminal {
+                        kind: "aborted_tools".into(),
+                        text: "aborted_tools".into(),
+                    },
+                ),
+            ],
+        };
+
+        assert!(!super::tui_turn_output_is_interrupted(&output));
+    }
+
+    #[test]
+    fn tui_approval_denied_message_is_not_interruption() {
+        let output = super::tui_approval_denied_turn_output();
+
+        assert_eq!(output.primary_text, "Approval denied.");
+        assert!(!super::tui_turn_output_is_interrupted(&output));
     }
 
     #[test]

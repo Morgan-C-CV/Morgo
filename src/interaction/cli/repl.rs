@@ -366,6 +366,7 @@ async fn collect_stream_messages(
     let mut messages = Vec::new();
     let mut runtime_events = Vec::new();
     let mut pending_delta_text = String::new();
+    let mut saw_pending_approval = false;
     loop {
         let event = tokio::select! {
             event = receiver.recv() => event,
@@ -428,6 +429,7 @@ async fn collect_stream_messages(
                 escalation_reasons,
                 ..
             } => {
+                saw_pending_approval = true;
                 runtime_events.push(CliRuntimeEvent::PendingApproval {
                     tool_name,
                     message: detail.clone().unwrap_or(message),
@@ -517,6 +519,12 @@ async fn collect_stream_messages(
                 });
             }
             EngineEvent::Terminal(terminal) => {
+                if should_skip_terminal_event_after_pending_approval(
+                    terminal.as_str(),
+                    saw_pending_approval,
+                ) {
+                    continue;
+                }
                 runtime_events.push(CliRuntimeEvent::Terminal {
                     kind: terminal.as_str().to_string(),
                     text: terminal.as_str().to_string(),
@@ -539,6 +547,13 @@ async fn collect_stream_messages(
         }
     }
     (messages, runtime_events)
+}
+
+fn should_skip_terminal_event_after_pending_approval(
+    terminal_kind: &str,
+    saw_pending_approval: bool,
+) -> bool {
+    saw_pending_approval && terminal_kind == "aborted_tools"
 }
 
 fn emit_stream_update(
@@ -571,7 +586,10 @@ fn collect_message_content(messages: &[Message]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliRuntimeEvent, collect_message_content, emit_stream_update};
+    use super::{
+        CliRuntimeEvent, collect_message_content, emit_stream_update,
+        should_skip_terminal_event_after_pending_approval,
+    };
     use crate::core::message::{Message, MessageVisibility};
     use crate::interaction::cli::repl::CliDisplayEvent;
 
@@ -636,5 +654,21 @@ mod tests {
         let keep_going = emit_stream_update(&messages, &runtime_events, &mut |_| false);
 
         assert!(!keep_going);
+    }
+
+    #[test]
+    fn pending_approval_suppresses_following_aborted_tools_terminal() {
+        assert!(should_skip_terminal_event_after_pending_approval(
+            "aborted_tools",
+            true
+        ));
+        assert!(!should_skip_terminal_event_after_pending_approval(
+            "aborted_streaming",
+            true
+        ));
+        assert!(!should_skip_terminal_event_after_pending_approval(
+            "aborted_tools",
+            false
+        ));
     }
 }

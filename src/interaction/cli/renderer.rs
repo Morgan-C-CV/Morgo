@@ -249,6 +249,7 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         return build_interleaved_render_document(view);
     }
 
+    let has_pending_approval = surface_items_have_pending_approval(&view.items);
     let mut blocks = Vec::new();
     let primary_text = if view.primary_text.is_empty() {
         streaming_delta_text(&view.items)
@@ -270,7 +271,7 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
         blocks.push(RenderBlock::Panel(activity_panel));
     }
     for item in &view.items {
-        if let Some(block) = render_block_for_surface_item(item) {
+        if let Some(block) = render_block_for_surface_item(item, has_pending_approval) {
             blocks.push(block);
         }
     }
@@ -278,6 +279,7 @@ fn build_render_document(view: &SurfaceView) -> RenderDocument {
 }
 
 fn should_render_interleaved_activity(view: &SurfaceView) -> bool {
+    let has_pending_approval = surface_items_have_pending_approval(&view.items);
     view.items.iter().any(|item| {
         matches!(
             item,
@@ -289,18 +291,25 @@ fn should_render_interleaved_activity(view: &SurfaceView) -> bool {
             .iter()
             .any(|item| matches!(item, SurfaceItem::AssistantDelta { text } if !text.is_empty()))
         || view.items.iter().any(|item| {
-            matches!(item, SurfaceItem::Terminal { kind, .. } if terminal_interrupt_message(kind).is_some())
+            matches!(
+                item,
+                SurfaceItem::Terminal { kind, .. }
+                    if terminal_interrupt_message(kind, has_pending_approval).is_some()
+            )
         }))
 }
 
 fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
     let mut builder = InterleavedRenderBuilder::default();
+    let has_pending_approval = surface_items_have_pending_approval(&view.items);
 
     for item in &view.items {
         match item {
             SurfaceItem::AssistantDelta { text } => builder.push_text(text),
-            SurfaceItem::Terminal { kind, .. } if terminal_interrupt_message(kind).is_some() => {
-                if let Some(message) = terminal_interrupt_message(kind) {
+            SurfaceItem::Terminal { kind, .. }
+                if terminal_interrupt_message(kind, has_pending_approval).is_some() =>
+            {
+                if let Some(message) = terminal_interrupt_message(kind, has_pending_approval) {
                     builder.push_text(message);
                 }
             }
@@ -318,7 +327,7 @@ fn build_interleaved_render_document(view: &SurfaceView) -> RenderDocument {
                 builder.push_tool_result(tool_name, content, summary.as_deref(), detail.as_deref());
             }
             _ => {
-                if let Some(block) = render_block_for_surface_item(item) {
+                if let Some(block) = render_block_for_surface_item(item, has_pending_approval) {
                     builder.flush_activity_before_non_activity();
                     builder.push_non_activity_block(block);
                 }
@@ -425,7 +434,10 @@ fn streaming_delta_text(items: &[SurfaceItem]) -> String {
         .join("")
 }
 
-fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
+fn render_block_for_surface_item(
+    item: &SurfaceItem,
+    has_pending_approval: bool,
+) -> Option<RenderBlock> {
     match item {
         SurfaceItem::TaskUpdate(task) => Some(RenderBlock::Panel(render_task_panel(task))),
         SurfaceItem::ApprovalRequired {
@@ -443,15 +455,23 @@ fn render_block_for_surface_item(item: &SurfaceItem) -> Option<RenderBlock> {
         | SurfaceItem::AssistantDelta { .. } => None,
         SurfaceItem::ToolResult { .. } => None,
         SurfaceItem::Terminal { kind, .. } => {
-            terminal_interrupt_message(kind).map(|message| RenderBlock::PrimaryText(message.into()))
+            terminal_interrupt_message(kind, has_pending_approval)
+                .map(|message| RenderBlock::PrimaryText(message.into()))
         }
         SurfaceItem::Transition { .. } | SurfaceItem::SessionMilestone { .. } => None,
     }
 }
 
-fn terminal_interrupt_message(kind: &str) -> Option<&'static str> {
+fn surface_items_have_pending_approval(items: &[SurfaceItem]) -> bool {
+    items
+        .iter()
+        .any(|item| matches!(item, SurfaceItem::ApprovalRequired { .. }))
+}
+
+fn terminal_interrupt_message(kind: &str, has_pending_approval: bool) -> Option<&'static str> {
     match kind {
-        "aborted_streaming" | "aborted_tools" => Some(CONVERSATION_INTERRUPTED_MESSAGE),
+        "aborted_streaming" => Some(CONVERSATION_INTERRUPTED_MESSAGE),
+        "aborted_tools" if !has_pending_approval => Some(CONVERSATION_INTERRUPTED_MESSAGE),
         _ => None,
     }
 }
@@ -2052,6 +2072,32 @@ mod tests {
         assert!(rendered.contains("Reason: This command uses a pipe."));
         assert!(rendered.contains("Action: choose an approval option below"));
         assert!(!rendered.contains("Reason: raw fallback"));
+    }
+
+    #[test]
+    fn tui_approval_pause_does_not_render_interrupted_message() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::PendingApproval {
+                    tool_name: "Bash".into(),
+                    message: "approval required".into(),
+                    code: None,
+                    summary: Some("Bash pending approval".into()),
+                    detail: Some("Run: cargo build\nReason: requires approval".into()),
+                    approval_kind: Some("tool_permission".into()),
+                    escalation_reasons: vec!["shell_operator.pipe".into()],
+                }),
+                CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::Terminal {
+                    kind: "aborted_tools".into(),
+                    text: "aborted_tools".into(),
+                }),
+            ],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("[Approval required]"));
+        assert!(!rendered.contains(CONVERSATION_INTERRUPTED_MESSAGE));
     }
 
     #[test]
