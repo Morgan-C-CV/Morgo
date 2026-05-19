@@ -3829,15 +3829,15 @@ fn tui_should_enable_keyboard_enhancements_for(
 
 fn tui_should_enable_mouse_capture_for(
     override_value: Option<&str>,
-    term_program: Option<&str>,
+    _term_program: Option<&str>,
 ) -> bool {
     match override_value {
         Some(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,
-            _ => !tui_terminal_program_is_macos_native(term_program),
+            _ => true,
         },
-        None => !tui_terminal_program_is_macos_native(term_program),
+        None => true,
     }
 }
 
@@ -5026,8 +5026,8 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_mouse_capture_defaults_off_for_apple_terminal_copy_interop() {
-        assert!(!super::tui_should_enable_mouse_capture_for(
+    fn tui_mouse_capture_defaults_on_for_terminal_scrollback_control() {
+        assert!(super::tui_should_enable_mouse_capture_for(
             None,
             Some("Apple_Terminal")
         ));
