@@ -2076,7 +2076,7 @@ fn tui_poll_and_interrupt_active_turn(
                     "Esc was pressed while turn output was draining",
                 );
             }
-            true
+            interrupted
         }
         event => {
             if let Ok(mut queued) = queued_events.lock() {
@@ -2701,6 +2701,9 @@ fn tui_transcript_text(app_state: &AppState) -> String {
                 }
             }
             crate::core::message::Role::Assistant => {
+                if text.trim() == CONVERSATION_INTERRUPTED_MESSAGE {
+                    continue;
+                }
                 lines.extend(text.lines().map(|line| line.to_string()))
             }
             crate::core::message::Role::System => {
@@ -3835,15 +3838,15 @@ fn tui_should_enable_keyboard_enhancements_for(
 
 fn tui_should_enable_mouse_capture_for(
     override_value: Option<&str>,
-    _term_program: Option<&str>,
+    term_program: Option<&str>,
 ) -> bool {
     match override_value {
         Some(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,
-            _ => true,
+            _ => !tui_terminal_program_is_macos_native(term_program),
         },
-        None => true,
+        None => !tui_terminal_program_is_macos_native(term_program),
     }
 }
 
@@ -4842,6 +4845,34 @@ mod tui_output_tests {
     }
 
     #[test]
+    fn tui_transcript_hides_stale_interrupted_notice() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant(
+                        crate::interaction::cli::renderer::CONVERSATION_INTERRUPTED_MESSAGE,
+                    ),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("older assistant reply"),
+                    timestamp: None,
+                    tool_refs: Vec::new(),
+                    milestone: None,
+                },
+            ],
+        });
+
+        let transcript = super::tui_transcript_text(&app_state);
+
+        assert!(!transcript.contains("Conversation interrupted"));
+        assert!(transcript.contains("older assistant reply"));
+    }
+
+    #[test]
     fn tui_transcript_summarizes_approval_continuation_prompt() {
         let mut app_state = test_app_state();
         let prompt = [
@@ -5071,8 +5102,8 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_mouse_capture_defaults_on_for_terminal_scrollback_control() {
-        assert!(super::tui_should_enable_mouse_capture_for(
+    fn tui_mouse_capture_defaults_off_for_apple_terminal_copy_interop() {
+        assert!(!super::tui_should_enable_mouse_capture_for(
             None,
             Some("Apple_Terminal")
         ));
@@ -5087,6 +5118,10 @@ mod tui_output_tests {
         assert!(!super::tui_should_enable_mouse_capture_for(
             Some("0"),
             Some("vscode")
+        ));
+        assert!(super::tui_should_enable_mouse_capture_for(
+            Some("1"),
+            Some("Apple_Terminal")
         ));
     }
 
