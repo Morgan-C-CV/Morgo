@@ -12,6 +12,7 @@ use crate::plan::manager::PlanManager;
 use crate::plugins::runtime_state::RuntimePluginState;
 use crate::security::authorizer::SurfaceAdmissionPolicy;
 use crate::security::filesystem_policy::FilesystemPolicy;
+use crate::security::sandbox_config::SandboxConfig;
 use crate::security::workspace_capability::{WorkspaceCapabilityConfig, WorkspacePermissionConfig};
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
@@ -93,6 +94,7 @@ pub struct ToolPermissionContext {
     pub notification_dispatcher: Option<NotificationDispatcher>,
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
+    pub sandbox_config: Arc<SandboxConfig>,
     pub workspace_capability: Option<Arc<WorkspaceCapabilityConfig>>,
     pub workspace_permissions: Option<Arc<WorkspacePermissionConfig>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
@@ -132,6 +134,7 @@ impl ToolPermissionContext {
             notification_dispatcher: None,
             pending_approval: Arc::new(RwLock::new(None)),
             filesystem_policy: None,
+            sandbox_config: Arc::new(SandboxConfig::default()),
             workspace_capability: None,
             workspace_permissions: None,
             subagent_scripted_turns: None,
@@ -247,6 +250,15 @@ impl ToolPermissionContext {
 
     pub fn filesystem_policy(&self) -> Option<Arc<FilesystemPolicy>> {
         self.filesystem_policy.clone()
+    }
+
+    pub fn with_sandbox_config(mut self, sandbox_config: Arc<SandboxConfig>) -> Self {
+        self.sandbox_config = sandbox_config;
+        self
+    }
+
+    pub fn sandbox_config(&self) -> Arc<SandboxConfig> {
+        self.sandbox_config.clone()
     }
 
     pub fn with_workspace_capability(mut self, config: Arc<WorkspaceCapabilityConfig>) -> Self {
@@ -382,6 +394,7 @@ impl ToolPermissionContext {
             notification_dispatcher: self.notification_dispatcher.clone(),
             pending_approval: Arc::new(RwLock::new(pending_approval)),
             filesystem_policy: self.filesystem_policy.clone(),
+            sandbox_config: self.sandbox_config.clone(),
             workspace_capability: self.workspace_capability.clone(),
             workspace_permissions: self.workspace_permissions.clone(),
             subagent_scripted_turns: self.subagent_scripted_turns.clone(),

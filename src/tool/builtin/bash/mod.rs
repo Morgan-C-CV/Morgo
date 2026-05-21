@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::security::workspace_capability::{
@@ -25,13 +24,13 @@ pub mod scanner;
 pub mod security;
 pub mod sed_validation;
 
-use clamped_reader::{ClampedOutput, clamped_to_string, read_clamped};
+use clamped_reader::clamped_to_string;
 use sandbox::ClampedProcessOutput;
 
 use crate::tool::classifier::auto_classifier::{ClassifierDecision, classify_bash_command};
 use command_helpers::{command_matches_rule, normalized_command_variants};
 use permissions::{evaluate_bash_policy, evaluate_bash_policy_with_context};
-use sandbox::{SandboxPolicy, execute_with_sandbox};
+use sandbox::{SandboxPolicy, execute_with_sandbox_config};
 
 pub struct BashTool;
 
@@ -173,6 +172,14 @@ impl Tool for BashTool {
         }
 
         if input.dangerously_disable_sandbox {
+            let sandbox_config = permissions.sandbox_config();
+            if sandbox_config.enabled && !sandbox_config.allow_unsandboxed_commands {
+                return bash_deny(
+                    "sandbox_unsandboxed_disabled",
+                    "command requests disabling sandbox protections but unsandboxed Bash commands are disabled",
+                    crate::tool::definition::PermissionDecisionReason::Safety,
+                );
+            }
             return bash_ask(
                 &input.command,
                 "sandbox_disable",
@@ -304,14 +311,16 @@ impl Tool for BashTool {
             evaluate_bash_policy(&input.command).sandbox_policy
         };
         let cwd = resolve_cwd(permissions)?;
+        let sandbox_config = permissions.sandbox_config();
 
         if input.run_in_background {
-            return launch_background_command(&input, permissions, &cwd, policy).await;
+            return launch_background_command(&input, permissions, &cwd, policy, sandbox_config)
+                .await;
         }
 
         let output = timeout(
             Duration::from_millis(timeout_ms),
-            execute_with_sandbox(&input.command, &cwd, policy),
+            execute_with_sandbox_config(&input.command, &cwd, policy, sandbox_config),
         )
         .await
         .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
@@ -528,6 +537,7 @@ async fn launch_background_command(
     permissions: &ToolPermissionContext,
     cwd: &std::path::Path,
     policy: SandboxPolicy,
+    sandbox_config: std::sync::Arc<crate::security::sandbox_config::SandboxConfig>,
 ) -> anyhow::Result<ToolResult> {
     let task_manager = permissions
         .task_manager
@@ -562,7 +572,8 @@ async fn launch_background_command(
     let manager = task_manager.clone();
     let task_id = task.id.clone();
     task_manager.launch(&task.id, command.clone(), async move {
-        let result = run_background_process(&command, &cwd, policy, timeout_ms).await;
+        let result =
+            run_background_process(&command, &cwd, policy, timeout_ms, sandbox_config).await;
         match result {
             Ok(output) => {
                 manager.append_output(
@@ -604,59 +615,14 @@ async fn run_background_process(
     cwd: &std::path::Path,
     policy: SandboxPolicy,
     timeout_ms: u64,
+    sandbox_config: std::sync::Arc<crate::security::sandbox_config::SandboxConfig>,
 ) -> anyhow::Result<ClampedProcessOutput> {
-    let mut process = Command::new("/bin/sh");
-    process
-        .kill_on_drop(true)
-        .arg("-lc")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .env("RUST_AGENT_SANDBOX_POLICY", format!("{:?}", policy));
-
-    let mut child = process
-        .spawn()
-        .map_err(|error| anyhow::anyhow!("failed to spawn background bash command: {error}"))?;
-
-    let stdout_task = child
-        .stdout
-        .take()
-        .map(|stdout| tokio::spawn(read_clamped(stdout)));
-    let stderr_task = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_clamped(stderr)));
-
-    let status = timeout(Duration::from_millis(timeout_ms), child.wait())
-        .await
-        .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))??;
-
-    let empty = || ClampedOutput {
-        head: vec![],
-        tail: vec![],
-        truncated: false,
-        total_bytes_read: 0,
-    };
-    let stdout = match stdout_task {
-        Some(task) => task
-            .await
-            .map_err(|e| anyhow::anyhow!("stdout join failed: {e}"))?,
-        None => empty(),
-    };
-    let stderr = match stderr_task {
-        Some(task) => task
-            .await
-            .map_err(|e| anyhow::anyhow!("stderr join failed: {e}"))?,
-        None => empty(),
-    };
-
-    Ok(ClampedProcessOutput {
-        status,
-        stdout,
-        stderr,
-    })
+    timeout(
+        Duration::from_millis(timeout_ms),
+        execute_with_sandbox_config(command, cwd, policy, sandbox_config),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("bash command timed out after {timeout_ms}ms"))?
 }
 
 fn format_output_background(
@@ -692,7 +658,7 @@ fn format_output(
     input: &BashInput,
     output: ClampedProcessOutput,
     cwd: &std::path::Path,
-    policy: SandboxPolicy,
+    _policy: SandboxPolicy,
 ) -> String {
     let stdout = clamped_to_string(output.stdout).trim().to_string();
     let stderr = clamped_to_string(output.stderr).trim().to_string();
@@ -715,7 +681,9 @@ fn format_output(
         normalized_command_variants(&input.command)
     ));
     parts.push(format!("cwd: {}", cwd.display()));
-    parts.push(format!("sandbox_policy: {:?}", policy));
+    parts.push(format!("sandbox_policy: {:?}", output.sandbox_policy));
+    parts.push(format!("sandbox_enabled: {}", output.sandbox_enabled));
+    parts.push(format!("sandbox_runner: {}", output.runner.as_str()));
     parts.push(format!("exit_code: {status}"));
     if !stdout.is_empty() {
         parts.push(format!("stdout:\n{stdout}"));

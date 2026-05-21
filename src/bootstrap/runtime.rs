@@ -82,6 +82,7 @@ use crate::security::approval_protocol::{ApprovalResponse, approval_always_allow
 use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
+use crate::security::sandbox_config::SandboxConfig;
 use crate::security::workspace_capability::{
     LEGACY_WORKSPACE_CAPABILITY_FILENAME, WORKSPACE_PERMISSIONS_FILENAME,
     WorkspaceCapabilityConfig, WorkspacePermissionConfig, WorkspacePermissionLevel,
@@ -5742,6 +5743,7 @@ pub struct RuntimeInitializeBundle {
     pub skill_registry: Arc<SkillRegistry>,
     pub mcp_runtime: Arc<McpRuntime>,
     pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
+    pub sandbox_config: Arc<SandboxConfig>,
     pub plugin_load_result: Arc<crate::plugins::types::PluginLoadResult>,
     pub coordinator_tools: ToolRegistry,
     pub runtime_tool_registry: Arc<RwLock<ToolRegistry>>,
@@ -7543,6 +7545,12 @@ impl RuntimeBootstrap {
                 panic!("failed to load filesystem policy during bootstrap: {error}")
             })
             .map(Arc::new);
+        let sandbox_config = Arc::new(
+            self.load_sandbox_config(&config_root, &state.current_cwd)
+                .unwrap_or_else(|error| {
+                    panic!("failed to load sandbox config during bootstrap: {error}")
+                }),
+        );
 
         // Initialize the global subagent concurrency limiter
         let subagent_limiter = SubagentLimiter::new();
@@ -7565,7 +7573,8 @@ impl RuntimeBootstrap {
                 .with_inherited_tool_registry(coordinator_tools.clone())
                 .with_inherited_hook_registry(hook_registry.clone())
                 .with_subagent_limiter(subagent_limiter.clone())
-                .with_boss_coordinator(boss_coordinator.clone());
+                .with_boss_coordinator(boss_coordinator.clone())
+                .with_sandbox_config(sandbox_config.clone());
         if let Some(policy) = filesystem_policy.clone() {
             permission_context = permission_context.with_filesystem_policy(policy);
         }
@@ -7674,6 +7683,7 @@ impl RuntimeBootstrap {
             skill_registry,
             mcp_runtime,
             filesystem_policy,
+            sandbox_config,
             plugin_load_result,
             coordinator_tools,
             runtime_tool_registry,
@@ -7713,7 +7723,8 @@ impl RuntimeBootstrap {
         .with_interactive_tools(true)
         .with_inherited_tool_registry(initialize_bundle.coordinator_tools.clone())
         .with_inherited_hook_registry(initialize_bundle.hook_registry.clone())
-        .with_subagent_limiter(initialize_bundle.subagent_limiter.clone());
+        .with_subagent_limiter(initialize_bundle.subagent_limiter.clone())
+        .with_sandbox_config(initialize_bundle.sandbox_config.clone());
 
         if let Some(boss) = initialize_bundle.boss_coordinator.clone() {
             permission_context = permission_context.with_boss_coordinator(boss);
@@ -8002,6 +8013,31 @@ impl RuntimeBootstrap {
             return Ok(None);
         }
         FilesystemPolicy::load_from_path(&path).map(Some)
+    }
+
+    fn load_sandbox_config(
+        &self,
+        config_root: &std::path::Path,
+        workspace: &std::path::Path,
+    ) -> anyhow::Result<SandboxConfig> {
+        let config_root = if config_root.is_absolute() {
+            config_root.to_path_buf()
+        } else {
+            anyhow::bail!(
+                "sandbox config root must be an absolute path: {}",
+                config_root.display()
+            );
+        };
+        let workspace = if workspace.is_absolute() {
+            workspace.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to resolve cwd for sandbox config: {error}")
+                })?
+                .join(workspace)
+        };
+        SandboxConfig::load_from_config_root(&config_root, &workspace)
     }
 
     fn load_workspace_capability_config(
