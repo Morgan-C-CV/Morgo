@@ -130,6 +130,17 @@ fn sample_call_for_permission_probe(
 
 fn render_workspace_capabilities(permissions: &ToolPermissionContext, cwd: &Path) -> Vec<String> {
     let mut capabilities = Vec::new();
+    if let Some(config) = permissions.workspace_permissions() {
+        if let Some(matched) = config.effective_permission(cwd) {
+            capabilities.push(format!(
+                "workspace_permission={}",
+                matched.permission.as_str()
+            ));
+            capabilities.push(format!("workspace_scope={}", matched.path.display()));
+        } else {
+            capabilities.push("workspace_permission=untrusted".into());
+        }
+    }
     if let Some(config) = permissions.workspace_capability() {
         let effective_tier = config.effective_max_tier(cwd);
         capabilities.push(format!(

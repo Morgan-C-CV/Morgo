@@ -7,7 +7,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::security::workspace_capability::{
-    CapabilityCheckOutcome, check_bash_capability, requirement_from_policy,
+    CapabilityCheckOutcome, CapabilityRequirementReason, CapabilityTier, WorkspacePermissionLevel,
+    check_bash_capability, requirement_from_policy,
 };
 use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
 use crate::tool::definition::{
@@ -199,10 +200,43 @@ impl Tool for BashTool {
             ClassifierDecision::Allow => {}
         }
 
-        if policy.requires_escalation {
-            // If a WorkspaceCapabilityConfig is present, route through it.
+        let requirement = requirement_from_policy(&policy);
+        if let Some(workspace_permissions) = permissions.workspace_permissions() {
+            let required_permission = workspace_permission_for_bash_tier(requirement.required_tier);
+            if !policy.path_safe
+                || requirement.reason == CapabilityRequirementReason::OutOfScopePath
+            {
+                return bash_ask(
+                    &input.command,
+                    "workspace_out_of_scope_path",
+                    "command references a path outside the trusted workspace",
+                    policy.escalation_reasons.clone(),
+                );
+            }
+            match workspace_permissions.check_path(&cwd, required_permission) {
+                crate::security::workspace_capability::WorkspacePermissionCheck::Allowed {
+                    ..
+                } => {}
+                crate::security::workspace_capability::WorkspacePermissionCheck::RequiresApproval {
+                    target_path,
+                    required,
+                    current,
+                    matched_path,
+                    reason,
+                } => {
+                    return super::workspace_permission::workspace_ask(
+                        "Bash",
+                        target_path.display().to_string(),
+                        required,
+                        current,
+                        matched_path.map(|path| path.display().to_string()),
+                        reason,
+                    );
+                }
+            }
+        } else if policy.requires_escalation {
+            // If a legacy WorkspaceCapabilityConfig is present, route through it.
             if let Some(cap_config) = permissions.workspace_capability() {
-                let requirement = requirement_from_policy(&policy);
                 let outcome = check_bash_capability(&requirement, &cap_config, &cwd);
                 match outcome {
                     CapabilityCheckOutcome::Allowed => {}
@@ -285,6 +319,14 @@ impl Tool for BashTool {
         Ok(ToolResult::Text(format_output(
             &input, output, &cwd, policy,
         )))
+    }
+}
+
+fn workspace_permission_for_bash_tier(tier: CapabilityTier) -> WorkspacePermissionLevel {
+    match tier {
+        CapabilityTier::Read => WorkspacePermissionLevel::View,
+        CapabilityTier::Write => WorkspacePermissionLevel::Worker,
+        CapabilityTier::AdminBash => WorkspacePermissionLevel::Admin,
     }
 }
 

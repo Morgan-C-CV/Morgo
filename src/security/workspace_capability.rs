@@ -1,6 +1,324 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+// ── Workspace permissions ────────────────────────────────────────────────────
+
+pub const WORKSPACE_PERMISSIONS_FILENAME: &str = "workspace-permissions.json";
+pub const LEGACY_WORKSPACE_CAPABILITY_FILENAME: &str = "workspace-capability.json";
+
+/// Persistent workspace permission grant.
+///
+/// Ordered: View < Edit < Worker < Admin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspacePermissionLevel {
+    View,
+    Edit,
+    Worker,
+    Admin,
+}
+
+impl WorkspacePermissionLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Edit => "edit",
+            Self::Worker => "worker",
+            Self::Admin => "admin",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "view" | "read" => Some(Self::View),
+            "edit" => Some(Self::Edit),
+            "worker" | "write" => Some(Self::Worker),
+            "admin" | "admin_bash" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for WorkspacePermissionLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePermissionEntry {
+    pub path: PathBuf,
+    pub permission: WorkspacePermissionLevel,
+    pub trusted_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePermissionConfig {
+    pub version: u32,
+    #[serde(default)]
+    pub workspaces: Vec<WorkspacePermissionEntry>,
+}
+
+impl Default for WorkspacePermissionConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            workspaces: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePermissionMatch {
+    pub path: PathBuf,
+    pub permission: WorkspacePermissionLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspacePermissionCheck {
+    Allowed {
+        matched_path: PathBuf,
+        permission: WorkspacePermissionLevel,
+    },
+    RequiresApproval {
+        target_path: PathBuf,
+        required: WorkspacePermissionLevel,
+        current: Option<WorkspacePermissionLevel>,
+        matched_path: Option<PathBuf>,
+        reason: String,
+    },
+}
+
+impl WorkspacePermissionConfig {
+    pub fn load_from_json(json: &str) -> anyhow::Result<Self> {
+        serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("failed to parse workspace permission config: {e}"))
+    }
+
+    pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read workspace permission config {}: {error}",
+                path.display()
+            )
+        })?;
+        Self::load_from_json(&json)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to create workspace permission config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, format!("{json}\n")).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to write workspace permission config {}: {error}",
+                path.display()
+            )
+        })?;
+        set_user_read_write(path);
+        Ok(())
+    }
+
+    pub fn effective_permission(&self, target: &Path) -> Option<WorkspacePermissionMatch> {
+        let target = normalize_existing_or_create_path(target);
+        self.workspaces
+            .iter()
+            .filter_map(|entry| {
+                let path = normalize_existing_or_create_path(&entry.path);
+                if target == path || target.starts_with(&path) {
+                    Some(WorkspacePermissionMatch {
+                        path,
+                        permission: entry.permission,
+                    })
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|entry| entry.path.components().count())
+    }
+
+    pub fn check_path(
+        &self,
+        target: &Path,
+        required: WorkspacePermissionLevel,
+    ) -> WorkspacePermissionCheck {
+        let target_path = normalize_existing_or_create_path(target);
+        match self.effective_permission(&target_path) {
+            Some(matched) if matched.permission >= required => WorkspacePermissionCheck::Allowed {
+                matched_path: matched.path,
+                permission: matched.permission,
+            },
+            Some(matched) => WorkspacePermissionCheck::RequiresApproval {
+                target_path,
+                required,
+                current: Some(matched.permission),
+                matched_path: Some(matched.path),
+                reason: "workspace_permission_insufficient".into(),
+            },
+            None => WorkspacePermissionCheck::RequiresApproval {
+                target_path,
+                required,
+                current: None,
+                matched_path: None,
+                reason: "workspace_untrusted".into(),
+            },
+        }
+    }
+
+    pub fn trust_workspace(
+        &mut self,
+        path: impl AsRef<Path>,
+        permission: WorkspacePermissionLevel,
+    ) {
+        let path = normalize_existing_or_create_path(path.as_ref());
+        let trusted_at = rfc3339_like_now();
+        if let Some(entry) = self
+            .workspaces
+            .iter_mut()
+            .find(|entry| normalize_existing_or_create_path(&entry.path) == path)
+        {
+            entry.permission = permission;
+            entry.trusted_at = trusted_at;
+            entry.path = path;
+            return;
+        }
+        self.workspaces.push(WorkspacePermissionEntry {
+            path,
+            permission,
+            trusted_at,
+        });
+        self.workspaces
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
+}
+
+pub fn default_workspace_permissions_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".morgo")
+            .join(WORKSPACE_PERMISSIONS_FILENAME)
+    })
+}
+
+pub fn load_global_workspace_permissions() -> anyhow::Result<WorkspacePermissionConfig> {
+    let Some(path) = default_workspace_permissions_path() else {
+        return Ok(WorkspacePermissionConfig::default());
+    };
+    if !path.exists() {
+        return Ok(WorkspacePermissionConfig::default());
+    }
+    WorkspacePermissionConfig::load_from_path(&path)
+}
+
+pub fn save_global_workspace_permissions(config: &WorkspacePermissionConfig) -> anyhow::Result<()> {
+    let Some(path) = default_workspace_permissions_path() else {
+        anyhow::bail!("HOME is not set; cannot save workspace permissions")
+    };
+    config.save_to_path(&path)
+}
+
+pub fn normalize_existing_or_create_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    if absolute.exists() {
+        return std::fs::canonicalize(&absolute)
+            .unwrap_or_else(|_| normalize_path_lexically(&absolute));
+    }
+    let mut current = absolute.as_path();
+    loop {
+        if current.exists() {
+            if let Ok(canonical_base) = std::fs::canonicalize(current) {
+                if let Ok(remainder) = absolute.strip_prefix(current) {
+                    return normalize_path_lexically(&canonical_base.join(remainder));
+                }
+            }
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    normalize_path_lexically(&absolute)
+}
+
+pub fn workspace_permission_from_capability_tier(tier: CapabilityTier) -> WorkspacePermissionLevel {
+    match tier {
+        CapabilityTier::Read => WorkspacePermissionLevel::View,
+        CapabilityTier::Write => WorkspacePermissionLevel::Worker,
+        CapabilityTier::AdminBash => WorkspacePermissionLevel::Admin,
+    }
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn rfc3339_like_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let days = (secs / 86_400) as i64;
+    let seconds_of_day = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+#[cfg(unix)]
+fn set_user_read_write(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
+#[cfg(not(unix))]
+fn set_user_read_write(_path: &Path) {}
 
 // ── Capability tiers ──────────────────────────────────────────────────────────
 
@@ -299,4 +617,84 @@ pub fn requirement_from_policy(
         return CommandCapabilityRequirement::admin_bash(reason);
     }
     CommandCapabilityRequirement::write()
+}
+
+#[cfg(test)]
+mod workspace_permission_tests {
+    use super::{
+        WorkspacePermissionCheck, WorkspacePermissionConfig, WorkspacePermissionEntry,
+        WorkspacePermissionLevel, civil_from_days,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn workspace_permissions_longest_prefix_wins() {
+        let config = WorkspacePermissionConfig {
+            version: 1,
+            workspaces: vec![
+                WorkspacePermissionEntry {
+                    path: "/project".into(),
+                    permission: WorkspacePermissionLevel::Worker,
+                    trusted_at: "2026-05-19T00:00:00Z".into(),
+                },
+                WorkspacePermissionEntry {
+                    path: "/project/readonly".into(),
+                    permission: WorkspacePermissionLevel::View,
+                    trusted_at: "2026-05-19T00:00:00Z".into(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            config
+                .effective_permission(Path::new("/project/src/lib.rs"))
+                .unwrap()
+                .permission,
+            WorkspacePermissionLevel::Worker
+        );
+        assert_eq!(
+            config
+                .effective_permission(Path::new("/project/readonly/data.txt"))
+                .unwrap()
+                .permission,
+            WorkspacePermissionLevel::View
+        );
+        assert!(config.effective_permission(Path::new("/other")).is_none());
+    }
+
+    #[test]
+    fn workspace_permission_check_unmatched_requires_approval() {
+        let config = WorkspacePermissionConfig::default();
+        let outcome = config.check_path(
+            Path::new("/untrusted/file.txt"),
+            WorkspacePermissionLevel::View,
+        );
+        assert!(matches!(
+            outcome,
+            WorkspacePermissionCheck::RequiresApproval {
+                reason,
+                current: None,
+                ..
+            } if reason == "workspace_untrusted"
+        ));
+    }
+
+    #[test]
+    fn trust_workspace_updates_existing_entry() {
+        let mut config = WorkspacePermissionConfig::default();
+        config.trust_workspace("/project", WorkspacePermissionLevel::View);
+        config.trust_workspace("/project", WorkspacePermissionLevel::Worker);
+
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(
+            config.workspaces[0].permission,
+            WorkspacePermissionLevel::Worker
+        );
+    }
+
+    #[test]
+    fn civil_from_days_matches_unix_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_593), (2026, 5, 20));
+    }
 }

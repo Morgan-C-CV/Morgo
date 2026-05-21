@@ -22,3 +22,4 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+mod workspace_permission;

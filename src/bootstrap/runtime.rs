@@ -1,6 +1,6 @@
 use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -82,7 +82,12 @@ use crate::security::approval_protocol::{ApprovalResponse, approval_always_allow
 use crate::security::audit::AuditLog;
 use crate::security::authorizer::{AuthDecision, DefaultSurfaceAuthorizer, SurfaceAuthorizer};
 use crate::security::filesystem_policy::FilesystemPolicy;
-use crate::security::workspace_capability::WorkspaceCapabilityConfig;
+use crate::security::workspace_capability::{
+    LEGACY_WORKSPACE_CAPABILITY_FILENAME, WORKSPACE_PERMISSIONS_FILENAME,
+    WorkspaceCapabilityConfig, WorkspacePermissionConfig, WorkspacePermissionLevel,
+    default_workspace_permissions_path, load_global_workspace_permissions,
+    save_global_workspace_permissions, workspace_permission_from_capability_tier,
+};
 use crate::service::api::client::{
     ModelPricing, ModelProviderClient, ModelProviderConfig, ProviderAuthStrategy,
     ProviderCompatibilityProfileKind, ProviderProtocol, ProviderTimeout, validate_provider_config,
@@ -939,6 +944,12 @@ fn permissions_command_suggestions(args: &[&str], trailing_space: bool) -> Vec<T
         ),
         heuristic_suggestion("/permissions deny ", "deny", "Add always-deny rules", "31"),
         heuristic_suggestion("/permissions ask ", "ask", "Add always-ask rules", "35"),
+        heuristic_suggestion(
+            "/permissions trust ",
+            "trust",
+            "Trust a workspace path globally",
+            "32",
+        ),
     ];
     if args.is_empty() {
         return base;
@@ -5868,6 +5879,7 @@ impl RuntimeBootstrap {
         let setup = SetupContext::detect();
         state.record_phase(BootstrapPhase::Setup);
         state.current_cwd = setup.working_directory.clone();
+        self.maybe_prompt_trust_workspace(&state.current_cwd, state.surface, state.session_mode)?;
 
         let restore_request = self.restore_request();
         let resolved_session =
@@ -7563,6 +7575,9 @@ impl RuntimeBootstrap {
         }) {
             permission_context = permission_context.with_workspace_capability(Arc::new(cap_config));
         }
+        let workspace_permissions = self.load_workspace_permission_config(&state.current_cwd);
+        permission_context =
+            permission_context.with_workspace_permissions(Arc::new(workspace_permissions));
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -7712,6 +7727,11 @@ impl RuntimeBootstrap {
         }) {
             permission_context = permission_context.with_workspace_capability(Arc::new(cap_config));
         }
+        let workspace_permissions = self.load_workspace_permission_config(
+            &std::path::PathBuf::from(resolved_session.snapshot.cwd.clone()),
+        );
+        permission_context =
+            permission_context.with_workspace_permissions(Arc::new(workspace_permissions));
         let last_activity_ts = Arc::new(std::sync::atomic::AtomicU64::new(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -8038,7 +8058,7 @@ impl RuntimeBootstrap {
             path
         };
 
-        let path = config_dir.join("workspace-capability.json");
+        let path = config_dir.join(LEGACY_WORKSPACE_CAPABILITY_FILENAME);
         if !path.exists() {
             return Ok(None);
         }
@@ -8049,6 +8069,92 @@ impl RuntimeBootstrap {
             )
         })?;
         WorkspaceCapabilityConfig::load_from_json(&json).map(Some)
+    }
+
+    fn maybe_prompt_trust_workspace(
+        &self,
+        cwd: &std::path::Path,
+        surface: InteractionSurface,
+        session_mode: SessionMode,
+    ) -> anyhow::Result<()> {
+        if !matches!(
+            (surface, session_mode),
+            (InteractionSurface::Cli, SessionMode::Interactive)
+        ) {
+            return Ok(());
+        }
+        if !io::stdin().is_terminal() {
+            return Ok(());
+        }
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut config = load_global_workspace_permissions().unwrap_or_else(|error| {
+            tracing::warn!("failed to load global workspace permissions: {error}");
+            WorkspacePermissionConfig::default()
+        });
+        if config.effective_permission(&cwd).is_some() {
+            return Ok(());
+        }
+        let config_path = default_workspace_permissions_path().unwrap_or_else(|| {
+            std::path::PathBuf::from("~/.morgo").join(WORKSPACE_PERMISSIONS_FILENAME)
+        });
+        print!(
+            "Morgo does not trust this workspace yet:\n{}\nGrant worker permission and save it to {}? [y/N] ",
+            cwd.display(),
+            config_path.display()
+        );
+        let _ = io::stdout().flush();
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let accepted = matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes");
+        if accepted {
+            config.trust_workspace(&cwd, WorkspacePermissionLevel::Worker);
+            save_global_workspace_permissions(&config)?;
+            println!("Trusted workspace with worker permission.");
+        } else {
+            println!(
+                "Continuing without a workspace trust grant; protected tools will ask for approval."
+            );
+        }
+        Ok(())
+    }
+
+    fn load_workspace_permission_config(&self, cwd: &std::path::Path) -> WorkspacePermissionConfig {
+        match load_global_workspace_permissions() {
+            Ok(config) if !config.workspaces.is_empty() => return config,
+            Ok(config) => {
+                if let Some(legacy) = self.load_legacy_workspace_permissions(cwd) {
+                    return legacy;
+                }
+                config
+            }
+            Err(error) => {
+                tracing::warn!("failed to load {WORKSPACE_PERMISSIONS_FILENAME}: {error}");
+                self.load_legacy_workspace_permissions(cwd)
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    fn load_legacy_workspace_permissions(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Option<WorkspacePermissionConfig> {
+        let legacy = self.load_workspace_capability_config().ok().flatten()?;
+        let mut config = WorkspacePermissionConfig::default();
+        if legacy.scopes.is_empty() {
+            config.trust_workspace(
+                cwd,
+                workspace_permission_from_capability_tier(legacy.global_max_tier),
+            );
+        } else {
+            for scope in legacy.scopes {
+                config.trust_workspace(
+                    scope.directory,
+                    workspace_permission_from_capability_tier(scope.max_tier),
+                );
+            }
+        }
+        Some(config)
     }
 
     fn build_model_provider_config(

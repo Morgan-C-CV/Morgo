@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::fs;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct FileReadTool;
 
@@ -103,6 +103,32 @@ impl Tool for FileReadTool {
             anyhow::bail!("read target cannot be empty")
         }
         Ok(())
+    }
+
+    async fn check_permissions(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> PermissionDecision {
+        if super::workspace_permission::session_allow_rule_matches(
+            self.metadata().name,
+            call,
+            permissions,
+        ) {
+            return PermissionDecision::Allow;
+        }
+        let Ok(input) = parse_input(call) else {
+            return PermissionDecision::Allow;
+        };
+        let Some(config) = permissions.workspace_permissions() else {
+            return PermissionDecision::Allow;
+        };
+        super::workspace_permission::decision_for_path(
+            self.metadata().name,
+            &config,
+            Path::new(input.file_path.trim()),
+            crate::security::workspace_capability::WorkspacePermissionLevel::View,
+        )
     }
 
     async fn invoke(

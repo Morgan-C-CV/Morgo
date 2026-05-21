@@ -4,6 +4,10 @@ use crate::command::types::{
     Command, CommandAvailability, CommandMetadata, CommandResult, CommandSource, CommandType,
 };
 use crate::interaction::envelope::NormalizedInput;
+use crate::security::workspace_capability::{
+    WorkspacePermissionConfig, WorkspacePermissionLevel, default_workspace_permissions_path,
+    load_global_workspace_permissions, save_global_workspace_permissions,
+};
 use crate::state::app_state::AppState;
 use crate::state::permission_context::PermissionMode;
 
@@ -56,15 +60,41 @@ impl Command for PermissionsCommand {
             "allow" => update_rule_list(app_state, RuleList::Allow, parts.collect()),
             "deny" => update_rule_list(app_state, RuleList::Deny, parts.collect()),
             "ask" => update_rule_list(app_state, RuleList::Ask, parts.collect()),
+            "trust" => trust_workspace(app_state, parts.collect()),
             "show" => Ok(CommandResult::Message(render_permissions_summary(
                 app_state,
             ))),
             _ => anyhow::bail!(
-                "unknown /permissions action '{}'. Supported: show, mode, allow, deny, ask",
+                "unknown /permissions action '{}'. Supported: show, mode, allow, deny, ask, trust",
                 action
             ),
         }
     }
+}
+
+fn trust_workspace(app_state: &AppState, tokens: Vec<&str>) -> anyhow::Result<CommandResult> {
+    let path = tokens
+        .first()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| std::path::PathBuf::from(value.trim()))
+        .unwrap_or_else(|| app_state.current_working_directory());
+    let permission = tokens
+        .get(1)
+        .and_then(|value| WorkspacePermissionLevel::parse(value))
+        .unwrap_or(WorkspacePermissionLevel::Worker);
+    let mut config = load_global_workspace_permissions()
+        .unwrap_or_else(|_| WorkspacePermissionConfig::default());
+    config.trust_workspace(&path, permission);
+    save_global_workspace_permissions(&config)?;
+    let config_path = default_workspace_permissions_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "~/.morgo/workspace-permissions.json".into());
+    Ok(CommandResult::Message(format!(
+        "Trusted workspace {} with {} permission in {}.",
+        path.display(),
+        permission,
+        config_path
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -152,13 +182,25 @@ fn render_permissions_summary(app_state: &AppState) -> String {
         .unwrap_or_else(|| "none".into());
 
     format!(
-        "Permission mode: {}\nAllow rules: {}\nDeny rules: {}\nAsk rules: {}\nPending approval: {}",
+        "Permission mode: {}\nWorkspace permission: {}\nAllow rules: {}\nDeny rules: {}\nAsk rules: {}\nPending approval: {}",
         format_mode(app_state.permission_context.mode()),
+        format_workspace_permission(app_state),
         format_rules(app_state.permission_context.always_allow_rules()),
         format_rules(app_state.permission_context.always_deny_rules()),
         format_rules(app_state.permission_context.always_ask_rules()),
         pending_summary,
     )
+}
+
+fn format_workspace_permission(app_state: &AppState) -> String {
+    let cwd = app_state.current_working_directory();
+    let Some(config) = app_state.permission_context.workspace_permissions() else {
+        return "not loaded".into();
+    };
+    config
+        .effective_permission(&cwd)
+        .map(|matched| format!("{} ({})", matched.permission, matched.path.display()))
+        .unwrap_or_else(|| "untrusted".into())
 }
 
 fn format_rules(rules: Vec<String>) -> String {

@@ -12,7 +12,7 @@ use crate::plan::manager::PlanManager;
 use crate::plugins::runtime_state::RuntimePluginState;
 use crate::security::authorizer::SurfaceAdmissionPolicy;
 use crate::security::filesystem_policy::FilesystemPolicy;
-use crate::security::workspace_capability::WorkspaceCapabilityConfig;
+use crate::security::workspace_capability::{WorkspaceCapabilityConfig, WorkspacePermissionConfig};
 use crate::service::mcp::runtime::McpRuntime;
 use crate::skills::registry::SkillRegistry;
 use crate::state::active_model_runtime::ActiveModelRuntimeSnapshot;
@@ -94,6 +94,7 @@ pub struct ToolPermissionContext {
     pub pending_approval: Arc<RwLock<Option<PendingApproval>>>,
     pub filesystem_policy: Option<Arc<FilesystemPolicy>>,
     pub workspace_capability: Option<Arc<WorkspaceCapabilityConfig>>,
+    pub workspace_permissions: Option<Arc<WorkspacePermissionConfig>>,
     pub subagent_scripted_turns: Option<Vec<Vec<crate::service::api::streaming::StreamEvent>>>,
     pub inherited_tool_registry: Option<ToolRegistry>,
     pub inherited_hook_registry: Option<HookRegistry>,
@@ -132,6 +133,7 @@ impl ToolPermissionContext {
             pending_approval: Arc::new(RwLock::new(None)),
             filesystem_policy: None,
             workspace_capability: None,
+            workspace_permissions: None,
             subagent_scripted_turns: None,
             inherited_tool_registry: None,
             inherited_hook_registry: None,
@@ -256,6 +258,15 @@ impl ToolPermissionContext {
         self.workspace_capability.clone()
     }
 
+    pub fn with_workspace_permissions(mut self, config: Arc<WorkspacePermissionConfig>) -> Self {
+        self.workspace_permissions = Some(config);
+        self
+    }
+
+    pub fn workspace_permissions(&self) -> Option<Arc<WorkspacePermissionConfig>> {
+        self.workspace_permissions.clone()
+    }
+
     pub fn mode(&self) -> PermissionMode {
         self.mode
             .read()
@@ -372,6 +383,7 @@ impl ToolPermissionContext {
             pending_approval: Arc::new(RwLock::new(pending_approval)),
             filesystem_policy: self.filesystem_policy.clone(),
             workspace_capability: self.workspace_capability.clone(),
+            workspace_permissions: self.workspace_permissions.clone(),
             subagent_scripted_turns: self.subagent_scripted_turns.clone(),
             inherited_tool_registry: self.inherited_tool_registry.clone(),
             inherited_hook_registry: self.inherited_hook_registry.clone(),

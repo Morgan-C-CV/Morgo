@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct GlobTool;
 
@@ -122,6 +122,40 @@ impl Tool for GlobTool {
             anyhow::bail!("glob pattern cannot be empty")
         }
         Ok(())
+    }
+
+    async fn check_permissions(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> PermissionDecision {
+        if super::workspace_permission::session_allow_rule_matches(
+            self.metadata().name,
+            call,
+            permissions,
+        ) {
+            return PermissionDecision::Allow;
+        }
+        let Some(config) = permissions.workspace_permissions() else {
+            return PermissionDecision::Allow;
+        };
+        let Ok(input) = parse_input(call) else {
+            return PermissionDecision::Allow;
+        };
+        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let search_root =
+            resolve_search_root(&root, input.path.as_deref()).unwrap_or_else(|_| root.clone());
+        let target = if search_root.is_absolute() {
+            search_root
+        } else {
+            root.join(search_root)
+        };
+        super::workspace_permission::decision_for_path(
+            self.metadata().name,
+            &config,
+            &target,
+            crate::security::workspace_capability::WorkspacePermissionLevel::View,
+        )
     }
 
     async fn invoke(

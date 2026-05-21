@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::fs;
 
 use crate::state::permission_context::ToolPermissionContext;
-use crate::tool::definition::{Tool, ToolCall, ToolMetadata, ToolResult};
+use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, ToolResult};
 
 pub struct FileEditTool;
 
@@ -90,6 +90,32 @@ impl Tool for FileEditTool {
             anyhow::bail!("No changes to make: new_string is unchanged from old_string.")
         }
         Ok(())
+    }
+
+    async fn check_permissions(
+        &self,
+        call: &ToolCall,
+        permissions: &ToolPermissionContext,
+    ) -> PermissionDecision {
+        if super::workspace_permission::session_allow_rule_matches(
+            self.metadata().name,
+            call,
+            permissions,
+        ) {
+            return PermissionDecision::Allow;
+        }
+        let Ok(input) = parse_input(&call.input) else {
+            return PermissionDecision::Allow;
+        };
+        let Some(config) = permissions.workspace_permissions() else {
+            return PermissionDecision::Allow;
+        };
+        super::workspace_permission::decision_for_path(
+            self.metadata().name,
+            &config,
+            Path::new(input.file_path.trim()),
+            crate::security::workspace_capability::WorkspacePermissionLevel::Edit,
+        )
     }
 
     async fn invoke(
