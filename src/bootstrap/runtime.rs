@@ -483,11 +483,13 @@ fn restore_tui_control_sequences(stdout: &mut io::Stdout, control_options: TuiCo
 
 fn tui_control_options() -> TuiControlOptions {
     let term_program = std::env::var("TERM_PROGRAM").ok();
+    let vscode_ipc_hook_present = std::env::var_os("VSCODE_IPC_HOOK_CLI").is_some();
     TuiControlOptions {
         keyboard_enhancements_enabled: tui_should_enable_keyboard_enhancements(),
         mouse_capture_enabled: tui_should_enable_mouse_capture_for(
             std::env::var("MORGO_TUI_MOUSE_CAPTURE").ok().as_deref(),
             term_program.as_deref(),
+            vscode_ipc_hook_present,
         ),
     }
 }
@@ -614,6 +616,22 @@ enum TuiTurnStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TuiExitGesture {
     Esc,
+}
+
+fn render_workspace_trust_prompt(cwd: &std::path::Path, config_path: &std::path::Path) -> String {
+    format!(
+        "Do you trust {}?\n\n  1. Yes, trust this workspace with worker permission\n     Save to {}\n  2. No, continue without trusting\n\nSelect an option [1/2] (default 2): ",
+        cwd.display(),
+        config_path.display()
+    )
+}
+
+fn parse_workspace_trust_menu_choice(answer: &str) -> Option<bool> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "2" | "n" | "no" => Some(false),
+        "1" | "y" | "yes" => Some(true),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3897,15 +3915,16 @@ fn tui_should_enable_keyboard_enhancements_for(
 
 fn tui_should_enable_mouse_capture_for(
     override_value: Option<&str>,
-    _term_program: Option<&str>,
+    term_program: Option<&str>,
+    vscode_ipc_hook_present: bool,
 ) -> bool {
     match override_value {
         Some(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,
-            _ => true,
+            _ => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
         },
-        None => true,
+        None => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
     }
 }
 
@@ -5185,26 +5204,31 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_mouse_capture_defaults_on_for_apple_terminal_tui_scrollback() {
+    fn tui_mouse_capture_defaults_off_in_ide_terminals_for_native_copy() {
         assert!(super::tui_should_enable_mouse_capture_for(
             None,
-            Some("Apple_Terminal")
+            Some("Apple_Terminal"),
+            false
         ));
-        assert!(super::tui_should_enable_mouse_capture_for(
+        assert!(!super::tui_should_enable_mouse_capture_for(
             None,
-            Some("vscode")
+            Some("vscode"),
+            false
+        ));
+        assert!(!super::tui_should_enable_mouse_capture_for(
+            None,
+            Some("Apple_Terminal"),
+            true
         ));
         assert!(super::tui_should_enable_mouse_capture_for(
             Some("1"),
-            Some("Apple_Terminal")
+            Some("vscode"),
+            false
         ));
         assert!(!super::tui_should_enable_mouse_capture_for(
             Some("0"),
-            Some("Apple_Terminal")
-        ));
-        assert!(super::tui_should_enable_mouse_capture_for(
-            Some("1"),
-            Some("Apple_Terminal")
+            Some("Apple_Terminal"),
+            false
         ));
     }
 
@@ -5494,6 +5518,30 @@ mod tui_output_tests {
         assert!(suggestions.iter().any(|item| item.label == "accept-edits"));
         assert!(suggestions.iter().any(|item| item.label == "bypass"));
         assert!(suggestions.iter().all(|item| !item.detail.is_empty()));
+    }
+
+    #[test]
+    fn workspace_trust_prompt_asks_do_you_trust_and_renders_menu() {
+        let prompt = super::render_workspace_trust_prompt(
+            std::path::Path::new("/tmp/project"),
+            std::path::Path::new("/tmp/home/.morgo/workspace-permissions.json"),
+        );
+
+        assert!(prompt.contains("Do you trust /tmp/project?"));
+        assert!(prompt.contains("1. Yes, trust this workspace with worker permission"));
+        assert!(prompt.contains("2. No, continue without trusting"));
+        assert!(prompt.contains("Select an option [1/2] (default 2):"));
+        assert!(!prompt.contains("Morgo does not trust this workspace yet"));
+        assert!(!prompt.contains("[y/N]"));
+    }
+
+    #[test]
+    fn workspace_trust_menu_choice_accepts_numbered_and_legacy_answers() {
+        assert_eq!(super::parse_workspace_trust_menu_choice("1\n"), Some(true));
+        assert_eq!(super::parse_workspace_trust_menu_choice("yes"), Some(true));
+        assert_eq!(super::parse_workspace_trust_menu_choice("2\n"), Some(false));
+        assert_eq!(super::parse_workspace_trust_menu_choice(""), Some(false));
+        assert_eq!(super::parse_workspace_trust_menu_choice("maybe"), None);
     }
 
     #[test]
@@ -8133,15 +8181,16 @@ impl RuntimeBootstrap {
         let config_path = default_workspace_permissions_path().unwrap_or_else(|| {
             std::path::PathBuf::from("~/.morgo").join(WORKSPACE_PERMISSIONS_FILENAME)
         });
-        print!(
-            "Morgo does not trust this workspace yet:\n{}\nGrant worker permission and save it to {}? [y/N] ",
-            cwd.display(),
-            config_path.display()
-        );
-        let _ = io::stdout().flush();
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        let accepted = matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes");
+        let accepted = loop {
+            print!("{}", render_workspace_trust_prompt(&cwd, &config_path));
+            let _ = io::stdout().flush();
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            if let Some(choice) = parse_workspace_trust_menu_choice(&answer) {
+                break choice;
+            }
+            println!("Please choose 1 or 2.");
+        };
         if accepted {
             config.trust_workspace(&cwd, WorkspacePermissionLevel::Worker);
             save_global_workspace_permissions(&config)?;
