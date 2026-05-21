@@ -20,3 +20,5 @@ mod lism_ab_boss_flow;
 mod provider_api_mock;
 #[path = "integration/provider_smoke.rs"]
 mod provider_smoke;
+#[path = "integration/workspace_permission_flow.rs"]
+mod workspace_permission_flow;
