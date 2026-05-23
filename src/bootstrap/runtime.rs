@@ -40,6 +40,7 @@ use crate::core::context::{QueryContext, WorkerLisMPolicy};
 use crate::core::engine::QueryEngine;
 use crate::core::lism_ab_sample::LisMAbSampleSink;
 use crate::core::lism_ab_sample::LisMRolloutConclusion;
+use crate::core::message::Role;
 use crate::cost::tracker::CostTracker;
 use crate::history::resume::{
     FreshSessionRequest, ResolvedSessionState, RestoreRequest, RestoreSource,
@@ -621,6 +622,7 @@ enum TuiTurnStatus {
     Working(Duration),
     Worked(Duration),
     ExitHint(&'static str),
+    ClearInputHint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2260,6 +2262,40 @@ fn move_tui_cursor_vertically(
     ))
 }
 
+fn tui_input_cursor_line_position(
+    input: &str,
+    cursor_index: usize,
+    total_cols: usize,
+) -> (usize, usize) {
+    const PROMPT_PREFIX_WIDTH: usize = 2;
+    let visible_width = total_cols.saturating_sub(PROMPT_PREFIX_WIDTH + 1).max(1);
+    let char_len = input.chars().count();
+    let clamped_cursor = cursor_index.min(char_len);
+    let layout = wrap_tui_input_lines(input, visible_width);
+    let (line_index, _) = tui_cursor_position(&layout, clamped_cursor);
+    (line_index, layout.lines.len())
+}
+
+fn tui_cursor_is_on_first_input_line(input: &str, cursor_index: usize, total_cols: usize) -> bool {
+    tui_input_cursor_line_position(input, cursor_index, total_cols).0 == 0
+}
+
+fn tui_cursor_is_on_last_input_line(input: &str, cursor_index: usize, total_cols: usize) -> bool {
+    let (line_index, line_count) = tui_input_cursor_line_position(input, cursor_index, total_cols);
+    line_index + 1 >= line_count
+}
+
+fn latest_tui_user_input(app_state: &AppState) -> Option<String> {
+    app_state
+        .canonical_session_history()
+        .entries
+        .into_iter()
+        .rev()
+        .filter(|entry| entry.message.role == Role::User && entry.message.has_visible_text())
+        .map(|entry| entry.message.text())
+        .find(|text| !text.trim().is_empty())
+}
+
 fn format_tui_elapsed(duration: Duration) -> String {
     let total_secs = duration.as_secs();
     let minutes = total_secs / 60;
@@ -2286,6 +2322,7 @@ fn status_line_for_tui(status: TuiTurnStatus, width: usize) -> String {
         TuiTurnStatus::ExitHint(gesture) => {
             format!("• Press {gesture} again to exit")
         }
+        TuiTurnStatus::ClearInputHint => "• Press Down again to clear input".into(),
     };
     colorize_ansi(&base, "2;37")
 }
@@ -4281,10 +4318,11 @@ mod tui_output_tests {
         delete_input_char, delete_input_char_with_pastes, expand_tui_pasted_content_refs,
         format_tui_model_and_cwd, heuristic_tui_suggestions,
         highlight_tui_pasted_content_placeholders, insert_input_char, insert_input_text,
-        insert_tui_paste_text, normalize_tui_newlines, normalize_tui_pasted_text,
-        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
-        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
-        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_context_document,
+        insert_tui_paste_text, latest_tui_user_input, normalize_tui_newlines,
+        normalize_tui_pasted_text, osc52_copy_sequence, render_command_suggestion_line,
+        render_fixed_tui_layout, render_tui_rendered_line, select_line_at, select_word_at,
+        selected_text, shift_selection_for_scroll, status_line_for_tui, strip_ansi_text,
+        tui_context_document, tui_cursor_is_on_first_input_line, tui_cursor_is_on_last_input_line,
         tui_cursor_left_over_pastes, tui_cursor_right_over_pastes, tui_exit_gesture_for_key,
         tui_input_palette_for_light_mode, tui_input_viewport, tui_interrupted_turn_output,
         tui_is_copy_key, tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
@@ -4698,6 +4736,61 @@ mod tui_output_tests {
         let rendered =
             strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::ExitHint("Esc"), 80));
         assert!(rendered.contains("Press Esc again to exit"));
+    }
+
+    #[test]
+    fn tui_clear_input_hint_status_line_explains_double_press_down() {
+        let rendered = strip_ansi_for_test(&status_line_for_tui(TuiTurnStatus::ClearInputHint, 80));
+        assert!(rendered.contains("Press Down again to clear input"));
+    }
+
+    #[test]
+    fn tui_input_line_position_detects_first_and_last_wrapped_rows() {
+        let input = "abcdefghij";
+        assert!(tui_cursor_is_on_first_input_line(input, 0, 8));
+        assert!(!tui_cursor_is_on_last_input_line(input, 0, 8));
+        assert!(!tui_cursor_is_on_first_input_line(
+            input,
+            input.chars().count(),
+            8
+        ));
+        assert!(tui_cursor_is_on_last_input_line(
+            input,
+            input.chars().count(),
+            8
+        ));
+    }
+
+    #[test]
+    fn tui_latest_user_input_returns_most_recent_visible_user_message() {
+        let mut app_state = test_app_state();
+        app_state.history = Some(crate::history::session::SessionHistory {
+            entries: vec![
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("first request"),
+                    timestamp: None,
+                    tool_refs: vec![],
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::assistant("answer"),
+                    timestamp: None,
+                    tool_refs: vec![],
+                    milestone: None,
+                },
+                crate::history::session::SessionHistoryEntry {
+                    message: Message::user("second request"),
+                    timestamp: None,
+                    tool_refs: vec![],
+                    milestone: None,
+                },
+            ],
+        });
+
+        assert_eq!(
+            latest_tui_user_input(&app_state),
+            Some("second request".into())
+        );
     }
 
     #[test]
@@ -6854,9 +6947,11 @@ impl RuntimeBootstrap {
         let mut click_state = TuiClickState::default();
         let mut resume_picker: Option<TuiResumePickerState> = None;
         let mut pending_exit_gesture: Option<(TuiExitGesture, Instant)> = None;
+        let mut pending_input_clear_at: Option<Instant> = None;
         let mut suppress_suggestions_until_input_change = false;
         let queued_events: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
         const TUI_EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
+        const TUI_INPUT_CLEAR_CONFIRM_WINDOW: Duration = Duration::from_millis(900);
         const TUI_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
         loop {
@@ -6872,6 +6967,12 @@ impl RuntimeBootstrap {
                 .unwrap_or(false)
             {
                 pending_exit_gesture = None;
+            }
+            if pending_input_clear_at
+                .map(|started_at| started_at.elapsed() > TUI_INPUT_CLEAR_CONFIRM_WINDOW)
+                .unwrap_or(false)
+            {
+                pending_input_clear_at = None;
             }
             let suggestions = tui_visible_input_suggestions(
                 &app_state,
@@ -6913,6 +7014,8 @@ impl RuntimeBootstrap {
             }
             let turn_status = if let Some((gesture, _)) = pending_exit_gesture {
                 TuiTurnStatus::ExitHint(tui_exit_gesture_label(gesture))
+            } else if pending_input_clear_at.is_some() {
+                TuiTurnStatus::ClearInputHint
             } else if let Some(started_at) = active_turn_started_at {
                 TuiTurnStatus::Working(started_at.elapsed())
             } else if let Some(duration) = last_turn_duration {
@@ -7141,6 +7244,7 @@ impl RuntimeBootstrap {
                                     &mut pasted_spans,
                                     '\n',
                                 );
+                                pending_input_clear_at = None;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
                                 continue;
@@ -7153,6 +7257,7 @@ impl RuntimeBootstrap {
                                     input = submission;
                                     pasted_spans.clear();
                                     cursor_index = input.chars().count();
+                                    pending_input_clear_at = None;
                                 } else {
                                     continue;
                                 }
@@ -7163,6 +7268,7 @@ impl RuntimeBootstrap {
                                 input = submission;
                                 pasted_spans.clear();
                                 cursor_index = input.chars().count();
+                                pending_input_clear_at = None;
                             }
                             if input.trim().is_empty() {
                                 continue;
@@ -7175,6 +7281,7 @@ impl RuntimeBootstrap {
                                 input = completed;
                                 pasted_spans.clear();
                                 cursor_index = input.chars().count();
+                                pending_input_clear_at = None;
                                 continue;
                             }
 
@@ -7183,6 +7290,7 @@ impl RuntimeBootstrap {
                             let is_resume_picker_command = tui_is_resume_picker_command(&line);
                             input.clear();
                             pasted_spans.clear();
+                            pending_input_clear_at = None;
                             cursor_index = 0;
                             selected_suggestion = None;
                             suggestion_scroll_top = 0;
@@ -7477,6 +7585,7 @@ impl RuntimeBootstrap {
                                 &mut cursor_index,
                                 &mut pasted_spans,
                             ) {
+                                pending_input_clear_at = None;
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7491,6 +7600,7 @@ impl RuntimeBootstrap {
                                 cursor_index,
                                 &mut pasted_spans,
                             ) {
+                                pending_input_clear_at = None;
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7506,6 +7616,7 @@ impl RuntimeBootstrap {
                                 input = completed;
                                 pasted_spans.clear();
                                 cursor_index = input.chars().count();
+                                pending_input_clear_at = None;
                                 suppress_suggestions_until_input_change = false;
                             }
                         }
@@ -7542,6 +7653,7 @@ impl RuntimeBootstrap {
                                 continue;
                             }
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                pending_input_clear_at = None;
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
                                     &mut content_scroll_top,
@@ -7551,6 +7663,7 @@ impl RuntimeBootstrap {
                                     &rendered_content,
                                 );
                             } else if !suggestions.is_empty() {
+                                pending_input_clear_at = None;
                                 (selected_suggestion, suggestion_scroll_top) =
                                     tui_move_suggestion_selection_up(
                                         selected_suggestion,
@@ -7561,8 +7674,33 @@ impl RuntimeBootstrap {
                             } else if let Some(next_cursor) =
                                 move_tui_cursor_vertically(&input, cursor_index, terminal_width, -1)
                             {
+                                pending_input_clear_at = None;
                                 cursor_index = next_cursor;
+                            } else if tui_cursor_is_on_first_input_line(
+                                &input,
+                                cursor_index,
+                                terminal_width,
+                            ) {
+                                if let Some(previous_input) = latest_tui_user_input(&app_state) {
+                                    input = previous_input;
+                                    pasted_spans.clear();
+                                    cursor_index = input.chars().count();
+                                    pending_input_clear_at = None;
+                                    suppress_suggestions_until_input_change = false;
+                                    selected_suggestion = Some(0);
+                                    suggestion_scroll_top = 0;
+                                } else {
+                                    apply_tui_scroll(
+                                        &mut follow_content_tail,
+                                        &mut content_scroll_top,
+                                        max_scroll_top,
+                                        -1,
+                                        &mut selection,
+                                        &rendered_content,
+                                    );
+                                }
                             } else {
+                                pending_input_clear_at = None;
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
                                     &mut content_scroll_top,
@@ -7582,6 +7720,7 @@ impl RuntimeBootstrap {
                                 continue;
                             }
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                pending_input_clear_at = None;
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
                                     &mut content_scroll_top,
@@ -7591,6 +7730,7 @@ impl RuntimeBootstrap {
                                     &rendered_content,
                                 );
                             } else if !suggestions.is_empty() {
+                                pending_input_clear_at = None;
                                 (selected_suggestion, suggestion_scroll_top) =
                                     tui_move_suggestion_selection_down(
                                         selected_suggestion,
@@ -7601,8 +7741,33 @@ impl RuntimeBootstrap {
                             } else if let Some(next_cursor) =
                                 move_tui_cursor_vertically(&input, cursor_index, terminal_width, 1)
                             {
+                                pending_input_clear_at = None;
                                 cursor_index = next_cursor;
+                            } else if !input.is_empty()
+                                && tui_cursor_is_on_last_input_line(
+                                    &input,
+                                    cursor_index,
+                                    terminal_width,
+                                )
+                            {
+                                if pending_input_clear_at
+                                    .map(|started_at| {
+                                        started_at.elapsed() <= TUI_INPUT_CLEAR_CONFIRM_WINDOW
+                                    })
+                                    .unwrap_or(false)
+                                {
+                                    input.clear();
+                                    pasted_spans.clear();
+                                    cursor_index = 0;
+                                    pending_input_clear_at = None;
+                                    suppress_suggestions_until_input_change = false;
+                                    selected_suggestion = Some(0);
+                                    suggestion_scroll_top = 0;
+                                } else {
+                                    pending_input_clear_at = Some(Instant::now());
+                                }
                             } else {
+                                pending_input_clear_at = None;
                                 apply_tui_scroll(
                                     &mut follow_content_tail,
                                     &mut content_scroll_top,
@@ -7652,6 +7817,7 @@ impl RuntimeBootstrap {
                                     &mut pasted_spans,
                                     ch,
                                 );
+                                pending_input_clear_at = None;
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7666,6 +7832,7 @@ impl RuntimeBootstrap {
                     }
                     pending_exit_gesture = None;
                     insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &data);
+                    pending_input_clear_at = None;
                     suppress_suggestions_until_input_change = false;
                     selected_suggestion = Some(0);
                     suggestion_scroll_top = 0;
