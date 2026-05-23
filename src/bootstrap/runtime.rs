@@ -265,6 +265,8 @@ const RUNTIME_ONLY_TUI_COMMANDS: &[RuntimeOnlyTuiCommand] = &[RuntimeOnlyTuiComm
 }];
 
 const TUI_USER_MESSAGE_MARKER: &str = "\u{e000}";
+const TUI_LONG_PASTE_WORD_THRESHOLD: usize = 1_000;
+const TUI_LONG_PASTE_CHAR_THRESHOLD: usize = 4_096;
 
 pub fn is_tui_exit_input(input: &str) -> bool {
     let trimmed = input.trim();
@@ -562,6 +564,14 @@ impl TuiSelectionState {
 struct TuiClickState {
     last_down: Option<(u16, u16, Instant)>,
     count: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiPastedSpan {
+    start: usize,
+    end: usize,
+    placeholder: String,
+    content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1827,6 +1837,17 @@ fn insert_input_char(input: &mut String, cursor_index: &mut usize, ch: char) {
     *cursor_index += 1;
 }
 
+fn insert_input_char_with_pastes(
+    input: &mut String,
+    cursor_index: &mut usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+    ch: char,
+) {
+    *cursor_index = tui_cursor_after_paste_span(*cursor_index, pasted_spans);
+    insert_input_char(input, cursor_index, ch);
+    shift_tui_pasted_spans_for_insert(pasted_spans, cursor_index.saturating_sub(1), 1);
+}
+
 fn normalize_tui_pasted_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -1841,6 +1862,66 @@ fn insert_input_text(input: &mut String, cursor_index: &mut usize, text: &str) {
     *cursor_index += normalized.chars().count();
 }
 
+fn insert_input_text_with_pastes(
+    input: &mut String,
+    cursor_index: &mut usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    *cursor_index = tui_cursor_after_paste_span(*cursor_index, pasted_spans);
+    let normalized = normalize_tui_pasted_text(text);
+    let inserted_chars = normalized.chars().count();
+    let insert_at = *cursor_index;
+    let byte_index = char_to_byte_index(input, insert_at);
+    input.insert_str(byte_index, &normalized);
+    *cursor_index += inserted_chars;
+    shift_tui_pasted_spans_for_insert(pasted_spans, insert_at, inserted_chars);
+}
+
+fn insert_tui_paste_text(
+    input: &mut String,
+    cursor_index: &mut usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let normalized = normalize_tui_pasted_text(text);
+    if !should_collapse_tui_paste(&normalized) {
+        insert_input_text_with_pastes(input, cursor_index, pasted_spans, &normalized);
+        return;
+    }
+
+    *cursor_index = tui_cursor_after_paste_span(*cursor_index, pasted_spans);
+    let placeholder = format_tui_pasted_content_placeholder(&normalized);
+    let insert_at = *cursor_index;
+    let placeholder_chars = placeholder.chars().count();
+    let byte_index = char_to_byte_index(input, insert_at);
+    input.insert_str(byte_index, &placeholder);
+    shift_tui_pasted_spans_for_insert(pasted_spans, insert_at, placeholder_chars);
+    pasted_spans.push(TuiPastedSpan {
+        start: insert_at,
+        end: insert_at + placeholder_chars,
+        placeholder,
+        content: normalized,
+    });
+    pasted_spans.sort_by_key(|span| span.start);
+    *cursor_index = insert_at + placeholder_chars;
+}
+
+fn should_collapse_tui_paste(text: &str) -> bool {
+    text.chars().count() >= TUI_LONG_PASTE_CHAR_THRESHOLD
+        || text.split_whitespace().count() >= TUI_LONG_PASTE_WORD_THRESHOLD
+}
+
+fn format_tui_pasted_content_placeholder(content: &str) -> String {
+    format!("[Pasted Content {} chars]", content.chars().count())
+}
+
 fn backspace_input_char(input: &mut String, cursor_index: &mut usize) -> bool {
     if *cursor_index == 0 {
         return false;
@@ -1853,6 +1934,30 @@ fn backspace_input_char(input: &mut String, cursor_index: &mut usize) -> bool {
     true
 }
 
+fn backspace_input_char_with_pastes(
+    input: &mut String,
+    cursor_index: &mut usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+) -> bool {
+    if let Some(index) = pasted_spans.iter().position(|span| {
+        *cursor_index > span.start && *cursor_index <= span.end
+            || *cursor_index == span.end
+    }) {
+        remove_tui_pasted_span(input, cursor_index, pasted_spans, index);
+        return true;
+    }
+    if *cursor_index == 0 {
+        return false;
+    }
+    let remove_index = (*cursor_index).saturating_sub(1);
+    if backspace_input_char(input, cursor_index) {
+        shift_tui_pasted_spans_for_delete(pasted_spans, remove_index, remove_index + 1);
+        true
+    } else {
+        false
+    }
+}
+
 fn delete_input_char(input: &mut String, cursor_index: usize) -> bool {
     let char_len = input.chars().count();
     if cursor_index >= char_len {
@@ -1862,6 +1967,123 @@ fn delete_input_char(input: &mut String, cursor_index: usize) -> bool {
     let end = char_to_byte_index(input, cursor_index + 1);
     input.replace_range(start..end, "");
     true
+}
+
+fn delete_input_char_with_pastes(
+    input: &mut String,
+    cursor_index: usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+) -> bool {
+    if let Some(index) = pasted_spans
+        .iter()
+        .position(|span| cursor_index >= span.start && cursor_index < span.end)
+    {
+        let mut cursor = cursor_index;
+        remove_tui_pasted_span(input, &mut cursor, pasted_spans, index);
+        return true;
+    }
+    if delete_input_char(input, cursor_index) {
+        shift_tui_pasted_spans_for_delete(pasted_spans, cursor_index, cursor_index + 1);
+        true
+    } else {
+        false
+    }
+}
+
+fn remove_tui_pasted_span(
+    input: &mut String,
+    cursor_index: &mut usize,
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+    span_index: usize,
+) {
+    let span = pasted_spans.remove(span_index);
+    let start = char_to_byte_index(input, span.start);
+    let end = char_to_byte_index(input, span.end);
+    input.replace_range(start..end, "");
+    let removed_chars = span.end.saturating_sub(span.start);
+    for existing in pasted_spans.iter_mut() {
+        if existing.start >= span.end {
+            existing.start = existing.start.saturating_sub(removed_chars);
+            existing.end = existing.end.saturating_sub(removed_chars);
+        }
+    }
+    *cursor_index = span.start;
+}
+
+fn shift_tui_pasted_spans_for_insert(
+    pasted_spans: &mut [TuiPastedSpan],
+    insert_at: usize,
+    inserted_chars: usize,
+) {
+    for span in pasted_spans {
+        if span.start >= insert_at {
+            span.start += inserted_chars;
+            span.end += inserted_chars;
+        }
+    }
+}
+
+fn shift_tui_pasted_spans_for_delete(
+    pasted_spans: &mut Vec<TuiPastedSpan>,
+    delete_start: usize,
+    delete_end: usize,
+) {
+    let removed_chars = delete_end.saturating_sub(delete_start);
+    pasted_spans.retain_mut(|span| {
+        if span.end <= delete_start {
+            true
+        } else if span.start >= delete_end {
+            span.start = span.start.saturating_sub(removed_chars);
+            span.end = span.end.saturating_sub(removed_chars);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn tui_cursor_after_paste_span(cursor_index: usize, pasted_spans: &[TuiPastedSpan]) -> usize {
+    pasted_spans
+        .iter()
+        .find(|span| cursor_index > span.start && cursor_index < span.end)
+        .map(|span| span.end)
+        .unwrap_or(cursor_index)
+}
+
+fn tui_cursor_left_over_pastes(cursor_index: usize, pasted_spans: &[TuiPastedSpan]) -> usize {
+    let next = cursor_index.saturating_sub(1);
+    pasted_spans
+        .iter()
+        .find(|span| next >= span.start && next < span.end)
+        .map(|span| span.start)
+        .unwrap_or(next)
+}
+
+fn tui_cursor_right_over_pastes(
+    input: &str,
+    cursor_index: usize,
+    pasted_spans: &[TuiPastedSpan],
+) -> usize {
+    let next = (cursor_index + 1).min(input.chars().count());
+    pasted_spans
+        .iter()
+        .find(|span| next > span.start && next <= span.end)
+        .map(|span| span.end)
+        .unwrap_or(next)
+}
+
+fn expand_tui_pasted_content_refs(input: &str, pasted_spans: &[TuiPastedSpan]) -> String {
+    let mut expanded = input.to_string();
+    let mut spans = pasted_spans.to_vec();
+    spans.sort_by_key(|span| span.start);
+    for span in spans.into_iter().rev() {
+        let start = char_to_byte_index(&expanded, span.start);
+        let end = char_to_byte_index(&expanded, span.end);
+        if expanded.get(start..end) == Some(span.placeholder.as_str()) {
+            expanded.replace_range(start..end, &span.content);
+        }
+    }
+    expanded
 }
 
 fn char_to_byte_index(value: &str, char_index: usize) -> usize {
@@ -2676,6 +2898,61 @@ fn render_tui_input_text_line(
         line,
         padding
     )
+}
+
+fn render_tui_input_text_line_with_paste_highlights(
+    prefix: &str,
+    line: &str,
+    padding: &str,
+    input_palette: TuiInputPalette,
+) -> String {
+    let highlighted = highlight_tui_pasted_content_placeholders(line, input_palette);
+    format!(
+        "\x1b[{};{}m\x1b[{}m{}\x1b[{};{}m {}\x1b[{};{}m{}\x1b[0m",
+        input_palette.background_code,
+        input_palette.text_code,
+        input_palette.prefix_code,
+        prefix,
+        input_palette.background_code,
+        input_palette.text_code,
+        highlighted,
+        input_palette.background_code,
+        input_palette.text_code,
+        padding
+    )
+}
+
+fn highlight_tui_pasted_content_placeholders(
+    line: &str,
+    input_palette: TuiInputPalette,
+) -> String {
+    let mut rendered = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find("[Pasted Content ") {
+        let (before, after_start) = rest.split_at(start);
+        rendered.push_str(before);
+        let Some(end_offset) = after_start.find(" chars]") else {
+            rendered.push_str(after_start);
+            return rendered;
+        };
+        let end = end_offset + " chars]".len();
+        let (placeholder, after) = after_start.split_at(end);
+        let count_part = &placeholder["[Pasted Content ".len()..end_offset];
+        if !count_part.is_empty() && count_part.chars().all(|ch| ch.is_ascii_digit()) {
+            rendered.push_str(&format!(
+                "\x1b[{};1;33m{}\x1b[{};{}m",
+                input_palette.background_code,
+                placeholder,
+                input_palette.background_code,
+                input_palette.text_code
+            ));
+        } else {
+            rendered.push_str(placeholder);
+        }
+        rest = after;
+    }
+    rendered.push_str(rest);
+    rendered
 }
 
 fn render_tui_bottom_panel_separator(width: usize) -> String {
@@ -3763,7 +4040,12 @@ fn render_fixed_tui_layout(
         frame.push_str(&format!(
             "\x1b[{};1H\x1b[2K{}",
             row,
-            render_tui_input_text_line(prefix, &line, &padding, input_palette)
+            render_tui_input_text_line_with_paste_highlights(
+                prefix,
+                &line,
+                &padding,
+                input_palette,
+            )
         ));
     }
     frame.push_str(&format!("\x1b[{};1H\x1b[2K", metrics.gap_row));
@@ -4063,6 +4345,91 @@ mod tui_output_tests {
     #[test]
     fn tui_paste_normalization_converts_crlf_and_cr_to_lf() {
         assert_eq!(normalize_tui_pasted_text("a\r\nb\rc\n"), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn tui_long_paste_collapses_to_placeholder_and_expands_on_submit() {
+        let pasted = "word ".repeat(TUI_LONG_PASTE_WORD_THRESHOLD);
+        let mut input = "before  after".to_string();
+        let mut cursor_index = "before ".chars().count();
+        let mut pasted_spans = Vec::new();
+
+        insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &pasted);
+
+        assert_eq!(pasted_spans.len(), 1);
+        assert_eq!(input, format!("before {} after", pasted_spans[0].placeholder));
+        assert_eq!(cursor_index, "before ".chars().count() + pasted_spans[0].placeholder.len());
+        assert_eq!(
+            expand_tui_pasted_content_refs(input.trim(), &pasted_spans),
+            format!("before {} after", pasted)
+        );
+    }
+
+    #[test]
+    fn tui_backspace_deletes_collapsed_paste_in_one_keypress() {
+        let pasted = "word ".repeat(TUI_LONG_PASTE_WORD_THRESHOLD);
+        let mut input = String::new();
+        let mut cursor_index = 0;
+        let mut pasted_spans = Vec::new();
+
+        insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &pasted);
+
+        assert!(backspace_input_char_with_pastes(
+            &mut input,
+            &mut cursor_index,
+            &mut pasted_spans
+        ));
+        assert!(input.is_empty());
+        assert_eq!(cursor_index, 0);
+        assert!(pasted_spans.is_empty());
+    }
+
+    #[test]
+    fn tui_delete_deletes_collapsed_paste_in_one_keypress() {
+        let pasted = "word ".repeat(TUI_LONG_PASTE_WORD_THRESHOLD);
+        let mut input = "x".to_string();
+        let mut cursor_index = 1;
+        let mut pasted_spans = Vec::new();
+
+        insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &pasted);
+        cursor_index = 1;
+
+        assert!(delete_input_char_with_pastes(
+            &mut input,
+            cursor_index,
+            &mut pasted_spans
+        ));
+        assert_eq!(input, "x");
+        assert!(pasted_spans.is_empty());
+    }
+
+    #[test]
+    fn tui_cursor_navigation_skips_collapsed_paste_placeholder() {
+        let pasted = "word ".repeat(TUI_LONG_PASTE_WORD_THRESHOLD);
+        let mut input = "a".to_string();
+        let mut cursor_index = 1;
+        let mut pasted_spans = Vec::new();
+
+        insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &pasted);
+
+        assert_eq!(
+            tui_cursor_left_over_pastes(cursor_index, &pasted_spans),
+            pasted_spans[0].start
+        );
+        assert_eq!(
+            tui_cursor_right_over_pastes(&input, pasted_spans[0].start, &pasted_spans),
+            pasted_spans[0].end
+        );
+    }
+
+    #[test]
+    fn tui_pasted_content_placeholder_is_highlighted_in_input_line() {
+        let palette = tui_input_palette_for_light_mode(false);
+        let line = "[Pasted Content 9423 chars]";
+
+        let rendered = highlight_tui_pasted_content_placeholders(line, palette);
+
+        assert!(rendered.contains("\x1b[48;5;238;1;33m[Pasted Content 9423 chars]"));
     }
 
     #[test]
@@ -6462,6 +6829,7 @@ impl RuntimeBootstrap {
             events: vec![],
         });
         let mut input = String::new();
+        let mut pasted_spans = Vec::<TuiPastedSpan>::new();
         let mut cursor_index = 0usize;
         let mut selected_suggestion = None;
         let mut suggestion_scroll_top = 0usize;
@@ -6760,7 +7128,12 @@ impl RuntimeBootstrap {
                                 .modifiers
                                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
                             {
-                                insert_input_char(&mut input, &mut cursor_index, '\n');
+                                insert_input_char_with_pastes(
+                                    &mut input,
+                                    &mut cursor_index,
+                                    &mut pasted_spans,
+                                    '\n',
+                                );
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
                                 continue;
@@ -6771,6 +7144,7 @@ impl RuntimeBootstrap {
                                     selected_suggestion,
                                 ) {
                                     input = submission;
+                                    pasted_spans.clear();
                                     cursor_index = input.chars().count();
                                 } else {
                                     continue;
@@ -6780,6 +7154,7 @@ impl RuntimeBootstrap {
                                 selected_submission_suggestion(&suggestions, selected_suggestion)
                             {
                                 input = submission;
+                                pasted_spans.clear();
                                 cursor_index = input.chars().count();
                             }
                             if input.trim().is_empty() {
@@ -6791,14 +7166,16 @@ impl RuntimeBootstrap {
                                 selected_suggestion,
                             ) {
                                 input = completed;
+                                pasted_spans.clear();
                                 cursor_index = input.chars().count();
                                 continue;
                             }
 
-                            let line = input.trim().to_string();
+                            let line = expand_tui_pasted_content_refs(input.trim(), &pasted_spans);
                             let is_clear_command = tui_is_clear_command(&line);
                             let is_resume_picker_command = tui_is_resume_picker_command(&line);
                             input.clear();
+                            pasted_spans.clear();
                             cursor_index = 0;
                             selected_suggestion = None;
                             suggestion_scroll_top = 0;
@@ -7088,7 +7465,11 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            if backspace_input_char(&mut input, &mut cursor_index) {
+                            if backspace_input_char_with_pastes(
+                                &mut input,
+                                &mut cursor_index,
+                                &mut pasted_spans,
+                            ) {
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7098,7 +7479,11 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            if delete_input_char(&mut input, cursor_index) {
+                            if delete_input_char_with_pastes(
+                                &mut input,
+                                cursor_index,
+                                &mut pasted_spans,
+                            ) {
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7112,6 +7497,7 @@ impl RuntimeBootstrap {
                                 apply_selected_suggestion(&suggestions, selected_suggestion)
                             {
                                 input = completed;
+                                pasted_spans.clear();
                                 cursor_index = input.chars().count();
                                 suppress_suggestions_until_input_change = false;
                             }
@@ -7120,13 +7506,14 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            cursor_index = cursor_index.saturating_sub(1);
+                            cursor_index = tui_cursor_left_over_pastes(cursor_index, &pasted_spans);
                         }
                         KeyCode::Right => {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            cursor_index = (cursor_index + 1).min(input.chars().count());
+                            cursor_index =
+                                tui_cursor_right_over_pastes(&input, cursor_index, &pasted_spans);
                         }
                         KeyCode::Home => {
                             if resume_picker.is_some() {
@@ -7252,7 +7639,12 @@ impl RuntimeBootstrap {
                                 continue;
                             }
                             if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                                insert_input_char(&mut input, &mut cursor_index, ch);
+                                insert_input_char_with_pastes(
+                                    &mut input,
+                                    &mut cursor_index,
+                                    &mut pasted_spans,
+                                    ch,
+                                );
                                 suppress_suggestions_until_input_change = false;
                                 selected_suggestion = Some(0);
                                 suggestion_scroll_top = 0;
@@ -7266,7 +7658,7 @@ impl RuntimeBootstrap {
                         continue;
                     }
                     pending_exit_gesture = None;
-                    insert_input_text(&mut input, &mut cursor_index, &data);
+                    insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &data);
                     suppress_suggestions_until_input_change = false;
                     selected_suggestion = Some(0);
                     suggestion_scroll_top = 0;
