@@ -1852,6 +1852,7 @@ fn normalize_tui_pasted_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+#[cfg(test)]
 fn insert_input_text(input: &mut String, cursor_index: &mut usize, text: &str) {
     if text.is_empty() {
         return;
@@ -1940,8 +1941,7 @@ fn backspace_input_char_with_pastes(
     pasted_spans: &mut Vec<TuiPastedSpan>,
 ) -> bool {
     if let Some(index) = pasted_spans.iter().position(|span| {
-        *cursor_index > span.start && *cursor_index <= span.end
-            || *cursor_index == span.end
+        *cursor_index > span.start && *cursor_index <= span.end || *cursor_index == span.end
     }) {
         remove_tui_pasted_span(input, cursor_index, pasted_spans, index);
         return true;
@@ -2922,10 +2922,7 @@ fn render_tui_input_text_line_with_paste_highlights(
     )
 }
 
-fn highlight_tui_pasted_content_placeholders(
-    line: &str,
-    input_palette: TuiInputPalette,
-) -> String {
+fn highlight_tui_pasted_content_placeholders(line: &str, input_palette: TuiInputPalette) -> String {
     let mut rendered = String::new();
     let mut rest = line;
     while let Some(start) = rest.find("[Pasted Content ") {
@@ -4278,15 +4275,19 @@ fn normalize_tui_newlines(text: &str) -> String {
 #[cfg(test)]
 mod tui_output_tests {
     use super::{
-        ModelLevel, TuiDocumentPosition, TuiExitGesture, TuiSelectionMode, TuiSelectionState,
-        TuiTurnStatus, backspace_input_char, begin_selection, build_tui_rendered_content,
-        delete_input_char, format_tui_model_and_cwd, heuristic_tui_suggestions, insert_input_char,
-        insert_input_text, normalize_tui_newlines, normalize_tui_pasted_text, osc52_copy_sequence,
-        render_command_suggestion_line, render_fixed_tui_layout, render_tui_rendered_line,
-        select_line_at, select_word_at, selected_text, shift_selection_for_scroll,
-        status_line_for_tui, strip_ansi_text, tui_context_document, tui_exit_gesture_for_key,
-        tui_input_viewport, tui_interrupted_turn_output, tui_is_copy_key,
-        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
+        ModelLevel, TUI_LONG_PASTE_WORD_THRESHOLD, TuiDocumentPosition, TuiExitGesture,
+        TuiSelectionMode, TuiSelectionState, TuiTurnStatus, backspace_input_char,
+        backspace_input_char_with_pastes, begin_selection, build_tui_rendered_content,
+        delete_input_char, delete_input_char_with_pastes, expand_tui_pasted_content_refs,
+        format_tui_model_and_cwd, heuristic_tui_suggestions,
+        highlight_tui_pasted_content_placeholders, insert_input_char, insert_input_text,
+        insert_tui_paste_text, normalize_tui_newlines, normalize_tui_pasted_text,
+        osc52_copy_sequence, render_command_suggestion_line, render_fixed_tui_layout,
+        render_tui_rendered_line, select_line_at, select_word_at, selected_text,
+        shift_selection_for_scroll, status_line_for_tui, strip_ansi_text, tui_context_document,
+        tui_cursor_left_over_pastes, tui_cursor_right_over_pastes, tui_exit_gesture_for_key,
+        tui_input_palette_for_light_mode, tui_input_viewport, tui_interrupted_turn_output,
+        tui_is_copy_key, tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
         tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
         tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
     };
@@ -4357,8 +4358,14 @@ mod tui_output_tests {
         insert_tui_paste_text(&mut input, &mut cursor_index, &mut pasted_spans, &pasted);
 
         assert_eq!(pasted_spans.len(), 1);
-        assert_eq!(input, format!("before {} after", pasted_spans[0].placeholder));
-        assert_eq!(cursor_index, "before ".chars().count() + pasted_spans[0].placeholder.len());
+        assert_eq!(
+            input,
+            format!("before {} after", pasted_spans[0].placeholder)
+        );
+        assert_eq!(
+            cursor_index,
+            "before ".chars().count() + pasted_spans[0].placeholder.len()
+        );
         assert_eq!(
             expand_tui_pasted_content_refs(input.trim(), &pasted_spans),
             format!("before {} after", pasted)
