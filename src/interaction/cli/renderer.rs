@@ -694,6 +694,10 @@ fn colorize_activity_bullet(color: &str) -> String {
     format!("\x1b[{color}m•\x1b[0m")
 }
 
+fn style_activity_detail_line(line: &str) -> String {
+    format!("\x1b[2;37m{line}\x1b[0m")
+}
+
 #[derive(Default)]
 struct ActivityStageBuilder {
     lines: Vec<String>,
@@ -762,7 +766,12 @@ impl ActivityStageBuilder {
                 self.lines.push(activity_status_line(status, &headline));
             }
             for detail_line in detail_lines {
-                self.lines.push(format!("  └ {detail_line}"));
+                let line = format!("  └ {detail_line}");
+                if tool_name == "Bash" {
+                    self.lines.push(style_activity_detail_line(&line));
+                } else {
+                    self.lines.push(line);
+                }
             }
         }
     }
@@ -1856,6 +1865,27 @@ mod tests {
         assert!(plain.contains("Exit code: 1"));
         assert!(plain.contains("failed"));
         assert!(rendered.contains("\x1b[31m•\x1b[0m"));
+    }
+
+    #[test]
+    fn tui_bash_activity_dims_detail_lines_after_headline() {
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Bash".into(),
+                content: "command: git diff --stat\nexit_code: 0\nstdout:\nfile.rs | 1 +\n1 file changed".into(),
+                summary: Some("git diff --stat succeeded".into()),
+                detail: Some("command: git diff --stat\nexit_code: 0\nstdout:\nfile.rs | 1 +\n1 file changed".into()),
+            })],
+        };
+
+        let rendered = render_turn_tui_output(&turn);
+        let plain = strip_ansi(&rendered);
+        assert!(plain.contains("• Ran git diff --stat"));
+        assert!(plain.contains("└ file.rs | 1 +"));
+        assert!(plain.contains("└ 1 file changed"));
+        assert!(rendered.contains("\x1b[2;37m  └ file.rs | 1 +\x1b[0m"));
+        assert!(rendered.contains("\x1b[2;37m  └ 1 file changed\x1b[0m"));
     }
 
     #[test]
