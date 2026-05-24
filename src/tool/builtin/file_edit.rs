@@ -11,6 +11,8 @@ use crate::tool::definition::{PermissionDecision, Tool, ToolCall, ToolMetadata, 
 pub struct FileEditTool;
 
 const EDIT_SNIPPET_PREVIEW_CHARS: usize = 40;
+const EDIT_CANDIDATE_LIMIT: usize = 8;
+const EDIT_CANDIDATE_PREVIEW_CHARS: usize = 120;
 
 #[derive(Debug, Deserialize)]
 struct EditInput {
@@ -21,12 +23,65 @@ struct EditInput {
     replace_all: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditMatchCandidate {
+    index: usize,
+    line: usize,
+    text: String,
+}
+
 fn preview_text(text: &str) -> String {
     let mut preview: String = text.chars().take(EDIT_SNIPPET_PREVIEW_CHARS).collect();
     if text.chars().count() > EDIT_SNIPPET_PREVIEW_CHARS {
         preview.push_str("...");
     }
     preview.replace('\n', "\\n")
+}
+
+fn preview_candidate_line(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut preview: String = trimmed.chars().take(EDIT_CANDIDATE_PREVIEW_CHARS).collect();
+    if trimmed.chars().count() > EDIT_CANDIDATE_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn line_number_for_byte(text: &str, byte_index: usize) -> usize {
+    text.as_bytes()[..byte_index]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
+}
+
+fn line_text_at_byte(text: &str, byte_index: usize) -> &str {
+    let line_start = text[..byte_index]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = text[byte_index..]
+        .find('\n')
+        .map(|index| byte_index + index)
+        .unwrap_or(text.len());
+    &text[line_start..line_end]
+}
+
+fn edit_match_candidates(original: &str, old_text: &str) -> Vec<EditMatchCandidate> {
+    if old_text.is_empty() {
+        return Vec::new();
+    }
+
+    original
+        .match_indices(old_text)
+        .take(EDIT_CANDIDATE_LIMIT)
+        .enumerate()
+        .map(|(index, (byte_index, _))| EditMatchCandidate {
+            index: index + 1,
+            line: line_number_for_byte(original, byte_index),
+            text: preview_candidate_line(line_text_at_byte(original, byte_index)),
+        })
+        .collect()
 }
 
 fn format_edit_success(
@@ -46,6 +101,56 @@ fn format_edit_success(
         STANDARD.encode(old_text),
         STANDARD.encode(new_text)
     )
+}
+
+fn edit_failure_next_action(reason: &str) -> &'static str {
+    match reason {
+        "ambiguous_old_string" => {
+            "Read the file around the intended candidate and retry Edit with a more specific old_string, or set replace_all=true only if every match should change."
+        }
+        "old_string_not_found" => {
+            "Read the file around the intended location and retry Edit with the exact current text."
+        }
+        "empty_old_string" => {
+            "Retry Edit with a non-empty old_string copied exactly from the file."
+        }
+        "no_changes" => "Skip the Edit call or provide a new_string that differs from old_string.",
+        "empty_file_path" => "Retry Edit with a non-empty file_path.",
+        _ => "Read the target file and retry Edit with corrected arguments.",
+    }
+}
+
+fn format_edit_failure(
+    path: &Path,
+    reason: &str,
+    matches: usize,
+    replace_all: bool,
+    old_text: &str,
+    new_text: &str,
+    candidates: &[EditMatchCandidate],
+) -> String {
+    let mut rendered = format!(
+        "status=failed\npath={}\nreason={}\nmatches={}\nreplace_all={}\nold_text={}\nnew_text={}\nold_text_b64={}\nnew_text_b64={}",
+        path.display(),
+        reason,
+        matches,
+        replace_all,
+        preview_text(old_text),
+        preview_text(new_text),
+        STANDARD.encode(old_text),
+        STANDARD.encode(new_text)
+    );
+    for candidate in candidates {
+        rendered.push_str(&format!(
+            "\ncandidate={} line={} text={}",
+            candidate.index, candidate.line, candidate.text
+        ));
+    }
+    rendered.push_str(&format!(
+        "\nnext_action={}\n\nEdit was not applied.",
+        edit_failure_next_action(reason)
+    ));
+    rendered
 }
 
 #[async_trait]
@@ -82,16 +187,7 @@ impl Tool for FileEditTool {
     }
 
     async fn validate_input(&self, call: &ToolCall) -> anyhow::Result<()> {
-        let input = parse_input(&call.input)?;
-        if input.file_path.trim().is_empty() {
-            anyhow::bail!("edit target cannot be empty")
-        }
-        if input.old_string.is_empty() {
-            anyhow::bail!("old_string cannot be empty")
-        }
-        if input.old_string == input.new_string {
-            anyhow::bail!("No changes to make: new_string is unchanged from old_string.")
-        }
+        parse_input(&call.input)?;
         Ok(())
     }
 
@@ -127,10 +223,40 @@ impl Tool for FileEditTool {
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let input = parse_input(&call.input)?;
-        if input.old_string == input.new_string {
-            anyhow::bail!("No changes to make: new_string is unchanged from old_string.")
-        }
         let path = PathBuf::from(input.file_path.trim());
+        if input.file_path.trim().is_empty() {
+            return Ok(ToolResult::Text(format_edit_failure(
+                &path,
+                "empty_file_path",
+                0,
+                input.replace_all,
+                &input.old_string,
+                &input.new_string,
+                &[],
+            )));
+        }
+        if input.old_string.is_empty() {
+            return Ok(ToolResult::Text(format_edit_failure(
+                &path,
+                "empty_old_string",
+                0,
+                input.replace_all,
+                &input.old_string,
+                &input.new_string,
+                &[],
+            )));
+        }
+        if input.old_string == input.new_string {
+            return Ok(ToolResult::Text(format_edit_failure(
+                &path,
+                "no_changes",
+                0,
+                input.replace_all,
+                &input.old_string,
+                &input.new_string,
+                &[],
+            )));
+        }
         if let Some(policy) = permissions.filesystem_policy() {
             policy
                 .check_existing_or_create_path_for_write(&path)
@@ -149,17 +275,26 @@ impl Tool for FileEditTool {
 
         let occurrences = original.matches(&input.old_string).count();
         if occurrences == 0 {
-            anyhow::bail!(
-                "String to replace not found in {}. No changes were made.",
-                path.display()
-            )
+            return Ok(ToolResult::Text(format_edit_failure(
+                &path,
+                "old_string_not_found",
+                occurrences,
+                input.replace_all,
+                &input.old_string,
+                &input.new_string,
+                &[],
+            )));
         }
         if occurrences > 1 && !input.replace_all {
-            anyhow::bail!(
-                "Found {} matches for old_string in {}. Please provide more context or set replace_all=true.",
+            return Ok(ToolResult::Text(format_edit_failure(
+                &path,
+                "ambiguous_old_string",
                 occurrences,
-                path.display()
-            )
+                input.replace_all,
+                &input.old_string,
+                &input.new_string,
+                &edit_match_candidates(&original, &input.old_string),
+            )));
         }
 
         let replacements = if input.replace_all { occurrences } else { 1 };
@@ -190,6 +325,8 @@ fn parse_input(raw: &str) -> anyhow::Result<EditInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::permission_context::{PermissionMode, ToolPermissionContext};
+    use tempfile::tempdir;
 
     #[test]
     fn edit_success_includes_full_base64_payloads() {
@@ -203,5 +340,126 @@ mod tests {
         assert!(rendered.contains("..."));
         assert!(rendered.contains(&format!("old_text_b64={}", STANDARD.encode(old_text))));
         assert!(rendered.contains(&format!("new_text_b64={}", STANDARD.encode(new_text))));
+    }
+
+    #[test]
+    fn edit_match_candidates_include_line_numbers_and_snippets() {
+        let original = "first alpha\nsecond beta\nthird alpha\n";
+        let candidates = edit_match_candidates(original, "alpha");
+
+        assert_eq!(
+            candidates,
+            vec![
+                EditMatchCandidate {
+                    index: 1,
+                    line: 1,
+                    text: "first alpha".into(),
+                },
+                EditMatchCandidate {
+                    index: 2,
+                    line: 3,
+                    text: "third alpha".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn edit_failure_includes_repairable_details() {
+        let path = PathBuf::from("/tmp/example.rs");
+        let old_text = "let value = old;";
+        let new_text = "let value = new;";
+        let rendered = format_edit_failure(
+            &path,
+            "ambiguous_old_string",
+            2,
+            false,
+            old_text,
+            new_text,
+            &[EditMatchCandidate {
+                index: 1,
+                line: 12,
+                text: "let value = old;".into(),
+            }],
+        );
+
+        assert!(rendered.contains("status=failed"));
+        assert!(rendered.contains("reason=ambiguous_old_string"));
+        assert!(rendered.contains("matches=2"));
+        assert!(rendered.contains("candidate=1 line=12 text=let value = old;"));
+        assert!(rendered.contains("next_action=Read the file around the intended candidate"));
+        assert!(rendered.contains(&format!("old_text_b64={}", STANDARD.encode(old_text))));
+        assert!(rendered.contains("Edit was not applied."));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_edit_returns_text_instead_of_error_and_does_not_write() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.txt");
+        fs::write(&path, "alpha\nbeta\nalpha\n")
+            .await
+            .expect("seed");
+        let call = ToolCall::new(
+            "Edit",
+            serde_json::json!({
+                "file_path": path,
+                "old_string": "alpha",
+                "new_string": "omega"
+            })
+            .to_string(),
+        );
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+
+        let result = FileEditTool
+            .invoke(&call, &permissions)
+            .await
+            .expect("ambiguous edit should be model-visible");
+
+        match result {
+            ToolResult::Text(text) => {
+                assert!(text.contains("status=failed"));
+                assert!(text.contains("reason=ambiguous_old_string"));
+                assert!(text.contains("matches=2"));
+                assert!(text.contains("candidate=1 line=1 text=alpha"));
+                assert!(text.contains("candidate=2 line=3 text=alpha"));
+            }
+            other => panic!("expected text failure, got {other:?}"),
+        }
+        let content = fs::read_to_string(&path).await.expect("read");
+        assert_eq!(content, "alpha\nbeta\nalpha\n");
+    }
+
+    #[tokio::test]
+    async fn missing_old_string_returns_text_instead_of_error_and_does_not_write() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.txt");
+        fs::write(&path, "alpha\n").await.expect("seed");
+        let call = ToolCall::new(
+            "Edit",
+            serde_json::json!({
+                "file_path": path,
+                "old_string": "missing",
+                "new_string": "omega"
+            })
+            .to_string(),
+        );
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+
+        let result = FileEditTool
+            .invoke(&call, &permissions)
+            .await
+            .expect("missing old_string should be model-visible");
+
+        match result {
+            ToolResult::Text(text) => {
+                assert!(text.contains("status=failed"));
+                assert!(text.contains("reason=old_string_not_found"));
+                assert!(text.contains("matches=0"));
+                assert!(text.contains("next_action=Read the file around the intended location"));
+            }
+            other => panic!("expected text failure, got {other:?}"),
+        }
+        let content = fs::read_to_string(&path).await.expect("read");
+        assert_eq!(content, "alpha\n");
     }
 }

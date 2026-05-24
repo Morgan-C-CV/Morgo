@@ -132,6 +132,11 @@ struct CallToolDispatchError {
     outcome: ToolOutcome,
 }
 
+#[derive(Debug, Clone)]
+struct RecoverableToolTextFailure {
+    reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryAttempt {
     pub failure_kind: String,
@@ -3959,6 +3964,17 @@ async fn execute_call_tool(
                     outcome: tool_outcome,
                 });
             }
+            if let Some(failure) =
+                recoverable_text_failure(&next_action.action_type, &ToolResult::Text(text.clone()))
+            {
+                let failure_outcome =
+                    classify_tool_outcome(frame, decision, &record, &failure.reason, *dispatch_seq);
+                return Err(CallToolDispatchError {
+                    reason: failure.reason,
+                    record,
+                    outcome: failure_outcome,
+                });
+            }
             let mut changed = false;
             let mut ref_write_count = 0usize;
             let excerpt = compact_tool_excerpt(&text, 220);
@@ -4204,6 +4220,31 @@ fn classify_tool_outcome(
             .map(|detail| compact_tool_excerpt(detail, 1_200));
         return outcome;
     }
+    if tool_name == "Edit"
+        && matches!(
+            record.kind,
+            crate::tool::result::ToolExecutionOutcomeKind::Success
+        )
+        && lowered.contains("status=failed")
+    {
+        outcome.kind = ToolOutcomeKind::UserError;
+        outcome.recoverable = true;
+        outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
+        outcome.recommended_next_action = if lowered.contains("reason=ambiguous_old_string") {
+            Some("read_before_edit_or_use_replace_all".into())
+        } else if lowered.contains("reason=old_string_not_found")
+            || lowered.contains("reason=empty_old_string")
+        {
+            Some("read_before_edit".into())
+        } else {
+            Some("correct_edit_arguments".into())
+        };
+        outcome.bounded_excerpt = record
+            .detail
+            .as_deref()
+            .map(|detail| compact_tool_excerpt(detail, 1_200));
+        return outcome;
+    }
     if matches!(
         record.kind,
         crate::tool::result::ToolExecutionOutcomeKind::Success
@@ -4303,6 +4344,21 @@ fn classify_tool_outcome(
         return outcome;
     }
     outcome
+}
+
+fn recoverable_text_failure(
+    tool_name: &str,
+    result: &ToolResult,
+) -> Option<RecoverableToolTextFailure> {
+    let ToolResult::Text(text) = result else {
+        return None;
+    };
+    if tool_name == "Edit" && text.to_ascii_lowercase().contains("status=failed") {
+        return Some(RecoverableToolTextFailure {
+            reason: text.clone(),
+        });
+    }
+    None
 }
 
 fn push_tool_outcome_evidence(
@@ -4468,6 +4524,12 @@ fn classify_dispatch_failure(reason: &str) -> String {
     let lowered = reason.to_ascii_lowercase();
     if lowered.contains("resource_backpressure:") {
         "resource_backpressure".into()
+    } else if lowered.contains("reason=old_string_not_found")
+        || lowered.contains("reason=ambiguous_old_string")
+        || lowered.contains("reason=empty_old_string")
+        || lowered.contains("reason=no_changes")
+    {
+        "edit_user_error".into()
     } else if lowered.contains("runtime is unavailable") {
         "tool_runtime_unavailable".into()
     } else if lowered.contains("unknown tool") {
@@ -7587,6 +7649,31 @@ mod tests {
             outcome.recommended_next_action.as_deref(),
             Some("read_before_edit")
         );
+    }
+
+    #[test]
+    fn tool_outcome_edit_text_failure_is_recoverable() {
+        let frame = make_frame();
+        let path = std::env::temp_dir().join("p1_ambiguous_edit.rs");
+        let decision = validate_state_decision(&format!(
+            r#"{{"state":"executing","decision":"call_tool","next_action":{{"action_type":"Edit","args":{{"file_path":"{}","old_string":"alpha","new_string":"omega"}}}}}}"#,
+            path.display()
+        ))
+        .expect("decision");
+        let detail = format!(
+            "status=failed\npath={}\nreason=ambiguous_old_string\nmatches=2\nreplace_all=false\nnext_action=Read the file around the intended candidate and retry Edit with a more specific old_string.\n\nEdit was not applied.",
+            path.display()
+        );
+        let record = build_execution_record("Edit", &ToolResult::Text(detail.clone()), None);
+        let outcome = classify_tool_outcome(&frame, &decision, &record, &detail, 1);
+
+        assert_eq!(outcome.kind.as_str(), "user_error");
+        assert!(outcome.recoverable);
+        assert_eq!(
+            outcome.recommended_next_action.as_deref(),
+            Some("read_before_edit_or_use_replace_all")
+        );
+        assert_eq!(outcome.evidence_ref.as_deref(), Some("tool_output:1"));
     }
 
     #[test]
