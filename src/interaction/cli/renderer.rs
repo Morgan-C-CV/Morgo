@@ -2,11 +2,14 @@ use crate::core::message::is_legacy_hidden_primary_line;
 use crate::core::output::{OutputBlock, blocks_to_plain_text};
 use crate::interaction::cli::repl::CliTurnOutput;
 use crate::interaction::view::{SurfaceItem, SurfaceView, TaskView, build_surface_view};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use std::path::PathBuf;
 
 const MAX_TOOL_DETAIL_LINES: usize = 8;
 const MAX_TOOL_DETAIL_WIDTH: usize = 100;
+const DIFF_CONTEXT_LINES: usize = 3;
+const MAX_EXACT_DIFF_CELLS: usize = 2_000_000;
 pub const CONVERSATION_INTERRUPTED_MESSAGE: &str =
     "■ Conversation interrupted - tell the model what to do differently.";
 const APPROVAL_CONTINUATION_PREFIX: &str = "Approval resolved for tool ";
@@ -952,27 +955,364 @@ fn render_edit_activity_block(
     let detail_source = detail.unwrap_or(content);
     let fields = parse_key_value_lines(detail_source);
     let path = fields.get("path")?;
-    let old_text =
-        decode_tool_preview_text(fields.get("old_text").map(String::as_str).unwrap_or(""));
-    let new_text =
-        decode_tool_preview_text(fields.get("new_text").map(String::as_str).unwrap_or(""));
+    let old_text = decode_edit_payload_text(&fields, "old_text_b64", "old_text");
+    let new_text = decode_edit_payload_text(&fields, "new_text_b64", "new_text");
+    let replace_all = fields
+        .get("replace_all")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let replacements = fields
+        .get("replacements")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
 
-    let old_count = count_nonempty_lines(&old_text);
-    let new_count = count_nonempty_lines(&new_text);
+    let rendered_diff =
+        render_edit_diff_lines(path, &old_text, &new_text, replace_all, replacements);
     let display_path = display_activity_path(path);
     let headline = format!(
         "{} {} ({} {})",
         style_activity_action("EDITED"),
         display_path,
-        style_activity_added_count(new_count),
-        style_activity_removed_count(old_count),
+        style_activity_added_count(rendered_diff.additions),
+        style_activity_removed_count(rendered_diff.removals),
     );
 
-    let detail_lines = render_edit_diff_lines(path, &old_text, &new_text);
-    Some((headline, detail_lines))
+    Some((headline, rendered_diff.lines))
 }
 
-fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedEditDiff {
+    lines: Vec<String>,
+    additions: usize,
+    removals: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLineKind {
+    Context,
+    Add,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLine {
+    kind: DiffLineKind,
+    old_number: Option<usize>,
+    new_number: Option<usize>,
+    text: String,
+}
+
+fn decode_edit_payload_text(
+    fields: &std::collections::BTreeMap<String, String>,
+    full_key: &str,
+    preview_key: &str,
+) -> String {
+    fields
+        .get(full_key)
+        .and_then(|value| STANDARD.decode(value).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| {
+            decode_tool_preview_text(fields.get(preview_key).map(String::as_str).unwrap_or(""))
+        })
+}
+
+fn render_edit_diff_lines(
+    path: &str,
+    old_text: &str,
+    new_text: &str,
+    replace_all: bool,
+    replacements: usize,
+) -> RenderedEditDiff {
+    render_structured_edit_diff(path, old_text, new_text, replace_all, replacements)
+        .unwrap_or_else(|| render_legacy_edit_diff_lines(path, old_text, new_text))
+}
+
+fn render_structured_edit_diff(
+    path: &str,
+    old_text: &str,
+    new_text: &str,
+    replace_all: bool,
+    replacements: usize,
+) -> Option<RenderedEditDiff> {
+    let current_file = std::fs::read_to_string(path).ok();
+    let (before, after) = if let Some(after) = current_file.as_deref() {
+        reconstruct_before_edit(after, old_text, new_text, replace_all, replacements)
+            .map(|before| (before, after.to_string()))
+            .unwrap_or_else(|| (old_text.to_string(), new_text.to_string()))
+    } else {
+        (old_text.to_string(), new_text.to_string())
+    };
+
+    let diff_lines = build_numbered_diff(&before, &after);
+    let additions = diff_lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Add)
+        .count();
+    let removals = diff_lines
+        .iter()
+        .filter(|line| line.kind == DiffLineKind::Remove)
+        .count();
+    let hunks = diff_hunks(&diff_lines, DIFF_CONTEXT_LINES);
+    if hunks.is_empty() {
+        return None;
+    }
+
+    let mut rendered = vec![style_diff_frame_line()];
+    for (index, hunk) in hunks.iter().enumerate() {
+        if index > 0 {
+            rendered.push(style_diff_ellipsis());
+        }
+        rendered.extend(render_diff_hunk(hunk));
+    }
+    rendered.push(style_diff_frame_line());
+
+    Some(RenderedEditDiff {
+        lines: rendered,
+        additions,
+        removals,
+    })
+}
+
+fn reconstruct_before_edit(
+    after: &str,
+    old_text: &str,
+    new_text: &str,
+    replace_all: bool,
+    replacements: usize,
+) -> Option<String> {
+    if new_text.is_empty() || !after.contains(new_text) {
+        return None;
+    }
+
+    let replacement_limit = replacements.max(1);
+    let before = if replace_all {
+        after.replacen(new_text, old_text, replacement_limit)
+    } else {
+        after.replacen(new_text, old_text, 1)
+    };
+
+    (before != after).then_some(before)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiffOp {
+    Equal(String),
+    Add(String),
+    Remove(String),
+}
+
+fn build_numbered_diff(before: &str, after: &str) -> Vec<DiffLine> {
+    let old_lines = split_preserve_empty(before);
+    let new_lines = split_preserve_empty(after);
+    let ops = build_line_diff(&old_lines, &new_lines);
+    let mut old_number = 1;
+    let mut new_number = 1;
+    let mut lines = Vec::with_capacity(ops.len());
+
+    for op in ops {
+        match op {
+            DiffOp::Equal(text) => {
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Context,
+                    old_number: Some(old_number),
+                    new_number: Some(new_number),
+                    text,
+                });
+                old_number += 1;
+                new_number += 1;
+            }
+            DiffOp::Remove(text) => {
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Remove,
+                    old_number: Some(old_number),
+                    new_number: None,
+                    text,
+                });
+                old_number += 1;
+            }
+            DiffOp::Add(text) => {
+                lines.push(DiffLine {
+                    kind: DiffLineKind::Add,
+                    old_number: None,
+                    new_number: Some(new_number),
+                    text,
+                });
+                new_number += 1;
+            }
+        }
+    }
+
+    lines
+}
+
+fn build_line_diff(old_lines: &[String], new_lines: &[String]) -> Vec<DiffOp> {
+    let cell_count = old_lines.len().saturating_mul(new_lines.len());
+    if cell_count > MAX_EXACT_DIFF_CELLS {
+        return build_prefix_suffix_diff(old_lines, new_lines);
+    }
+
+    let rows = old_lines.len() + 1;
+    let cols = new_lines.len() + 1;
+    let mut dp = vec![0usize; rows * cols];
+    for i in (0..old_lines.len()).rev() {
+        for j in (0..new_lines.len()).rev() {
+            let index = i * cols + j;
+            dp[index] = if old_lines[i] == new_lines[j] {
+                1 + dp[(i + 1) * cols + j + 1]
+            } else {
+                dp[(i + 1) * cols + j].max(dp[i * cols + j + 1])
+            };
+        }
+    }
+
+    let mut i = 0;
+    let mut j = 0;
+    let mut ops = Vec::new();
+    while i < old_lines.len() && j < new_lines.len() {
+        if old_lines[i] == new_lines[j] {
+            ops.push(DiffOp::Equal(old_lines[i].clone()));
+            i += 1;
+            j += 1;
+        } else if dp[(i + 1) * cols + j] >= dp[i * cols + j + 1] {
+            ops.push(DiffOp::Remove(old_lines[i].clone()));
+            i += 1;
+        } else {
+            ops.push(DiffOp::Add(new_lines[j].clone()));
+            j += 1;
+        }
+    }
+    while i < old_lines.len() {
+        ops.push(DiffOp::Remove(old_lines[i].clone()));
+        i += 1;
+    }
+    while j < new_lines.len() {
+        ops.push(DiffOp::Add(new_lines[j].clone()));
+        j += 1;
+    }
+
+    ops
+}
+
+fn build_prefix_suffix_diff(old_lines: &[String], new_lines: &[String]) -> Vec<DiffOp> {
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix + prefix < old_lines.len()
+        && suffix + prefix < new_lines.len()
+        && old_lines[old_lines.len() - suffix - 1] == new_lines[new_lines.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+
+    let mut ops = Vec::new();
+    ops.extend(old_lines[..prefix].iter().cloned().map(DiffOp::Equal));
+    ops.extend(
+        old_lines[prefix..old_lines.len() - suffix]
+            .iter()
+            .cloned()
+            .map(DiffOp::Remove),
+    );
+    ops.extend(
+        new_lines[prefix..new_lines.len() - suffix]
+            .iter()
+            .cloned()
+            .map(DiffOp::Add),
+    );
+    ops.extend(
+        old_lines[old_lines.len() - suffix..]
+            .iter()
+            .cloned()
+            .map(DiffOp::Equal),
+    );
+    ops
+}
+
+fn diff_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>> {
+    let changed = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.kind != DiffLineKind::Context).then_some(index))
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut hunks = Vec::new();
+    let mut cursor = 0;
+    while cursor < changed.len() {
+        let mut start = changed[cursor].saturating_sub(context);
+        let mut end = (changed[cursor] + context).min(lines.len() - 1);
+        cursor += 1;
+
+        while cursor < changed.len() && changed[cursor].saturating_sub(context) <= end + 1 {
+            start = start.min(changed[cursor].saturating_sub(context));
+            end = end.max((changed[cursor] + context).min(lines.len() - 1));
+            cursor += 1;
+        }
+
+        hunks.push(lines[start..=end].to_vec());
+    }
+
+    hunks
+}
+
+fn render_diff_hunk(hunk: &[DiffLine]) -> Vec<String> {
+    let gutter_digits = hunk
+        .iter()
+        .filter_map(diff_display_number)
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+        .max(1);
+    hunk.iter()
+        .map(|line| render_diff_line(line, gutter_digits))
+        .collect()
+}
+
+fn render_diff_line(line: &DiffLine, gutter_digits: usize) -> String {
+    let marker = match line.kind {
+        DiffLineKind::Context => " ",
+        DiffLineKind::Add => "+",
+        DiffLineKind::Remove => "-",
+    };
+    let number = diff_display_number(line).unwrap_or(0);
+    let gutter_width = gutter_digits + 3;
+    let content_width = MAX_TOOL_DETAIL_WIDTH.saturating_sub(gutter_width).max(20);
+    let rendered = format!(
+        "{marker} {number:>gutter_digits$} {}",
+        truncate_for_tui(&line.text, content_width)
+    );
+
+    match line.kind {
+        DiffLineKind::Add => format!("\x1b[48;5;120m{rendered}\x1b[0m"),
+        DiffLineKind::Remove => format!("\x1b[48;5;224m{rendered}\x1b[0m"),
+        DiffLineKind::Context => rendered,
+    }
+}
+
+fn diff_display_number(line: &DiffLine) -> Option<usize> {
+    match line.kind {
+        DiffLineKind::Add => line.new_number,
+        DiffLineKind::Remove => line.old_number,
+        DiffLineKind::Context => line.new_number.or(line.old_number),
+    }
+}
+
+fn style_diff_frame_line() -> String {
+    format!("\x1b[2m{}\x1b[0m", "-".repeat(MAX_TOOL_DETAIL_WIDTH))
+}
+
+fn style_diff_ellipsis() -> String {
+    "\x1b[2m...\x1b[0m".into()
+}
+
+fn render_legacy_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> RenderedEditDiff {
     let file_text = std::fs::read_to_string(path).ok();
     let new_lines = split_preserve_empty(new_text);
     let old_lines = split_preserve_empty(old_text);
@@ -1002,7 +1342,11 @@ fn render_edit_diff_lines(path: &str, old_text: &str, new_text: &str) -> Vec<Str
         ));
     }
 
-    rendered
+    RenderedEditDiff {
+        lines: rendered,
+        additions: count_nonempty_lines(new_text),
+        removals: count_nonempty_lines(old_text),
+    }
 }
 
 fn parse_key_value_lines(text: &str) -> std::collections::BTreeMap<String, String> {
@@ -1390,6 +1734,27 @@ mod tests {
         }
 
         cleaned
+    }
+
+    fn edit_detail(path: &std::path::Path, old_text: &str, new_text: &str) -> String {
+        edit_detail_with_options(path, old_text, new_text, false, 1)
+    }
+
+    fn edit_detail_with_options(
+        path: &std::path::Path,
+        old_text: &str,
+        new_text: &str,
+        replace_all: bool,
+        replacements: usize,
+    ) -> String {
+        format!(
+            "path={}\nreplacements={replacements}\nreplace_all={replace_all}\nold_text={}\nnew_text={}\nold_text_b64={}\nnew_text_b64={}",
+            path.display(),
+            truncate_for_tui(old_text, 40).replace('\n', "\\n"),
+            truncate_for_tui(new_text, 40).replace('\n', "\\n"),
+            STANDARD.encode(old_text),
+            STANDARD.encode(new_text)
+        )
     }
 
     #[test]
@@ -1963,17 +2328,16 @@ mod tests {
             "fn before() {\n    println!(\"old\");\n}\nfn after() {}\n",
         )
         .expect("write temp preview file");
-        let path_text = path.display().to_string();
         let turn = CliTurnOutput {
             primary_text: String::new(),
             events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
                 tool_name: "Edit".into(),
-                content: format!(
-                    "path={path_text}\nreplacements=1\nreplace_all=false\nold_text=    println!(\"todo\");\nnew_text=    println!(\"old\");"
-                ),
+                content: edit_detail(&path, "    println!(\"todo\");", "    println!(\"old\");"),
                 summary: Some("Edit succeeded".into()),
-                detail: Some(format!(
-                    "path={path_text}\nreplacements=1\nreplace_all=false\nold_text=    println!(\"todo\");\nnew_text=    println!(\"old\");"
+                detail: Some(edit_detail(
+                    &path,
+                    "    println!(\"todo\");",
+                    "    println!(\"old\");",
                 )),
             })],
         };
@@ -1984,16 +2348,109 @@ mod tests {
         assert!(plain.contains("EDITED"));
         assert!(plain.contains("(+1 -1)"));
         assert!(plain.contains("renderer_edit_activity_preview.rs"));
-        assert!(
-            plain.contains("+     println!(\"old\");") || plain.contains("+ println!(\"old\");")
-        );
-        assert!(
-            plain.contains("-     println!(\"todo\");") || plain.contains("- println!(\"todo\");")
-        );
+        assert!(plain.contains("+ 2     println!(\"old\");"));
+        assert!(plain.contains("- 2     println!(\"todo\");"));
+        assert!(plain.contains("----------------------------------------------------------------------------------------------------"));
         assert!(rendered.contains("\x1b[48;5;120m"));
         assert!(rendered.contains("\x1b[48;5;224m"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tui_renders_full_edit_payload_beyond_preview_length() {
+        let path = std::env::temp_dir().join("renderer_edit_activity_long_payload.rs");
+        let old_line = "let value = \"old payload keeps visible content after the forty character preview limit\";";
+        let new_line = "let value = \"new payload keeps visible content after the forty character preview limit\";";
+        std::fs::write(&path, format!("fn demo() {{\n    {new_line}\n}}\n"))
+            .expect("write temp preview file");
+        let detail = edit_detail(&path, old_line, new_line);
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Edit".into(),
+                content: detail.clone(),
+                summary: Some("Edit succeeded".into()),
+                detail: Some(detail),
+            })],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("after the forty character preview limit"));
+        assert!(rendered.contains("+1 -1"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tui_renders_replace_all_as_separate_diff_hunks() {
+        let path = std::env::temp_dir().join("renderer_edit_activity_replace_all.rs");
+        std::fs::write(
+            &path,
+            [
+                "line 1",
+                "target_new",
+                "line 3",
+                "line 4",
+                "line 5",
+                "line 6",
+                "line 7",
+                "line 8",
+                "line 9",
+                "line 10",
+                "line 11",
+                "line 12",
+                "line 13",
+                "target_new",
+                "line 15",
+                "line 16",
+            ]
+            .join("\n"),
+        )
+        .expect("write temp preview file");
+        let detail = edit_detail_with_options(&path, "target_old", "target_new", true, 2);
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Edit".into(),
+                content: detail.clone(),
+                summary: Some("Edit succeeded".into()),
+                detail: Some(detail),
+            })],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("(+2 -2)"));
+        assert!(rendered.contains("- 2 target_old"));
+        assert!(rendered.contains("+ 2 target_new"));
+        assert!(rendered.contains("- 14 target_old"));
+        assert!(rendered.contains("+ 14 target_new"));
+        assert!(rendered.contains("..."));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tui_edit_diff_falls_back_to_preview_fields_when_full_payload_is_missing() {
+        let path = std::env::temp_dir().join("renderer_edit_activity_legacy_payload.rs");
+        let detail = format!(
+            "path={}\nreplacements=1\nreplace_all=false\nold_text=legacy old\nnew_text=legacy new\nold_text_b64=not-valid-base64\nnew_text_b64=not-valid-base64",
+            path.display()
+        );
+        let turn = CliTurnOutput {
+            primary_text: String::new(),
+            events: vec![CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolResult {
+                tool_name: "Edit".into(),
+                content: detail.clone(),
+                summary: Some("Edit succeeded".into()),
+                detail: Some(detail),
+            })],
+        };
+
+        let rendered = strip_ansi(&render_turn_tui_output(&turn));
+        assert!(rendered.contains("(+1 -1)"));
+        assert!(rendered.contains("- 1 legacy old"));
+        assert!(rendered.contains("+ 1 legacy new"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use tokio::fs;
 
@@ -36,12 +37,14 @@ fn format_edit_success(
     new_text: &str,
 ) -> String {
     format!(
-        "path={}\nreplacements={}\nreplace_all={}\nold_text={}\nnew_text={}\n\nEdit completed successfully.",
+        "path={}\nreplacements={}\nreplace_all={}\nold_text={}\nnew_text={}\nold_text_b64={}\nnew_text_b64={}\n\nEdit completed successfully.",
         path.display(),
         replacements,
         replace_all,
         preview_text(old_text),
-        preview_text(new_text)
+        preview_text(new_text),
+        STANDARD.encode(old_text),
+        STANDARD.encode(new_text)
     )
 }
 
@@ -182,4 +185,23 @@ impl Tool for FileEditTool {
 
 fn parse_input(raw: &str) -> anyhow::Result<EditInput> {
     serde_json::from_str(raw).map_err(|error| anyhow::anyhow!("invalid edit input: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_success_includes_full_base64_payloads() {
+        let path = PathBuf::from("/tmp/example.rs");
+        let old_text = "let value = \"old text that is longer than the preview limit\";";
+        let new_text = "let value = \"new text that is longer than the preview limit\";";
+        let rendered = format_edit_success(&path, 1, false, old_text, new_text);
+
+        assert!(rendered.contains("old_text=let value = \"old text"));
+        assert!(rendered.contains("new_text=let value = \"new text"));
+        assert!(rendered.contains("..."));
+        assert!(rendered.contains(&format!("old_text_b64={}", STANDARD.encode(old_text))));
+        assert!(rendered.contains(&format!("new_text_b64={}", STANDARD.encode(new_text))));
+    }
 }
