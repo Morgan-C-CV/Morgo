@@ -61,6 +61,22 @@ pub struct ToolContractPreflightSpec {
     pub permission_probe_paths: BTreeMap<String, String>,
 }
 
+fn one_line_tool_error(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_tool_failure(
+    tool_name: &str,
+    reason: &str,
+    message: impl AsRef<str>,
+    next_action: &str,
+) -> String {
+    format!(
+        "status=failed\ntool={tool_name}\nreason={reason}\nmessage={}\nnext_action={next_action}\n\nTool was not executed successfully.",
+        one_line_tool_error(message.as_ref())
+    )
+}
+
 fn stable_hash(value: &serde_json::Value) -> String {
     let mut hasher = DefaultHasher::new();
     value.to_string().hash(&mut hasher);
@@ -642,23 +658,29 @@ impl ToolRegistry {
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let Some(tool) = self.find(call) else {
-            return Ok(ToolResult::Interrupted(format!(
-                "unknown tool {}",
-                call.name
+            return Ok(ToolResult::Text(format_tool_failure(
+                &call.name,
+                "unknown_tool",
+                format!("unknown tool {}", call.name),
+                "Use one of the available tools from the current tool list.",
             )));
         };
 
         let metadata = tool.metadata();
         if tool.input_schema().is_some() && call.json_input().is_none() {
-            return Ok(ToolResult::Interrupted(format!(
-                "tool {} requires JSON-structured input",
-                metadata.name
+            return Ok(ToolResult::Text(format_tool_failure(
+                metadata.name,
+                "schema_invalid",
+                format!("tool {} requires JSON-structured input", metadata.name),
+                "Retry the tool call with valid JSON matching the tool schema.",
             )));
         }
         if let Err(error) = tool.validate_input(call).await {
-            return Ok(ToolResult::Interrupted(format!(
-                "invalid input for {}: {}",
-                metadata.name, error
+            return Ok(ToolResult::Text(format_tool_failure(
+                metadata.name,
+                "input_invalid",
+                format!("invalid input for {}: {}", metadata.name, error),
+                "Retry the tool call with corrected arguments.",
             )));
         }
         let base_decision = evaluate_tool_permission(&metadata, call, permissions);
@@ -668,7 +690,12 @@ impl ToolRegistry {
             crate::tool::definition::PermissionDecision::Allow => {
                 match tool.invoke(call, permissions).await {
                     Ok(result) => Ok(result),
-                    Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
+                    Err(error) => Ok(ToolResult::Text(format_tool_failure(
+                        metadata.name,
+                        "tool_error",
+                        error.to_string(),
+                        "Read the error message, correct the tool arguments or environment assumptions, and retry if appropriate.",
+                    ))),
                 }
             }
             crate::tool::definition::PermissionDecision::Ask {
@@ -715,27 +742,38 @@ impl ToolRegistry {
         permissions: &ToolPermissionContext,
     ) -> anyhow::Result<ToolResult> {
         let Some(tool) = self.find(call) else {
-            return Ok(ToolResult::Interrupted(format!(
-                "unknown tool {}",
-                call.name
+            return Ok(ToolResult::Text(format_tool_failure(
+                &call.name,
+                "unknown_tool",
+                format!("unknown tool {}", call.name),
+                "Use one of the available tools from the current tool list.",
             )));
         };
         let metadata = tool.metadata();
         if tool.input_schema().is_some() && call.json_input().is_none() {
-            return Ok(ToolResult::Interrupted(format!(
-                "tool {} requires JSON-structured input",
-                metadata.name
+            return Ok(ToolResult::Text(format_tool_failure(
+                metadata.name,
+                "schema_invalid",
+                format!("tool {} requires JSON-structured input", metadata.name),
+                "Retry the tool call with valid JSON matching the tool schema.",
             )));
         }
         if let Err(error) = tool.validate_input(call).await {
-            return Ok(ToolResult::Interrupted(format!(
-                "invalid input for {}: {}",
-                metadata.name, error
+            return Ok(ToolResult::Text(format_tool_failure(
+                metadata.name,
+                "input_invalid",
+                format!("invalid input for {}: {}", metadata.name, error),
+                "Retry the tool call with corrected arguments.",
             )));
         }
         match tool.invoke(call, permissions).await {
             Ok(result) => Ok(result),
-            Err(error) => Ok(ToolResult::Interrupted(error.to_string())),
+            Err(error) => Ok(ToolResult::Text(format_tool_failure(
+                metadata.name,
+                "tool_error",
+                error.to_string(),
+                "Read the error message, correct the tool arguments or environment assumptions, and retry if appropriate.",
+            ))),
         }
     }
 }
@@ -773,5 +811,112 @@ fn merge_permission_decisions(
             metadata,
         },
         (Allow, Allow) => Allow,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::permission_context::PermissionMode;
+    use async_trait::async_trait;
+
+    struct FailingTool {
+        validate_error: bool,
+    }
+
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn metadata(&self) -> ToolMetadata {
+            ToolMetadata {
+                name: "FailingTool",
+                description: "test tool",
+                aliases: &[],
+                search_hint: None,
+                read_only: true,
+                destructive: false,
+                concurrency_safe: true,
+                always_load: true,
+                should_defer: false,
+                requires_auth: false,
+                requires_user_interaction: false,
+                is_open_world: false,
+                is_search_or_read_command: false,
+            }
+        }
+
+        async fn validate_input(&self, _call: &ToolCall) -> anyhow::Result<()> {
+            if self.validate_error {
+                anyhow::bail!("bad test input");
+            }
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            _call: &ToolCall,
+            _permissions: &ToolPermissionContext,
+        ) -> anyhow::Result<ToolResult> {
+            anyhow::bail!("runtime test failure")
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_returns_model_visible_failure_text() {
+        let result = ToolRegistry::new()
+            .invoke(
+                &ToolCall::new("MissingTool", "{}"),
+                &ToolPermissionContext::new(PermissionMode::Default),
+            )
+            .await
+            .expect("registry should return a tool result");
+
+        let ToolResult::Text(text) = result else {
+            panic!("expected model-visible text failure");
+        };
+        assert!(text.contains("status=failed"));
+        assert!(text.contains("reason=unknown_tool"));
+        assert!(text.contains("unknown tool MissingTool"));
+    }
+
+    #[tokio::test]
+    async fn validation_error_returns_model_visible_failure_text() {
+        let registry = ToolRegistry::new().register(Arc::new(FailingTool {
+            validate_error: true,
+        }));
+        let result = registry
+            .invoke(
+                &ToolCall::new("FailingTool", "{}"),
+                &ToolPermissionContext::new(PermissionMode::Default),
+            )
+            .await
+            .expect("registry should return a tool result");
+
+        let ToolResult::Text(text) = result else {
+            panic!("expected model-visible text failure");
+        };
+        assert!(text.contains("status=failed"));
+        assert!(text.contains("reason=input_invalid"));
+        assert!(text.contains("bad test input"));
+    }
+
+    #[tokio::test]
+    async fn invoke_error_returns_model_visible_failure_text() {
+        let registry = ToolRegistry::new().register(Arc::new(FailingTool {
+            validate_error: false,
+        }));
+        let result = registry
+            .invoke(
+                &ToolCall::new("FailingTool", "{}"),
+                &ToolPermissionContext::new(PermissionMode::Default),
+            )
+            .await
+            .expect("registry should return a tool result");
+
+        let ToolResult::Text(text) = result else {
+            panic!("expected model-visible text failure");
+        };
+        assert!(text.contains("status=failed"));
+        assert!(text.contains("reason=tool_error"));
+        assert!(text.contains("runtime test failure"));
     }
 }

@@ -3964,9 +3964,7 @@ async fn execute_call_tool(
                     outcome: tool_outcome,
                 });
             }
-            if let Some(failure) =
-                recoverable_text_failure(&next_action.action_type, &ToolResult::Text(text.clone()))
-            {
+            if let Some(failure) = recoverable_text_failure(&ToolResult::Text(text.clone())) {
                 let failure_outcome =
                     classify_tool_outcome(frame, decision, &record, &failure.reason, *dispatch_seq);
                 return Err(CallToolDispatchError {
@@ -4220,14 +4218,32 @@ fn classify_tool_outcome(
             .map(|detail| compact_tool_excerpt(detail, 1_200));
         return outcome;
     }
-    if tool_name == "Edit"
-        && matches!(
-            record.kind,
-            crate::tool::result::ToolExecutionOutcomeKind::Success
-        )
-        && lowered.contains("status=failed")
+    if matches!(
+        record.kind,
+        crate::tool::result::ToolExecutionOutcomeKind::Success
+    ) && lowered.contains("status=failed")
     {
-        outcome.kind = ToolOutcomeKind::UserError;
+        outcome.kind = if lowered.contains("reason=old_string_not_found")
+            || lowered.contains("reason=ambiguous_old_string")
+            || lowered.contains("reason=empty_old_string")
+            || lowered.contains("reason=no_changes")
+            || lowered.contains("reason=empty_file_path")
+        {
+            ToolOutcomeKind::UserError
+        } else if lowered.contains("reason=schema_invalid")
+            || lowered.contains("reason=input_invalid")
+        {
+            ToolOutcomeKind::SchemaInvalid
+        } else if lowered.contains("reason=unknown_tool") {
+            ToolOutcomeKind::UserError
+        } else if lowered.contains("no such file or directory")
+            || lowered.contains("failed to read")
+            || lowered.contains("failed to access")
+        {
+            ToolOutcomeKind::MissingPath
+        } else {
+            ToolOutcomeKind::RuntimeError
+        };
         outcome.recoverable = true;
         outcome.evidence_ref = Some(format!("tool_output:{dispatch_seq}"));
         outcome.recommended_next_action = if lowered.contains("reason=ambiguous_old_string") {
@@ -4236,8 +4252,14 @@ fn classify_tool_outcome(
             || lowered.contains("reason=empty_old_string")
         {
             Some("read_before_edit".into())
+        } else if lowered.contains("reason=unknown_tool") {
+            Some("use_one_of_allowed_tools".into())
+        } else if lowered.contains("reason=schema_invalid") {
+            canonical_arg_shape(tool_name).map(|shape| format!("use_canonical_args:{shape}"))
+        } else if lowered.contains("reason=input_invalid") {
+            Some("correct_tool_arguments".into())
         } else {
-            Some("correct_edit_arguments".into())
+            Some("inspect_tool_failure_and_retry_if_recoverable".into())
         };
         outcome.bounded_excerpt = record
             .detail
@@ -4346,14 +4368,11 @@ fn classify_tool_outcome(
     outcome
 }
 
-fn recoverable_text_failure(
-    tool_name: &str,
-    result: &ToolResult,
-) -> Option<RecoverableToolTextFailure> {
+fn recoverable_text_failure(result: &ToolResult) -> Option<RecoverableToolTextFailure> {
     let ToolResult::Text(text) = result else {
         return None;
     };
-    if tool_name == "Edit" && text.to_ascii_lowercase().contains("status=failed") {
+    if text.to_ascii_lowercase().contains("status=failed") {
         return Some(RecoverableToolTextFailure {
             reason: text.clone(),
         });

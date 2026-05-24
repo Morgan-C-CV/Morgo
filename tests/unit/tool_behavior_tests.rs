@@ -1210,9 +1210,11 @@ async fn registry_rejects_non_json_input_for_schema_backed_tools() {
         .await
         .expect("schema-backed tool should surface structured failure");
 
-    let ToolResult::Interrupted(message) = result else {
-        panic!("expected interrupted result");
+    let ToolResult::Text(message) = result else {
+        panic!("expected text failure result");
     };
+    assert!(message.contains("status=failed"));
+    assert!(message.contains("reason=schema_invalid"));
     assert!(message.contains("tool Edit requires JSON-structured input"));
 }
 
@@ -1229,9 +1231,11 @@ async fn registry_surfaces_unknown_tool_as_structured_failure() {
         .await
         .expect("unknown tool should surface structured failure");
 
-    let ToolResult::Interrupted(message) = result else {
-        panic!("expected interrupted result");
+    let ToolResult::Text(message) = result else {
+        panic!("expected text failure result");
     };
+    assert!(message.contains("status=failed"));
+    assert!(message.contains("reason=unknown_tool"));
     assert!(message.contains("unknown tool MissingTool"));
 }
 

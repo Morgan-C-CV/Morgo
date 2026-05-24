@@ -312,6 +312,13 @@ fn summarize_result(
     ToolReportModifier,
 ) {
     match result {
+        ToolResult::Text(text) if text.to_ascii_lowercase().contains("status=failed") => (
+            ToolExecutionOutcomeKind::Success,
+            format!("{tool_name} failed"),
+            Some(text.clone()),
+            None,
+            ToolReportModifier::NeedsAttention,
+        ),
         ToolResult::Text(text) => (
             ToolExecutionOutcomeKind::Success,
             format!("{tool_name} succeeded"),
@@ -356,5 +363,25 @@ fn summarize_result(
             None,
             ToolReportModifier::NeedsAttention,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_failed_text_is_not_summarized_as_success() {
+        let record = build_execution_record(
+            "Example",
+            &ToolResult::Text(
+                "status=failed\ntool=Example\nreason=tool_error\nmessage=boom".into(),
+            ),
+            None,
+        );
+
+        assert_eq!(record.summary, "Example failed");
+        assert_eq!(record.report_modifier, ToolReportModifier::NeedsAttention);
+        assert!(record.detail.unwrap().contains("status=failed"));
     }
 }

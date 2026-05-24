@@ -2804,9 +2804,11 @@ async fn wasm_runtime_tool_timeout_maps_to_interrupted() {
             )
             .await
             .expect("runtime invoke should map timeout");
-        let ToolResult::Interrupted(message) = result else {
-            panic!("expected interrupted result");
+        let ToolResult::Text(message) = result else {
+            panic!("expected text failure result");
         };
+        assert!(message.contains("status=failed"));
+        assert!(message.contains("reason=tool_error"));
         assert!(message.contains("plugin runtime execution interrupted"));
         assert!(message.contains("Runtime: wasm"));
         assert!(message.contains("Entry: run_tool"));

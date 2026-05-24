@@ -2618,14 +2618,15 @@ async fn query_loop_compensates_missing_tool_result_after_tool_failure() {
     assert_eq!(result.terminal, Terminal::Completed);
     assert_eq!(result.transition, Some(Continue::ToolUseFollowUp));
     assert!(result.messages.iter().any(|message| {
-        message
-            .content
-            .contains("tool MissingTool interrupted: unknown tool MissingTool")
+        message.content.contains("tool result for MissingTool:")
+            && message.content.contains("status=failed")
+            && message.content.contains("reason=unknown_tool")
+            && message.content.contains("unknown tool MissingTool")
     }));
     assert!(
         result.messages.iter().any(|message| message
             .content
-            .contains("tool result for MissingTool: interrupted: unknown tool MissingTool"))
+            .contains("tool result for MissingTool: status=failed"))
             || result
                 .events
                 .iter()
