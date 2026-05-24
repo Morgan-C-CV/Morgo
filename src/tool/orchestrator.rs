@@ -90,18 +90,30 @@ impl ToolOrchestrator {
                     let registry = self.registry.clone();
                     let permissions = permissions.clone();
                     let call = request.call.clone();
-                    handles.push(tokio::spawn(async move {
-                        let observable_input = registry.observable_input(&call);
-                        let result = registry.invoke(&call, &permissions).await;
-                        (call, result, observable_input)
-                    }));
+                    let handle_call = call.clone();
+                    handles.push((
+                        call,
+                        tokio::spawn(async move {
+                            let observable_input = registry.observable_input(&handle_call);
+                            let result = registry.invoke(&handle_call, &permissions).await;
+                            (result, observable_input)
+                        }),
+                    ));
                 }
                 let batch_size = batch.end_index - batch.start_index;
-                for (batch_offset, handle) in handles.into_iter().enumerate() {
-                    let (call, result, observable_input) = handle
-                        .await
-                        .map_err(|error| anyhow::anyhow!("tool task join failed: {error}"))?;
-                    let result = result?;
+                for (batch_offset, (call, handle)) in handles.into_iter().enumerate() {
+                    let (result, observable_input) = handle.await.unwrap_or_else(|error| {
+                        (
+                            Ok(registry_error_result(
+                                &call.name,
+                                format!("tool task join failed: {error}"),
+                            )),
+                            None,
+                        )
+                    });
+                    let result = result.unwrap_or_else(|error| {
+                        registry_error_result(&call.name, format!("tool dispatch failed: {error}"))
+                    });
                     outcomes.push(build_outcome(
                         call.name.clone(),
                         result,
@@ -124,7 +136,16 @@ impl ToolOrchestrator {
                     .interrupt_behavior(&request.call)
                     .unwrap_or(InterruptBehavior::Block);
                 let observable_input = self.registry.observable_input(&request.call);
-                let result = self.registry.invoke(&request.call, permissions).await?;
+                let result = self
+                    .registry
+                    .invoke(&request.call, permissions)
+                    .await
+                    .unwrap_or_else(|error| {
+                        registry_error_result(
+                            &request.call.name,
+                            format!("tool dispatch failed: {error}"),
+                        )
+                    });
                 let should_break = should_stop_serial_execution(&interrupt_behavior, &result);
                 outcomes.push(build_outcome(
                     request.call.name.clone(),
@@ -142,6 +163,13 @@ impl ToolOrchestrator {
 
         Ok(outcomes)
     }
+}
+
+fn registry_error_result(tool_name: &str, message: String) -> ToolResult {
+    ToolResult::Text(format!(
+        "status=failed\ntool={tool_name}\nreason=tool_dispatch_error\nmessage={}\nnext_action=Read the error message, correct the tool request or environment assumptions, and retry if appropriate.\n\nTool was not executed successfully.",
+        message.split_whitespace().collect::<Vec<_>>().join(" ")
+    ))
 }
 
 fn build_outcome(
@@ -224,6 +252,7 @@ pub fn aggregate_execution_records(records: &[ToolExecutionRecord]) -> Option<To
                 )
             }
             ToolExecutionOutcomeKind::Progress
+            | ToolExecutionOutcomeKind::RecoverableFailure
             | ToolExecutionOutcomeKind::PendingApproval
             | ToolExecutionOutcomeKind::Denied
             | ToolExecutionOutcomeKind::Interrupted
@@ -313,7 +342,7 @@ fn summarize_result(
 ) {
     match result {
         ToolResult::Text(text) if text.to_ascii_lowercase().contains("status=failed") => (
-            ToolExecutionOutcomeKind::Success,
+            ToolExecutionOutcomeKind::RecoverableFailure,
             format!("{tool_name} failed"),
             Some(text.clone()),
             None,
@@ -380,6 +409,8 @@ mod tests {
             None,
         );
 
+        assert_eq!(record.kind, ToolExecutionOutcomeKind::RecoverableFailure);
+        assert_ne!(record.kind, ToolExecutionOutcomeKind::Success);
         assert_eq!(record.summary, "Example failed");
         assert_eq!(record.report_modifier, ToolReportModifier::NeedsAttention);
         assert!(record.detail.unwrap().contains("status=failed"));

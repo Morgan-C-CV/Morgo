@@ -57,6 +57,7 @@ pub struct PendingApprovalPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ToolExecutionOutcomeKind {
     Success,
+    RecoverableFailure,
     Denied,
     PendingApproval,
     Interrupted,

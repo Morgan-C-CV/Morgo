@@ -4220,9 +4220,8 @@ fn classify_tool_outcome(
     }
     if matches!(
         record.kind,
-        crate::tool::result::ToolExecutionOutcomeKind::Success
-    ) && lowered.contains("status=failed")
-    {
+        crate::tool::result::ToolExecutionOutcomeKind::RecoverableFailure
+    ) {
         outcome.kind = if lowered.contains("reason=old_string_not_found")
             || lowered.contains("reason=ambiguous_old_string")
             || lowered.contains("reason=empty_old_string")
@@ -4409,6 +4408,7 @@ fn push_tool_outcome_evidence(
 fn outcome_kind_label(kind: &crate::tool::result::ToolExecutionOutcomeKind) -> &'static str {
     match kind {
         crate::tool::result::ToolExecutionOutcomeKind::Success => "success",
+        crate::tool::result::ToolExecutionOutcomeKind::RecoverableFailure => "recoverable_failure",
         crate::tool::result::ToolExecutionOutcomeKind::Denied => "denied",
         crate::tool::result::ToolExecutionOutcomeKind::PendingApproval => "pending_approval",
         crate::tool::result::ToolExecutionOutcomeKind::Interrupted => "interrupted",
