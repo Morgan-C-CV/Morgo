@@ -6110,7 +6110,7 @@ impl BossCoordinator {
                 );
                 match c.ask_b_session(&app, msg).await {
                     Ok(response) => Ok(response),
-                    Err(_) => Ok("LGTM".to_string()),
+                    Err(error) => Err(anyhow::anyhow!("executor_b spec review failed: {error}")),
                 }
             })
         })
@@ -6734,38 +6734,70 @@ impl BossCoordinator {
             draft_spec
         };
 
-        // Ask B to review the draft spec before finalizing.
-        // B's feedback is stored alongside A's revision notes.
-        self.ensure_actor_registry_with_a_callbacks_auto().await;
-        let b_feedback = {
-            let registry_guard = self.actor_registry.read().await;
-            if let Some(registry) = registry_guard.as_ref() {
-                let mailbox = registry.b_mailbox().clone();
-                drop(registry_guard);
-                match mailbox
-                    .request(
-                        crate::core::boss_actor_runtime::ExecutorBCommand::ReviewSpec {
-                            spec: draft_spec.to_string(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(crate::core::boss_actor_runtime::BossActorEvent::SpecReviewed {
-                        feedback,
-                    }) => Some(feedback),
-                    _ => None,
-                }
-            } else {
-                drop(registry_guard);
-                None
-            }
-        };
-
-        // Use B's feedback if caller didn't supply one, otherwise keep caller's value.
         let effective_review_feedback = if review_feedback.is_empty() {
-            b_feedback.as_deref().unwrap_or("LGTM")
+            // Ask B to review the draft spec before finalizing. Missing or failed
+            // review is a recoverable block, not approval.
+            self.ensure_actor_registry_with_a_callbacks_auto().await;
+            let mailbox = {
+                let registry_guard = self.actor_registry.read().await;
+                let Some(registry) = registry_guard.as_ref() else {
+                    drop(registry_guard);
+                    let message = "Boss documentation blocked: executor_b reviewer is unavailable";
+                    self.record_documentation_recoverable_failure(message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                };
+                if !registry.has_executor {
+                    drop(registry_guard);
+                    let message =
+                        "Boss documentation blocked: executor_b reviewer callbacks are not wired";
+                    self.record_documentation_recoverable_failure(message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                registry.b_mailbox().clone()
+            };
+            let feedback = match mailbox
+                .request(
+                    crate::core::boss_actor_runtime::ExecutorBCommand::ReviewSpec {
+                        spec: draft_spec.to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(crate::core::boss_actor_runtime::BossActorEvent::SpecReviewed { feedback }) => {
+                    feedback
+                }
+                Ok(crate::core::boss_actor_runtime::BossActorEvent::Failed {
+                    operation,
+                    message,
+                    ..
+                }) => {
+                    let message =
+                        format!("Boss documentation blocked: {operation} failed: {message}");
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Ok(other) => {
+                    let message = format!(
+                        "Boss documentation blocked: executor_b returned unexpected event: {other:?}"
+                    );
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Err(error) => {
+                    let message =
+                        format!("Boss documentation blocked: executor_b review failed: {error}");
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+            };
+            feedback
         } else {
-            review_feedback
+            review_feedback.to_string()
         };
 
         // Mutate plan state first (coordinator owns the data).
@@ -6775,7 +6807,7 @@ impl BossCoordinator {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
             plan.draft_spec = Some(draft_spec.to_string());
-            plan.review_feedback = Some(effective_review_feedback.to_string());
+            plan.review_feedback = Some(effective_review_feedback);
             plan.revision_notes = Some(revision_notes.to_string());
             plan.document_spec = final_document_spec.to_string();
             plan.pseudo_code = final_pseudo_code.to_string();
@@ -6791,12 +6823,40 @@ impl BossCoordinator {
 
         // Send FinalizeDocumentation to A mailbox — A's handler drives the stage transition.
         if let Some(registry) = self.actor_registry.read().await.as_ref() {
-            let _ = registry
+            match registry
                 .a_mailbox()
                 .request(DesignerACommand::FinalizeDocumentation {
                     signal: "finalize".to_string(),
                 })
-                .await;
+                .await
+            {
+                Ok(BossActorEvent::DocumentationAdvanced { .. }) => {}
+                Ok(BossActorEvent::Failed {
+                    operation, message, ..
+                }) => {
+                    let message = format!(
+                        "Boss documentation blocked: designer_a {operation} failed: {message}"
+                    );
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Ok(other) => {
+                    let message = format!(
+                        "Boss documentation blocked: designer_a returned unexpected event: {other:?}"
+                    );
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Err(error) => {
+                    let message =
+                        format!("Boss documentation blocked: designer_a finalize failed: {error}");
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+            }
         }
 
         // Fallback: if A's callback is not wired, coordinator transitions directly.
@@ -6828,6 +6888,36 @@ impl BossCoordinator {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
             plan.documentation_feedback.push(trimmed.to_string());
+            plan.accepted_by_user = false;
+            plan.finalized = false;
+        }
+
+        let path_to_save = self.status.read().await.planning_file.clone();
+        if let Some(path_str) = path_to_save {
+            let path = std::path::PathBuf::from(path_str);
+            self.save_plan_with_session(&path).await?;
+        }
+
+        self.transition_to(BossStage::Documentation).await?;
+        Ok(())
+    }
+
+    pub async fn record_documentation_recoverable_failure(
+        &self,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        {
+            let mut plan_guard = self.plan.write().await;
+            let plan = plan_guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            plan.documentation_feedback
+                .push(format!("recoverable_failure: {trimmed}"));
             plan.accepted_by_user = false;
             plan.finalized = false;
         }
@@ -6891,7 +6981,30 @@ impl BossCoordinator {
                 .await
             {
                 Ok(BossActorEvent::ApprovalHandled { approved: a }) => a,
-                _ => approved,
+                Ok(BossActorEvent::Failed {
+                    operation, message, ..
+                }) => {
+                    let message =
+                        format!("Boss approval blocked: designer_a {operation} failed: {message}");
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Ok(other) => {
+                    let message = format!(
+                        "Boss approval blocked: designer_a returned unexpected event: {other:?}"
+                    );
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Err(error) => {
+                    let message =
+                        format!("Boss approval blocked: designer_a mailbox failed: {error}");
+                    self.record_documentation_recoverable_failure(&message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
             }
         } else {
             approved
@@ -8748,7 +8861,30 @@ impl BossCoordinator {
                 .await
             {
                 Ok(BossActorEvent::ReviewComplete { decision, .. }) => decision,
-                _ => fallback_decision,
+                Ok(BossActorEvent::Failed {
+                    operation, message, ..
+                }) => {
+                    let message =
+                        format!("Boss review blocked: designer_a {operation} failed: {message}");
+                    self.mark_step_recoverable_failure(step_id, &message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Ok(other) => {
+                    let message = format!(
+                        "Boss review blocked: designer_a returned unexpected event: {other:?}"
+                    );
+                    self.mark_step_recoverable_failure(step_id, &message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
+                Err(error) => {
+                    let message =
+                        format!("Boss review blocked: designer_a mailbox failed: {error}");
+                    self.mark_step_recoverable_failure(step_id, &message)
+                        .await?;
+                    anyhow::bail!("{message}");
+                }
             }
         } else {
             fallback_decision
@@ -9161,6 +9297,36 @@ impl BossCoordinator {
             }
         } else if matches!(artifact_recovery_status, Some(("repair_dispatched", None))) {
             self.maybe_auto_advance_after_completion().await?;
+        }
+        Ok(())
+    }
+
+    async fn mark_step_recoverable_failure(
+        &self,
+        step_id: usize,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        {
+            let mut plan_guard = self.plan.write().await;
+            let plan = plan_guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No plan loaded"))?;
+            let step = plan
+                .steps
+                .iter_mut()
+                .find(|step| step.id == step_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown boss step {step_id}"))?;
+            step.status = BossPlanStepStatus::Failed;
+            step.completed = false;
+            step.last_review_summary = Some(format!("recoverable_failure: {}", message.trim()));
+        }
+
+        if let Some(path) = self.status.read().await.planning_file.clone() {
+            self.save_plan_with_session(std::path::Path::new(&path))
+                .await?;
+        }
+        if self.get_stage().await != BossStage::Documentation {
+            self.transition_to(BossStage::Documentation).await?;
         }
         Ok(())
     }
@@ -10467,12 +10633,7 @@ impl BossCoordinator {
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        if let Ok(
-                            crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
-                                task_id,
-                                ..
-                            },
-                        ) = registry
+                        match registry
                             .b_mailbox()
                             .request(ExecutorBCommand::ContinueStep {
                                 step_id,
@@ -10481,8 +10642,50 @@ impl BossCoordinator {
                             })
                             .await
                         {
-                            self.record_step_dispatch_task_id(step_id, &task_id).await;
+                            Ok(
+                                crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
+                                    task_id,
+                                    ..
+                                },
+                            ) => {
+                                self.record_step_dispatch_task_id(step_id, &task_id).await;
+                            }
+                            Ok(crate::core::boss_actor_runtime::BossActorEvent::Failed {
+                                operation,
+                                message,
+                                ..
+                            }) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b {operation} failed: {message}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
+                            Ok(other) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b returned unexpected event: {other:?}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b mailbox failed: {error}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
                         }
+                    } else {
+                        let message = format!(
+                            "Boss step {step_id} dispatch blocked: executor_b registry unavailable"
+                        );
+                        self.mark_step_recoverable_failure(step_id, &message)
+                            .await?;
+                        anyhow::bail!("{message}");
                     }
 
                     continue_payload
@@ -10508,12 +10711,7 @@ impl BossCoordinator {
                     self.bootstrap_actor_registry_with_app_state(app_state)
                         .await;
                     if let Some(registry) = self.actor_registry.read().await.as_ref() {
-                        if let Ok(
-                            crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
-                                task_id,
-                                ..
-                            },
-                        ) = registry
+                        match registry
                             .b_mailbox()
                             .request(ExecutorBCommand::DispatchStep {
                                 step_id,
@@ -10521,8 +10719,50 @@ impl BossCoordinator {
                             })
                             .await
                         {
-                            self.record_step_dispatch_task_id(step_id, &task_id).await;
+                            Ok(
+                                crate::core::boss_actor_runtime::BossActorEvent::StepDispatched {
+                                    task_id,
+                                    ..
+                                },
+                            ) => {
+                                self.record_step_dispatch_task_id(step_id, &task_id).await;
+                            }
+                            Ok(crate::core::boss_actor_runtime::BossActorEvent::Failed {
+                                operation,
+                                message,
+                                ..
+                            }) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b {operation} failed: {message}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
+                            Ok(other) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b returned unexpected event: {other:?}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "Boss step {step_id} dispatch blocked: executor_b mailbox failed: {error}"
+                                );
+                                self.mark_step_recoverable_failure(step_id, &message)
+                                    .await?;
+                                anyhow::bail!("{message}");
+                            }
                         }
+                    } else {
+                        let message = format!(
+                            "Boss step {step_id} dispatch blocked: executor_b registry unavailable"
+                        );
+                        self.mark_step_recoverable_failure(step_id, &message)
+                            .await?;
+                        anyhow::bail!("{message}");
                     }
 
                     spawn_payload

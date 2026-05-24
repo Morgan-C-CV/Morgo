@@ -144,6 +144,12 @@ pub enum BossActorEvent {
     SpecReviewed {
         feedback: String,
     },
+    Failed {
+        role: BossActorRole,
+        operation: String,
+        message: String,
+        recoverable: bool,
+    },
     Stopped {
         role: BossActorRole,
     },
@@ -414,21 +420,19 @@ async fn handle_designer_a_command(
                 s.current_step = Some(step_id);
             }
             let decision = if let Some(f) = review_fn {
-                let fallback_correction = correction.clone();
-                f(step_id, accepted, summary.clone(), correction)
-                    .await
-                    .unwrap_or_else(|_| {
-                        if accepted {
-                            ReviewDecision::Accept {
-                                summary: summary.clone(),
-                            }
-                        } else {
-                            ReviewDecision::Correct {
-                                summary: summary.clone(),
-                                correction: fallback_correction,
-                            }
-                        }
-                    })
+                match f(step_id, accepted, summary.clone(), correction).await {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        let mut s = state.write().await;
+                        s.status = BossActorStatus::Failed;
+                        return BossActorEvent::Failed {
+                            role: BossActorRole::DesignerA,
+                            operation: "review".to_string(),
+                            message: error.to_string(),
+                            recoverable: true,
+                        };
+                    }
+                }
             } else if accepted {
                 ReviewDecision::Accept {
                     summary: summary.clone(),
@@ -451,10 +455,22 @@ async fn handle_designer_a_command(
             {
                 let mut s = state.write().await;
                 s.status = BossActorStatus::Active;
-                s.stage = BossStage::WaitingForApproval;
             }
             if let Some(f) = doc_fn {
-                let _ = f(signal.clone()).await;
+                if let Err(error) = f(signal.clone()).await {
+                    let mut s = state.write().await;
+                    s.status = BossActorStatus::Failed;
+                    return BossActorEvent::Failed {
+                        role: BossActorRole::DesignerA,
+                        operation: "finalize_documentation".to_string(),
+                        message: error.to_string(),
+                        recoverable: true,
+                    };
+                }
+            }
+            {
+                let mut s = state.write().await;
+                s.stage = BossStage::WaitingForApproval;
             }
             BossActorEvent::DocumentationAdvanced { signal }
         }
@@ -503,9 +519,19 @@ async fn handle_executor_b_command(
             }
             // Call the execution side effect if wired — B owns the tool invocation.
             let task_id = if let Some(f) = exec_fn {
-                f(payload)
-                    .await
-                    .unwrap_or_else(|_| format!("b-task-step-{step_id}"))
+                match f(payload).await {
+                    Ok(task_id) => task_id,
+                    Err(error) => {
+                        let mut s = state.write().await;
+                        s.status = BossActorStatus::Failed;
+                        return BossActorEvent::Failed {
+                            role: BossActorRole::ExecutorB,
+                            operation: "dispatch_step".to_string(),
+                            message: error.to_string(),
+                            recoverable: true,
+                        };
+                    }
+                }
             } else {
                 format!("b-task-step-{step_id}")
             };
@@ -521,7 +547,16 @@ async fn handle_executor_b_command(
                 s.current_step = Some(step_id);
             }
             if let Some(f) = exec_fn {
-                let _ = f(payload).await;
+                if let Err(error) = f(payload).await {
+                    let mut s = state.write().await;
+                    s.status = BossActorStatus::Failed;
+                    return BossActorEvent::Failed {
+                        role: BossActorRole::ExecutorB,
+                        operation: "continue_step".to_string(),
+                        message: error.to_string(),
+                        recoverable: true,
+                    };
+                }
             }
             BossActorEvent::StepDispatched { step_id, task_id }
         }
@@ -531,9 +566,28 @@ async fn handle_executor_b_command(
                 s.status = BossActorStatus::Active;
             }
             let feedback = if let Some(f) = spec_review_fn {
-                f(spec).await.unwrap_or_else(|_| "LGTM".to_string())
+                match f(spec).await {
+                    Ok(feedback) => feedback,
+                    Err(error) => {
+                        let mut s = state.write().await;
+                        s.status = BossActorStatus::Failed;
+                        return BossActorEvent::Failed {
+                            role: BossActorRole::ExecutorB,
+                            operation: "review_spec".to_string(),
+                            message: error.to_string(),
+                            recoverable: true,
+                        };
+                    }
+                }
             } else {
-                "LGTM".to_string()
+                let mut s = state.write().await;
+                s.status = BossActorStatus::Failed;
+                return BossActorEvent::Failed {
+                    role: BossActorRole::ExecutorB,
+                    operation: "review_spec".to_string(),
+                    message: "executor_b spec review callback is not wired".to_string(),
+                    recoverable: true,
+                };
             };
             BossActorEvent::SpecReviewed { feedback }
         }

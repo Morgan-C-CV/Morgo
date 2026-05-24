@@ -7,7 +7,8 @@ use rust_agent::core::boss::{
     load_plan, save_plan, trim_context_payload,
 };
 use rust_agent::core::boss_actor_runtime::{
-    BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBRuntime, SpecReviewFn,
+    BossActorEvent, BossActorRegistry, DesignerARuntime, ExecutionFn, ExecutorBCommand,
+    ExecutorBRuntime, SpecReviewFn,
 };
 use rust_agent::core::boss_context_brief::{
     BossContextBrief, BossContextStrategy, BossStateFrame, PermissionScopeView, RelevantFileHandle,
@@ -3828,7 +3829,7 @@ async fn runtime_host_owner_survives_rebind_and_restart() {
 
 // --- T16.6.H: Boss actor runtime mailbox seam ---
 
-use rust_agent::core::boss_actor_runtime::{DesignerACommand, ExecutorBCommand};
+use rust_agent::core::boss_actor_runtime::DesignerACommand;
 use rust_agent::core::boss_state::BossActorStatus as ActorStatus;
 
 #[tokio::test]
@@ -6287,8 +6288,6 @@ async fn t22_2_b_session_fallback_when_task_manager_absent() {
 /// T22.3.1: B reviewer receives ReviewSpec and returns real feedback via spec_review_fn.
 #[tokio::test]
 async fn t22_3_documentation_b_reviewer_returns_feedback() {
-    use rust_agent::core::boss_actor_runtime::{BossActorEvent, ExecutorBCommand};
-
     let spec_review_fn: SpecReviewFn = Arc::new(|spec: String| {
         Box::pin(async move {
             Ok(format!(
@@ -6319,6 +6318,36 @@ async fn t22_3_documentation_b_reviewer_returns_feedback() {
             );
         }
         other => panic!("expected SpecReviewed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn t22_3_documentation_b_reviewer_error_returns_failed_event() {
+    let spec_review_fn: SpecReviewFn =
+        Arc::new(|_spec: String| Box::pin(async move { anyhow::bail!("review transport down") }));
+
+    let runtime = ExecutorBRuntime::spawn_with_callbacks(None, Some(spec_review_fn));
+    let event = runtime
+        .mailbox
+        .request(ExecutorBCommand::ReviewSpec {
+            spec: "implement login flow".to_string(),
+        })
+        .await
+        .expect("ReviewSpec mailbox request must return an event");
+
+    match event {
+        BossActorEvent::Failed {
+            role,
+            operation,
+            message,
+            recoverable,
+        } => {
+            assert_eq!(role, BossActorRole::ExecutorB);
+            assert_eq!(operation, "review_spec");
+            assert!(recoverable);
+            assert!(message.contains("review transport down"));
+        }
+        other => panic!("expected Failed event, got {other:?}"),
     }
 }
 
@@ -6369,6 +6398,60 @@ async fn t22_3_finalize_documentation_loop_uses_b_reviewer_feedback() {
         plan.review_feedback.as_deref(),
         Some("FEEDBACK: needs more detail on auth flow"),
         "B's feedback must be stored as review_feedback"
+    );
+
+    let _ = std::fs::remove_file(&plan_path);
+}
+
+#[tokio::test]
+async fn t22_3_finalize_documentation_loop_b_review_failure_does_not_finalize() {
+    let plan_path = std::env::temp_dir().join("t22_3_doc_b_failure.json");
+    let plan = BossPlan {
+        plan_id: "t22-3-doc-b-failure".into(),
+        accepted_by_user: false,
+        auto_sequence: false,
+        steps: vec![boss_step(0, "step zero")],
+        ..Default::default()
+    };
+    save_plan(&plan, &plan_path).await.unwrap();
+
+    let coordinator = BossCoordinator::restore_or_init(&plan_path).await.unwrap();
+    let spec_review_fn: SpecReviewFn =
+        Arc::new(|_spec: String| Box::pin(async move { anyhow::bail!("B review unavailable") }));
+    let exec_fn: ExecutionFn = Arc::new(|payload: String| Box::pin(async move { Ok(payload) }));
+    let registry = BossActorRegistry {
+        designer_a: DesignerARuntime::spawn(),
+        executor_b: ExecutorBRuntime::spawn_with_callbacks(Some(exec_fn), Some(spec_review_fn)),
+        has_executor: true,
+        has_a_callbacks: false,
+    };
+    {
+        let mut guard = coordinator.actor_registry.write().await;
+        *guard = Some(registry);
+    }
+
+    let result = coordinator
+        .finalize_documentation_loop(
+            "draft spec: implement login",
+            "",
+            "revision notes",
+            "final spec",
+            "pseudo code",
+        )
+        .await;
+
+    assert!(result.is_err());
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("Boss documentation blocked"));
+    assert!(message.contains("B review unavailable"));
+
+    let saved = load_plan(&plan_path).await.unwrap();
+    assert!(!saved.finalized);
+    assert!(
+        saved
+            .documentation_feedback
+            .iter()
+            .any(|feedback| feedback.contains("recoverable_failure"))
     );
 
     let _ = std::fs::remove_file(&plan_path);

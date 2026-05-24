@@ -103,10 +103,24 @@ async fn start_with_objective(
     boss.seed_documentation_plan_for_task(objective).await;
     let plan_id = boss.current_run_id().await;
     boss.persist_current_plan().await?;
-    let draft_spec = boss
+    let draft_spec = match boss
         .draft_spec_with_a(&Arc::new(app_state.clone()), objective)
         .await
-        .unwrap_or_else(|_| objective.to_string());
+    {
+        Ok(draft_spec) => draft_spec,
+        Err(error) => {
+            let message = format!(
+                "Boss plan start blocked: Designer A failed to draft spec: {error}. The plan was not finalized; fix the actor/runtime issue and retry /boss start."
+            );
+            let _ = boss
+                .record_documentation_recoverable_failure(&message)
+                .await;
+            return Ok(CommandResult::Message(format!(
+                "{message}\n- plan_id: {plan_id}\n- plan_path: {}\n- objective: {objective}\n- stage: documentation",
+                plan_path.display()
+            )));
+        }
+    };
     boss.finalize_documentation_loop(&draft_spec, "", "", &draft_spec, "")
         .await?;
     Ok(CommandResult::Message(format!(
@@ -363,18 +377,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boss_start_persists_and_reports() {
+    async fn boss_start_blocks_and_persists_recoverable_failure_when_a_draft_fails() {
         let command = BossCommand;
-        let app_state = test_app_state();
+        let mut app_state = test_app_state();
+        app_state.permission_context.task_manager = None;
         let input = NormalizedInput::from_raw(InteractionSurface::Cli, "/boss write a report");
         let result = command
             .execute(&input, &app_state)
             .await
             .expect("boss command should execute");
         let text = result.to_plain_text().expect("message");
-        assert!(text.contains("Boss plan started."));
+        assert!(text.contains("Boss plan start blocked"));
+        assert!(text.contains("Designer A failed to draft spec"));
         assert!(text.contains("write a report"));
-        assert!(text.contains("stage="));
+        assert!(text.contains("stage: documentation"));
+
+        let plan = app_state
+            .boss_coordinator
+            .as_ref()
+            .expect("boss coordinator")
+            .plan
+            .read()
+            .await
+            .clone()
+            .expect("plan should be seeded");
+        assert!(!plan.finalized);
+        assert!(
+            plan.documentation_feedback
+                .iter()
+                .any(|feedback| feedback.contains("recoverable_failure"))
+        );
     }
 
     #[tokio::test]

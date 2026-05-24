@@ -415,4 +415,26 @@ mod tests {
         assert_eq!(record.report_modifier, ToolReportModifier::NeedsAttention);
         assert!(record.detail.unwrap().contains("status=failed"));
     }
+
+    #[test]
+    fn registry_invoke_error_result_is_recoverable_failure_outcome() {
+        let result = registry_error_result("Example", "tool dispatch failed: boom".into());
+        let outcome = build_outcome("Example".into(), result, None, 0, 1, false);
+
+        assert_eq!(
+            outcome.record.kind,
+            ToolExecutionOutcomeKind::RecoverableFailure
+        );
+        assert_ne!(outcome.record.kind, ToolExecutionOutcomeKind::Success);
+        assert_eq!(outcome.record.summary, "Example failed");
+        assert_eq!(outcome.record.report_modifier, ToolReportModifier::NeedsAttention);
+        assert!(
+            outcome
+                .record
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("status=failed")
+        );
+    }
 }
