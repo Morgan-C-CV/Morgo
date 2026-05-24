@@ -3924,13 +3924,6 @@ fn tui_is_copy_key(key: &crossterm::event::KeyEvent, has_selection: bool) -> boo
     }
 }
 
-fn tui_is_copy_shortcut(key: &crossterm::event::KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c' | 'C'))
-        && key
-            .modifiers
-            .intersects(KeyModifiers::SUPER | KeyModifiers::META)
-}
-
 #[cfg(target_os = "macos")]
 fn get_clipboard_platform() -> anyhow::Result<String> {
     let output = Command::new("pbpaste").output()?;
@@ -4255,7 +4248,7 @@ fn tui_should_enable_keyboard_enhancements_for(
             "0" | "false" | "no" | "off" => false,
             _ => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
         },
-        None => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
+        None => false,
     }
 }
 
@@ -4270,7 +4263,7 @@ fn tui_should_enable_mouse_capture_for(
             "0" | "false" | "no" | "off" => false,
             _ => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
         },
-        None => !tui_terminal_context_is_ide(term_program, vscode_ipc_hook_present),
+        None => false,
     }
 }
 
@@ -4355,10 +4348,10 @@ mod tui_output_tests {
         tui_context_document, tui_cursor_is_on_first_input_line, tui_cursor_is_on_last_input_line,
         tui_cursor_left_over_pastes, tui_cursor_right_over_pastes, tui_exit_gesture_for_key,
         tui_input_palette_for_light_mode, tui_input_viewport, tui_interrupted_turn_output,
-        tui_is_copy_key, tui_is_copy_shortcut, tui_is_paste_key,
-        tui_move_suggestion_selection_down, tui_move_suggestion_selection_up,
-        tui_should_enable_keyboard_enhancements_for, tui_startup_face, tui_startup_face_frame,
-        tui_startup_greeting, tui_suggestion_viewport, tui_terminal_program_is_ide,
+        tui_is_copy_key, tui_is_paste_key, tui_move_suggestion_selection_down,
+        tui_move_suggestion_selection_up, tui_should_enable_keyboard_enhancements_for,
+        tui_startup_face, tui_startup_face_frame, tui_startup_greeting, tui_suggestion_viewport,
+        tui_terminal_program_is_ide,
     };
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
@@ -5662,15 +5655,7 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_copy_and_paste_shortcuts_are_detected_without_text_insertion() {
-        assert!(tui_is_copy_shortcut(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::SUPER
-        )));
-        assert!(tui_is_copy_shortcut(&KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::META
-        )));
+    fn tui_paste_shortcuts_are_detected_without_text_insertion() {
         assert!(tui_is_paste_key(&KeyEvent::new(
             KeyCode::Char('v'),
             KeyModifiers::SUPER
@@ -5697,8 +5682,8 @@ mod tui_output_tests {
     }
 
     #[test]
-    fn tui_keyboard_enhancements_default_off_in_ide_terminals() {
-        assert!(tui_should_enable_keyboard_enhancements_for(
+    fn tui_keyboard_enhancements_default_off_for_native_shortcuts() {
+        assert!(!tui_should_enable_keyboard_enhancements_for(
             None,
             Some("Apple_Terminal"),
             false
@@ -5731,7 +5716,7 @@ mod tui_output_tests {
 
     #[test]
     fn tui_mouse_capture_defaults_off_in_ide_terminals_for_native_copy() {
-        assert!(super::tui_should_enable_mouse_capture_for(
+        assert!(!super::tui_should_enable_mouse_capture_for(
             None,
             Some("Apple_Terminal"),
             false
@@ -7144,11 +7129,6 @@ impl RuntimeBootstrap {
                         pending_exit_gesture = None;
                         continue;
                     }
-                    if tui_is_copy_shortcut(&key) {
-                        pending_exit_gesture = None;
-                        continue;
-                    }
-
                     if tui_is_paste_key(&key) {
                         if resume_picker.is_some() {
                             continue;
@@ -7897,7 +7877,9 @@ impl RuntimeBootstrap {
                             if resume_picker.is_some() {
                                 continue;
                             }
-                            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            if !key.modifiers.intersects(
+                                KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META,
+                            ) {
                                 insert_input_char_with_pastes(
                                     &mut input,
                                     &mut cursor_index,
