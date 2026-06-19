@@ -6860,6 +6860,17 @@ impl BossCoordinator {
             review_feedback.to_string()
         };
 
+        let effective_final_document_spec = if final_document_spec.trim().is_empty() {
+            draft_spec.to_string()
+        } else {
+            final_document_spec.to_string()
+        };
+        let effective_final_pseudo_code = if final_pseudo_code.trim().is_empty() {
+            revision_notes.to_string()
+        } else {
+            final_pseudo_code.to_string()
+        };
+
         // Mutate plan state first (coordinator owns the data).
         {
             let mut plan_guard = self.plan.write().await;
@@ -6869,8 +6880,8 @@ impl BossCoordinator {
             plan.draft_spec = Some(draft_spec.to_string());
             plan.review_feedback = Some(effective_review_feedback);
             plan.revision_notes = Some(revision_notes.to_string());
-            plan.document_spec = final_document_spec.to_string();
-            plan.pseudo_code = final_pseudo_code.to_string();
+            plan.document_spec = effective_final_document_spec;
+            plan.pseudo_code = effective_final_pseudo_code;
             plan.finalized = true;
             plan.accepted_by_user = false;
         }

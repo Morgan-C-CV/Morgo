@@ -174,10 +174,10 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
 
     if requires_write {
         spec.required_allowed_actions.push("write_file".into());
-        spec.permission_probe_tools.push("Edit".into());
         spec.permission_probe_tools.push("Bash".into());
         spec.required_visible_tools.push("Bash".into());
         if let Some(path) = writable_probe_path {
+            spec.permission_probe_tools.push("Edit".into());
             spec.permission_probe_paths.insert("Edit".into(), path);
         }
     }
@@ -233,8 +233,12 @@ pub fn requires_external_tool_execution(
     direct_tool_runtime_available: bool,
 ) -> bool {
     let preflight = infer_preflight_requirements_from_state_frame(frame);
+    let code_change_contract = matches!(
+        frame.stage_execution_contract.task_profile,
+        Some(crate::core::state_frame::TaskProfile::CodeChange)
+    );
     frame.role == ActorRole::Worker
-        && !direct_tool_runtime_available
+        && (code_change_contract || !direct_tool_runtime_available)
         && !matches!(
             frame.required_output_schema.as_deref(),
             Some("readonly_audit_4_paragraphs_v1")
@@ -1070,6 +1074,7 @@ mod tests {
         }];
 
         assert!(requires_external_tool_execution(&frame, false));
+        assert!(requires_external_tool_execution(&frame, true));
     }
 
     #[tokio::test]
