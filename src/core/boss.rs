@@ -4599,11 +4599,19 @@ fn default_allowed_tools() -> Vec<String> {
     vec![
         "Read".into(),
         "Edit".into(),
+        "Write".into(),
         "Glob".into(),
         "Grep".into(),
-        "LS".into(),
         "Bash".into(),
     ]
+}
+
+fn boss_session_response_timeout_secs() -> u64 {
+    std::env::var("MORGO_BOSS_SESSION_RESPONSE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(120)
 }
 
 fn render_workspace_capability_scope() -> String {
@@ -6163,17 +6171,49 @@ impl BossCoordinator {
             let c = c.clone_for_runtime();
             let app = app.clone();
             Box::pin(async move {
-                c.ensure_b_session(&app, 0).await;
-                let msg = format!(
-                    "Please review the following spec for feasibility, risk, and testability. \
-                     Respond with LGTM if acceptable, or FEEDBACK: <your feedback> if changes are needed.\n\n{spec}"
-                );
-                match c.ask_b_session(&app, msg).await {
+                match c.ask_b_spec_review_stateless(&app, spec).await {
                     Ok(response) => Ok(response),
                     Err(error) => Err(anyhow::anyhow!("executor_b spec review failed: {error}")),
                 }
             })
         })
+    }
+
+    async fn ask_b_spec_review_stateless(
+        &self,
+        app_state: &Arc<crate::state::app_state::AppState>,
+        spec: String,
+    ) -> anyhow::Result<String> {
+        let runtime = app_state
+            .active_model_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("active model runtime not available"))?;
+        let message = format!(
+            "Act as Executor B reviewing Designer A's implementation plan. \
+             Review the following spec for feasibility, risk, source-evidence coverage, and testability. \
+             Respond with LGTM if acceptable, or FEEDBACK: <specific feedback> if changes are needed.\n\n{spec}"
+        );
+        {
+            let mut guard = self.status.write().await;
+            guard.last_b_ask_message = Some(message.clone());
+        }
+        let snapshot = runtime.snapshot().await;
+        let msg = crate::core::message::Message::user(message);
+        let events = snapshot.client.stream_message(&msg).await;
+        let response: String = events
+            .into_iter()
+            .filter_map(|event| {
+                if let crate::service::api::streaming::StreamEvent::TextDelta(text) = event {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if response.trim().is_empty() {
+            anyhow::bail!("stateless executor_b spec review returned empty response");
+        }
+        Ok(response)
     }
 
     /// Ask A to draft a technical spec from `task_description`.
@@ -11689,11 +11729,11 @@ refresh_reason: {}\n\n{}",
         }
 
         // Poll for new output with a timeout.
-        let timeout_secs = 30u64;
+        let timeout_secs = boss_session_response_timeout_secs();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         loop {
             if std::time::Instant::now() >= deadline {
-                anyhow::bail!("A session response timed out after 30s");
+                anyhow::bail!("A session response timed out after {timeout_secs}s");
             }
             if let Some(slice) = tasks.get_output(&task_id, offset_before) {
                 if !slice.content.is_empty() {
@@ -12059,11 +12099,11 @@ refresh_reason: {}\n\n{}",
             anyhow::bail!("B session task {task_id} is not running");
         }
 
-        let timeout_secs = 30u64;
+        let timeout_secs = boss_session_response_timeout_secs();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         loop {
             if std::time::Instant::now() >= deadline {
-                anyhow::bail!("B session response timed out after 30s");
+                anyhow::bail!("B session response timed out after {timeout_secs}s");
             }
             if let Some(slice) = tasks.get_output(&task_id, offset_before) {
                 if !slice.content.is_empty() {

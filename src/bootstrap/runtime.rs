@@ -6598,13 +6598,22 @@ impl RuntimeBootstrap {
                 boss.bind_app_state(app_arc.clone()).await;
                 boss.seed_documentation_plan_for_task(&task_desc).await;
                 let documentation_msg = boss
-                    .finalize_documentation_loop("", "", "non-interactive boss-task approval", "", "")
+                    .finalize_documentation_loop(
+                        "",
+                        "",
+                        "non-interactive boss-task approval",
+                        "",
+                        "",
+                    )
                     .await;
                 println!("[boss-task] documentation result: {:?}", documentation_msg);
-                if documentation_msg.is_ok() {
-                    let approval_msg = boss.handle_user_approval("Y").await;
-                    println!("[boss-task] approval result: {:?}", approval_msg);
+                if let Err(error) = documentation_msg {
+                    anyhow::bail!(
+                        "boss-task documentation/review failed before execution: {error}"
+                    );
                 }
+                let approval_msg = boss.handle_user_approval("Y").await;
+                println!("[boss-task] approval result: {:?}", approval_msg);
                 let advance_msg = boss.advance_plan(&app_arc).await;
                 println!("[boss-task] advance_plan result: {:?}", advance_msg);
                 // Poll until completion or terminal failure.

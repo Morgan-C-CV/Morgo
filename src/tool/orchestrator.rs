@@ -427,7 +427,10 @@ mod tests {
         );
         assert_ne!(outcome.record.kind, ToolExecutionOutcomeKind::Success);
         assert_eq!(outcome.record.summary, "Example failed");
-        assert_eq!(outcome.record.report_modifier, ToolReportModifier::NeedsAttention);
+        assert_eq!(
+            outcome.record.report_modifier,
+            ToolReportModifier::NeedsAttention
+        );
         assert!(
             outcome
                 .record

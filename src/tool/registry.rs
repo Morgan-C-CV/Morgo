@@ -65,6 +65,21 @@ fn one_line_tool_error(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn normalize_tool_call_name(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "read" | "read_file" | "file_read" => "read",
+        "edit" | "edit_file" | "file_edit" => "edit",
+        "write" | "write_file" | "file_write" => "write",
+        "bash" | "run_command" | "shell" => "bash",
+        "grep" | "search_files" | "search_file" => "grep",
+        "glob" => "glob",
+        "ls" | "list_files" | "list_file" => "glob",
+        "agent" | "taskagent" => "agent",
+        _ => name.trim(),
+    }
+    .to_string()
+}
+
 fn format_tool_failure(
     tool_name: &str,
     reason: &str,
@@ -605,9 +620,21 @@ impl ToolRegistry {
     }
 
     pub fn find(&self, call: &ToolCall) -> Option<&Arc<dyn Tool>> {
-        self.tools.iter().find(|tool| {
+        if let Some(tool) = self.tools.iter().find(|tool| {
             let metadata = tool.metadata();
             metadata.name == call.name || metadata.aliases.iter().any(|alias| *alias == call.name)
+        }) {
+            return Some(tool);
+        }
+
+        let normalized = normalize_tool_call_name(&call.name);
+        self.tools.iter().find(|tool| {
+            let metadata = tool.metadata();
+            normalize_tool_call_name(metadata.name) == normalized
+                || metadata
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_tool_call_name(alias) == normalized)
         })
     }
 
@@ -876,6 +903,30 @@ mod tests {
         assert!(text.contains("status=failed"));
         assert!(text.contains("reason=unknown_tool"));
         assert!(text.contains("unknown tool MissingTool"));
+    }
+
+    #[test]
+    fn find_accepts_common_model_tool_aliases() {
+        let registry = ToolRegistry::new()
+            .register(Arc::new(crate::tool::builtin::file_read::FileReadTool))
+            .register(Arc::new(crate::tool::builtin::file_edit::FileEditTool))
+            .register(Arc::new(crate::tool::builtin::file_write::FileWriteTool))
+            .register(Arc::new(crate::tool::builtin::bash::BashTool))
+            .register(Arc::new(crate::tool::builtin::grep::GrepTool))
+            .register(Arc::new(crate::tool::builtin::glob::GlobTool));
+
+        for (alias, canonical) in [
+            ("read_file", "Read"),
+            ("edit_file", "Edit"),
+            ("write_file", "Write"),
+            ("run_command", "Bash"),
+            ("search_files", "Grep"),
+            ("list_files", "Glob"),
+        ] {
+            let call = ToolCall::new(alias, "{}");
+            let found = registry.find(&call).expect("alias should resolve");
+            assert_eq!(found.metadata().name, canonical);
+        }
     }
 
     #[tokio::test]

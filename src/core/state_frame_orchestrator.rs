@@ -1065,8 +1065,7 @@ mod tests {
         let mut frame = worker_frame("fix repository bug and run tests");
         frame.stage_execution_contract.task_profile =
             Some(crate::core::state_frame::TaskProfile::CodeChange);
-        frame.stage_execution_contract.required_actions =
-            vec!["modify".into(), "run_test".into()];
+        frame.stage_execution_contract.required_actions = vec!["modify".into(), "run_test".into()];
         frame.stage_execution_contract.tests = vec![crate::core::state_frame::TestContract {
             name: "auto_code_change_validation".into(),
             required_actions: vec!["run_test".into()],
