@@ -1570,7 +1570,10 @@ impl<'a> OpenAICompatibleStreamParser<'a> {
                         .and_then(|function| function.get("name"))
                         .and_then(Value::as_str)
                     {
-                        pending.name = Some(name.to_string());
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            pending.name = Some(name.to_string());
+                        }
                     }
                     if let Some(arguments) = tool_call
                         .get("function")
@@ -3079,6 +3082,29 @@ mod tests {
                 stop_reason: StopReason::ToolUse
             })
         ));
+    }
+
+    #[test]
+    fn openai_compatible_sse_ignores_empty_tool_name_delta() {
+        let body = concat!(
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_redacted\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"{\\\"file_path\\\":\\\"foo\\\"\"}}]},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-redacted\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"Read\",\"arguments\":\"}\"}}]},\"index\":0,\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events =
+            parse_openai_compatible_sse_response("openai-compatible", body, "default-model")
+                .expect("openai-compatible sse should parse");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUse { tool_name, input }
+                if tool_name == "Read" && input == "{\"file_path\":\"foo\"}"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUse { tool_name, .. } if tool_name.is_empty()
+        )));
     }
 
     #[test]

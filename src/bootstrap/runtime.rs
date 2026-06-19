@@ -8298,6 +8298,7 @@ impl RuntimeBootstrap {
         permission_context = permission_context
             .with_last_activity_ts(last_activity_ts.clone())
             .with_cancellation_token(cancellation_token.clone());
+        apply_env_always_allow_rules(&permission_context);
         let app_state = AppState {
             surface: state.surface,
             session_mode: state.session_mode,
@@ -8451,6 +8452,7 @@ impl RuntimeBootstrap {
                 .as_secs(),
         ));
         let cancellation_token = CancellationToken::new();
+        apply_env_always_allow_rules(&permission_context);
         let mut active_model_snapshot = initialize_bundle.active_model_runtime.snapshot_blocking();
         if let Some(level) = resolved_session.model_level_override {
             let home_root = preferred_home_config_root();
@@ -9179,6 +9181,15 @@ pub fn runtime_shutdown_timeout() -> Duration {
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS);
     Duration::from_millis(timeout_ms)
+}
+
+fn apply_env_always_allow_rules(permission_context: &ToolPermissionContext) {
+    let Ok(raw_rules) = std::env::var("MORGO_ALWAYS_ALLOW_BASH_RULES") else {
+        return;
+    };
+    for rule in raw_rules.split(',').map(str::trim).filter(|rule| !rule.is_empty()) {
+        permission_context.add_always_allow_rule(rule.to_string());
+    }
 }
 
 pub async fn execute_runtime_shutdown(
