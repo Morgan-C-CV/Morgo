@@ -116,17 +116,27 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
                 )
             })
         };
+    let code_change_contract = matches!(
+        frame.stage_execution_contract.task_profile,
+        Some(crate::core::state_frame::TaskProfile::CodeChange)
+    );
     let requires_write = !readonly_contract
-        && frame
-            .stage_execution_contract
-            .declared_artifacts
-            .iter()
-            .any(artifact_requires_write);
+        && (code_change_contract
+            || frame
+                .stage_execution_contract
+                .declared_artifacts
+                .iter()
+                .any(artifact_requires_write)
+            || frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "write" | "modify")));
     let requires_command_execution = !readonly_contract
         && (frame.stage_execution_contract.tests.iter().any(|test| {
             test.required_actions
                 .iter()
-                .any(|action| action == "run_command")
+                .any(|action| matches!(action.as_str(), "run_command" | "run_test"))
         }) || frame
             .stage_execution_contract
             .verifications
@@ -135,8 +145,13 @@ fn infer_preflight_requirements_from_state_frame(frame: &StateFrame) -> ToolCont
                 verification
                     .required_actions
                     .iter()
-                    .any(|action| action == "run_command")
-            }));
+                    .any(|action| matches!(action.as_str(), "run_command" | "run_test"))
+            })
+            || frame
+                .stage_execution_contract
+                .required_actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "run_command" | "run_test")));
     let writable_probe_path = frame
         .stage_execution_contract
         .declared_artifacts
@@ -1039,6 +1054,22 @@ mod tests {
         let mut frame = worker_frame("read-only review run");
         frame.required_output_schema = Some("readonly_audit_4_paragraphs_v1".into());
         assert!(!requires_external_tool_execution(&frame, false));
+    }
+
+    #[test]
+    fn code_change_contract_requires_external_tool_execution_without_direct_runtime() {
+        let mut frame = worker_frame("fix repository bug and run tests");
+        frame.stage_execution_contract.task_profile =
+            Some(crate::core::state_frame::TaskProfile::CodeChange);
+        frame.stage_execution_contract.required_actions =
+            vec!["modify".into(), "run_test".into()];
+        frame.stage_execution_contract.tests = vec![crate::core::state_frame::TestContract {
+            name: "auto_code_change_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        }];
+
+        assert!(requires_external_tool_execution(&frame, false));
     }
 
     #[tokio::test]

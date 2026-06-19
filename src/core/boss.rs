@@ -3287,6 +3287,66 @@ fn seed_step_acceptance(task: &str) -> Vec<String> {
     acceptance
 }
 
+fn infer_stage_execution_contract_for_task(task: &str) -> StageExecutionContract {
+    if let Some(contract) = parse_embedded_stage_execution_contract(task) {
+        return contract;
+    }
+
+    let lowered = task.to_ascii_lowercase();
+    let looks_like_code_change = [
+        "swe-bench",
+        "repository",
+        "repo",
+        "fix",
+        "bug",
+        "patch",
+        "modify",
+        "code",
+        "test",
+        "implementation",
+        "resolve the issue",
+        "修复",
+        "修改",
+        "代码",
+        "测试",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle));
+
+    if looks_like_code_change {
+        return StageExecutionContract {
+            review_mode: Some(ReviewMode::IndependentReview),
+            task_profile: Some(TaskProfile::CodeChange),
+            requires_source_evidence: Some(true),
+            tests: vec![TestContract {
+                name: "auto_code_change_validation".into(),
+                required_actions: vec!["run_test".into(), "run_command".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+            }],
+            required_actions: vec![
+                "read_source".into(),
+                "modify".into(),
+                "write".into(),
+                "run_test".into(),
+                "run_command".into(),
+            ],
+            required_evidence: vec![
+                "source_evidence_read".into(),
+                "repository_diff".into(),
+                "runtime_test_passed".into(),
+            ],
+            ..StageExecutionContract::default()
+        };
+    }
+
+    StageExecutionContract {
+        review_mode: Some(ReviewMode::IndependentReview),
+        task_profile: Some(TaskProfile::IndependentReview),
+        requires_source_evidence: Some(false),
+        ..StageExecutionContract::default()
+    }
+}
+
 fn parse_embedded_stage_execution_contract(task: &str) -> Option<StageExecutionContract> {
     const START_MARKER: &str = "```stage_execution_contract";
     let (_, tail) = task.split_once(START_MARKER)?;
@@ -7399,13 +7459,7 @@ impl BossCoordinator {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let default_stage_execution_contract = parse_embedded_stage_execution_contract(task)
-            .unwrap_or_else(|| StageExecutionContract {
-                review_mode: Some(ReviewMode::IndependentReview),
-                task_profile: Some(TaskProfile::IndependentReview),
-                requires_source_evidence: Some(false),
-                ..StageExecutionContract::default()
-            });
+        let default_stage_execution_contract = infer_stage_execution_contract_for_task(task);
         let plan = BossPlan {
             plan_id: plan_id.clone(),
             task_description: task.to_string(),
@@ -7469,13 +7523,7 @@ impl BossCoordinator {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let default_stage_execution_contract = parse_embedded_stage_execution_contract(task)
-            .unwrap_or_else(|| StageExecutionContract {
-                review_mode: Some(ReviewMode::IndependentReview),
-                task_profile: Some(TaskProfile::IndependentReview),
-                requires_source_evidence: Some(false),
-                ..StageExecutionContract::default()
-            });
+        let default_stage_execution_contract = infer_stage_execution_contract_for_task(task);
         let plan = BossPlan {
             plan_id: plan_id.clone(),
             task_description: task.to_string(),
@@ -12426,6 +12474,51 @@ mod tests {
                 .iter()
                 .any(|item| item == "runtime_test_passed")
         );
+    }
+
+    #[test]
+    fn infers_code_change_contract_for_natural_language_swe_task() {
+        let task = r#"You are working on a SWE-bench Lite task.
+
+Repository: sqlfluff/sqlfluff
+Problem statement:
+Fix the formatter bug and modify the checked out repository.
+Requirements:
+- Modify the checked out repository to resolve the issue.
+- Run tests or validation if useful.
+"#;
+
+        let contract = infer_stage_execution_contract_for_task(task);
+
+        assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
+        assert_eq!(contract.task_profile, Some(TaskProfile::CodeChange));
+        assert_eq!(contract.requires_source_evidence, Some(true));
+        assert!(contract.tests.iter().any(|test| {
+            test.required_actions
+                .iter()
+                .any(|action| action == "run_test")
+                && test
+                    .required_actions
+                    .iter()
+                    .any(|action| action == "run_command")
+        }));
+        assert!(
+            contract
+                .required_evidence
+                .iter()
+                .any(|item| item == "repository_diff")
+        );
+    }
+
+    #[test]
+    fn infers_independent_review_contract_for_plain_audit_task() {
+        let contract =
+            infer_stage_execution_contract_for_task("Review the design notes and summarize risks.");
+
+        assert_eq!(contract.review_mode, Some(ReviewMode::IndependentReview));
+        assert_eq!(contract.task_profile, Some(TaskProfile::IndependentReview));
+        assert_eq!(contract.requires_source_evidence, Some(false));
+        assert!(contract.tests.is_empty());
     }
 
     fn test_app_state_with_tasks(
