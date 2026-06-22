@@ -6176,6 +6176,29 @@ fn step_terminal_from_tracked_ids(
         || task_is_terminal(task_manager, current_step_task_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BossTaskRunOutcome {
+    Completed,
+    TerminalFailure,
+    TimedOut,
+    MissingCoordinator,
+}
+
+impl BossTaskRunOutcome {
+    fn is_success(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    fn failure_reason(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::TerminalFailure => "boss task reached terminal failure",
+            Self::TimedOut => "boss task timed out",
+            Self::MissingCoordinator => "boss coordinator unavailable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownFailure {
     ForceDrainTimedOut,
@@ -6594,7 +6617,9 @@ impl RuntimeBootstrap {
 
         if let Some(task_desc) = self.cli.boss_task.clone() {
             let app_arc = Arc::new(app_state.clone());
+            let mut boss_task_outcome = BossTaskRunOutcome::MissingCoordinator;
             if let Some(boss) = app_arc.boss_coordinator.as_ref() {
+                boss_task_outcome = BossTaskRunOutcome::TimedOut;
                 boss.bind_app_state(app_arc.clone()).await;
                 boss.seed_documentation_plan_for_task(&task_desc).await;
                 let documentation_msg = boss
@@ -6628,6 +6653,7 @@ impl RuntimeBootstrap {
                     }
                     let stage = boss.get_stage().await;
                     if matches!(stage, crate::core::boss_state::BossStage::Completed) {
+                        boss_task_outcome = BossTaskRunOutcome::Completed;
                         break;
                     }
                     if boss.has_terminal_failure().await {
@@ -6637,6 +6663,7 @@ impl RuntimeBootstrap {
                             "[boss-task] terminal advance_plan result: {:?}",
                             terminal_msg
                         );
+                        boss_task_outcome = BossTaskRunOutcome::TerminalFailure;
                         break;
                     }
                     // If the tracked B task is terminal, keep draining events until Boss catches up.
@@ -6675,6 +6702,7 @@ impl RuntimeBootstrap {
                             boss.get_stage().await,
                             crate::core::boss_state::BossStage::Completed
                         ) {
+                            boss_task_outcome = BossTaskRunOutcome::Completed;
                             break;
                         }
                         let live_tail_task = if let Some(task_manager) =
@@ -6708,6 +6736,7 @@ impl RuntimeBootstrap {
                             println!(
                                 "[boss-task] terminal tail stalled after child completion; emitted terminal sample"
                             );
+                            boss_task_outcome = BossTaskRunOutcome::TerminalFailure;
                             break;
                         }
                     }
@@ -6728,6 +6757,7 @@ impl RuntimeBootstrap {
                             0,
                         )
                         .await;
+                        boss_task_outcome = BossTaskRunOutcome::TimedOut;
                         break;
                     }
                     tick += 1;
@@ -6783,6 +6813,9 @@ impl RuntimeBootstrap {
                 }
             } else {
                 println!("[boss-task] no BossCoordinator available");
+            }
+            if !boss_task_outcome.is_success() {
+                anyhow::bail!("{}", boss_task_outcome.failure_reason());
             }
             return Ok(());
         }
