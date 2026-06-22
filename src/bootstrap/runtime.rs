@@ -6619,7 +6619,6 @@ impl RuntimeBootstrap {
             let app_arc = Arc::new(app_state.clone());
             let mut boss_task_outcome = BossTaskRunOutcome::MissingCoordinator;
             if let Some(boss) = app_arc.boss_coordinator.as_ref() {
-                boss_task_outcome = BossTaskRunOutcome::TimedOut;
                 boss.bind_app_state(app_arc.clone()).await;
                 boss.seed_documentation_plan_for_task(&task_desc).await;
                 let documentation_msg = boss
@@ -10031,6 +10030,18 @@ mod tests {
             Some(stale.id.as_str()),
             Some(current.id.as_str())
         ));
+    }
+
+    #[test]
+    fn boss_task_run_outcome_only_treats_completed_as_success() {
+        assert!(super::BossTaskRunOutcome::Completed.is_success());
+        assert!(!super::BossTaskRunOutcome::TerminalFailure.is_success());
+        assert!(!super::BossTaskRunOutcome::TimedOut.is_success());
+        assert!(!super::BossTaskRunOutcome::MissingCoordinator.is_success());
+        assert_eq!(
+            super::BossTaskRunOutcome::TerminalFailure.failure_reason(),
+            "boss task reached terminal failure"
+        );
     }
 
     #[test]
