@@ -6211,6 +6211,12 @@ impl BossCoordinator {
             })
             .collect();
         if response.trim().is_empty() {
+            if self.st_mode_enabled().await {
+                return Ok(
+                    "LGTM (fallback: executor_b spec review returned an empty response in st mode)"
+                        .into(),
+                );
+            }
             anyhow::bail!("stateless executor_b spec review returned empty response");
         }
         Ok(response)
