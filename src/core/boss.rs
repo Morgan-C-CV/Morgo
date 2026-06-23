@@ -7633,7 +7633,7 @@ impl BossCoordinator {
                 result_diff: None,
                 worker_task_id: None,
                 attempt_count: 0,
-                retry_budget: 3,
+                retry_budget: 6,
                 last_review_summary: None,
                 last_correction: None,
                 stage_execution_contract: default_stage_execution_contract,
@@ -7697,7 +7697,7 @@ impl BossCoordinator {
                 result_diff: None,
                 worker_task_id: None,
                 attempt_count: 0,
-                retry_budget: 3,
+                retry_budget: 6,
                 last_review_summary: None,
                 last_correction: None,
                 stage_execution_contract: default_stage_execution_contract,
@@ -12660,6 +12660,19 @@ mod tests {
                 .iter()
                 .any(|item| item == "runtime_test_passed")
         );
+    }
+
+    #[tokio::test]
+    async fn boss_task_seed_uses_six_attempt_retry_budget() {
+        let coordinator = BossCoordinator::new();
+        coordinator.seed_plan_for_task("Fix a code bug").await;
+
+        let plan = coordinator.plan.read().await;
+        let step = plan
+            .as_ref()
+            .and_then(|plan| plan.steps.first())
+            .expect("seeded step");
+        assert_eq!(step.retry_budget, 6);
     }
 
     #[test]

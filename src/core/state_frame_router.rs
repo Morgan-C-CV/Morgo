@@ -11,8 +11,18 @@ fn allowed_actions_for_route(route: &ToolsetRoute) -> Vec<String> {
     match route.toolset_id.as_deref() {
         Some("designer-planning") => vec!["read_file".into(), "write_spec".into()],
         Some("designer-review") => vec!["read_file".into(), "summarize_findings".into()],
-        Some("executor-edit") => vec!["read_file".into(), "edit_file".into(), "run_test".into()],
-        Some("worker-minimal") => vec!["read_file".into(), "edit_file".into(), "run_test".into()],
+        Some("executor-edit") => vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "run_command".into(),
+            "run_test".into(),
+        ],
+        Some("worker-minimal") => vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "run_command".into(),
+            "run_test".into(),
+        ],
         Some("verifier-readonly") => vec!["read_file".into(), "summarize_findings".into()],
         Some("summarizer-readonly") => vec!["read_file".into(), "summarize_findings".into()],
         None => vec!["read_file".into()],
@@ -43,7 +53,7 @@ pub fn route_toolset(frame: &StateFrame) -> ToolsetRoute {
     }
     if independent_review_requires_runtime_verification(frame) {
         return ToolsetRoute {
-            toolset_id: Some("verifier-readonly".into()),
+            toolset_id: Some("worker-minimal".into()),
             skillset_id: Some("acceptance-checker".into()),
         };
     }
@@ -152,7 +162,7 @@ pub fn apply_route(frame: &mut StateFrame, route: ToolsetRoute) {
 
 #[cfg(test)]
 mod tests {
-    use super::route_toolset;
+    use super::{apply_route, route_toolset};
     use crate::core::state_frame::{
         ActorRole, AgentState, DeclaredArtifactContract, ReviewMode, StageExecutionContract,
         StateBudget, StateFrame, VerificationContract,
@@ -195,10 +205,15 @@ mod tests {
     }
 
     #[test]
-    fn independent_review_with_verification_contract_routes_to_verifier_readonly() {
+    fn independent_review_with_verification_contract_routes_to_runtime_verifier() {
         let frame = verification_review_frame();
         let route = route_toolset(&frame);
-        assert_eq!(route.toolset_id.as_deref(), Some("verifier-readonly"));
+        assert_eq!(route.toolset_id.as_deref(), Some("worker-minimal"));
         assert_eq!(route.skillset_id.as_deref(), Some("acceptance-checker"));
+
+        let mut routed = frame;
+        apply_route(&mut routed, route);
+        assert!(routed.allowed_actions.contains(&"run_command".into()));
+        assert!(routed.allowed_actions.contains(&"run_test".into()));
     }
 }

@@ -2798,7 +2798,9 @@ mod tests {
             frame.required_output_schema.as_deref(),
             Some("state_decision_v1")
         );
-        assert_eq!(frame.toolset_id.as_deref(), Some("verifier-readonly"));
+        assert_eq!(frame.toolset_id.as_deref(), Some("worker-minimal"));
+        assert!(frame.allowed_actions.contains(&"run_command".into()));
+        assert!(frame.allowed_actions.contains(&"run_test".into()));
     }
 
     #[test]

@@ -532,7 +532,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         append_review_mode_section(&mut task, request.review_mode.as_deref());
         if request.st_mode {
             task.push_str(
-                "\n<st-mode>\nprefer a deterministic automated validation command or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence\n</st-mode>",
+                "\n<st-mode>\nRun the relevant automated test command and report the exact command, result, and minimal runtime evidence. If dependencies, pytest, editable installs, or imports are missing, repair the repo-local environment and rerun. Do not use smoke checks, syntax-only checks, build-only checks, or prose as a substitute for automated test evidence.\n</st-mode>",
             );
         }
         return task;
@@ -574,7 +574,7 @@ fn build_worker_task_input(request: &SpawnAgentRequest) -> String {
         if request.st_mode {
             sections.push("st_mode: true".into());
             sections.push(
-                "test_first_validation: prefer a deterministic automated test or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence.".into(),
+                "test_first_validation: run the relevant automated test command and report the exact command, result, and minimal runtime evidence. Missing dependencies or pytest require repo-local environment repair and rerun. Smoke checks, syntax-only checks, build-only checks, and prose do not substitute for automated test evidence.".into(),
             );
         }
         if let Some(continuation) = request.continuation_context.as_ref() {
@@ -796,7 +796,7 @@ fn build_continue_task_input(
         if context.st_mode {
             sections.push("st_mode: true".into());
             sections.push(
-                "test_first_validation: prefer a deterministic automated test or smoke check before extra repair prose; report the exact command, result, and minimal runtime evidence.".into(),
+                "test_first_validation: run the relevant automated test command and report the exact command, result, and minimal runtime evidence. Missing dependencies or pytest require repo-local environment repair and rerun. Smoke checks, syntax-only checks, build-only checks, and prose do not substitute for automated test evidence.".into(),
             );
         }
         if let Some(continuation) = context.continuation_context.as_ref() {
@@ -1477,7 +1477,8 @@ mod tests {
         let input = build_worker_task_input(&request);
         assert!(input.contains("st_mode: true"));
         assert!(input.contains("test_first_validation"));
-        assert!(input.contains("deterministic automated test or smoke check"));
+        assert!(input.contains("run the relevant automated test command"));
+        assert!(input.contains("do not substitute for automated test evidence"));
     }
 
     #[test]
