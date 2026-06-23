@@ -2842,6 +2842,62 @@ fn compact_continuation_text(value: &str) -> String {
     truncated.trim().to_string()
 }
 
+fn compact_worker_failure_summary(value: &str) -> String {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    let mut selected = Vec::new();
+    for line in normalized.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let lowered = line.to_ascii_lowercase();
+        if lowered.contains("pytest")
+            || lowered.starts_with("failed")
+            || lowered.contains(" failed")
+            || lowered.contains(" failed,")
+            || lowered.contains("failed:")
+            || lowered.contains("error:")
+            || lowered.contains("traceback")
+            || lowered.contains("provider_timeout")
+            || lowered.contains("timeout")
+            || lowered.contains("compaction requested")
+            || lowered.contains("boss review verdict")
+            || lowered.contains("runtime_test_passed")
+            || lowered.contains("exit code")
+        {
+            let compact = compact_continuation_text(line);
+            if !selected.iter().any(|existing| existing == &compact) {
+                selected.push(compact);
+            }
+        }
+        if selected.len() >= 8 {
+            break;
+        }
+    }
+
+    if selected.is_empty() {
+        for line in normalized.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let compact = compact_continuation_text(line);
+            if !selected.iter().any(|existing| existing == &compact) {
+                selected.push(compact);
+            }
+            if selected.len() >= 4 {
+                break;
+            }
+        }
+    }
+
+    let summary = selected.join(" | ");
+    if summary.len() <= 1200 {
+        return summary;
+    }
+    let mut truncated = summary.chars().take(1200).collect::<String>();
+    if let Some(idx) = truncated.rfind(' ') {
+        truncated.truncate(idx);
+    }
+    format!("{} [worker failure output truncated]", truncated.trim())
+}
+
 fn push_unique_required_evidence(targets: &mut Vec<String>, target: impl Into<String>) {
     let target = normalize_required_evidence_target(&target.into());
     if target.is_empty() || targets.iter().any(|existing| existing == &target) {
@@ -8934,7 +8990,8 @@ impl BossCoordinator {
                                 Some(&event.summary),
                             ))
                         } else {
-                            Some(event.result.clone()).filter(|text| !text.trim().is_empty())
+                            Some(compact_worker_failure_summary(&event.result))
+                                .filter(|text| !text.trim().is_empty())
                         }
                     })
                     .or_else(|| {
@@ -8945,7 +9002,8 @@ impl BossCoordinator {
                                 None,
                             ))
                         } else {
-                            Some(event.summary.clone()).filter(|text| !text.trim().is_empty())
+                            Some(compact_worker_failure_summary(&event.summary))
+                                .filter(|text| !text.trim().is_empty())
                         }
                     });
                 if artifact_verification_reason.is_none() {
@@ -9823,8 +9881,7 @@ impl BossCoordinator {
                                 .body
                                 .split("Result: ")
                                 .nth(1)
-                                .map(str::trim)
-                                .map(str::to_string)
+                                .map(compact_worker_failure_summary)
                                 .filter(|text| !text.is_empty())
                         }
                     })
@@ -9839,6 +9896,7 @@ impl BossCoordinator {
                             notification
                                 .next_action
                                 .clone()
+                                .map(|value| compact_worker_failure_summary(&value))
                                 .filter(|text| !text.trim().is_empty())
                         }
                     });
@@ -19773,6 +19831,22 @@ Requirements:
 
         let payload = build_continuation_payload(&assignment);
         assert_eq!(payload.next_action.as_deref(), Some("repair_artifact"));
+    }
+
+    #[test]
+    fn worker_failure_summary_is_bounded_and_keeps_actionable_test_signal() {
+        let huge_noise = "read:src/sqlfluff/rules/L003.py ".repeat(4000);
+        let raw = format!(
+            "{huge_noise}\npython -m pytest test/rules/std_L003_L036_L039_combo_test.py -q\nFAILED test/rules/std_L003_L036_L039_combo_test.py::test__rules__std_L003_L036_L039\n1 failed, 3 passed in 2.31s\ncompaction requested before continuing the turn\n{huge_noise}"
+        );
+
+        let summary = compact_worker_failure_summary(&raw);
+
+        assert!(summary.len() <= 1300);
+        assert!(summary.contains("pytest"));
+        assert!(summary.contains("FAILED test/rules/std_L003_L036_L039_combo_test.py"));
+        assert!(summary.contains("compaction requested"));
+        assert!(!summary.contains(&huge_noise[..2000]));
     }
 
     #[tokio::test]
