@@ -126,6 +126,77 @@ fn contract_requires_verification_evidence(contract: &StageExecutionContract) ->
         })
 }
 
+fn contract_requires_runtime_test_evidence(contract: &StageExecutionContract) -> bool {
+    contract.required_actions.iter().any(|action| action == "run_test")
+        || contract
+            .required_evidence
+            .iter()
+            .any(|item| item == "runtime_test_passed")
+        || contract.tests.iter().any(|test| {
+            test.required_actions.iter().any(|action| action == "run_test")
+                || test
+                    .required_evidence
+                    .iter()
+                    .any(|item| item == "runtime_test_passed")
+        })
+}
+
+fn strong_runtime_test_command(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    (lowered.contains("cargo test")
+        || lowered.contains("pytest")
+        || lowered.contains("pnpm test")
+        || lowered.contains("npm test")
+        || lowered.contains("yarn test")
+        || lowered.contains("go test")
+        || lowered.contains("jest")
+        || lowered.contains("vitest")
+        || lowered.contains("bun test")
+        || lowered.contains("uv run pytest"))
+        && !weak_validation_command(command)
+}
+
+fn weak_validation_command(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("py_compile")
+        || lowered.contains("bash -n")
+        || lowered.contains("sh -n")
+        || lowered.contains("node --check")
+        || lowered.contains("cargo check")
+        || lowered.contains("pnpm build")
+        || lowered.contains("npm run build")
+        || lowered.contains("yarn build")
+        || lowered.contains("tsc")
+}
+
+fn worker_report_has_runtime_test_evidence(
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    if report.completion_evidence_status != CompletionEvidenceStatus::Sufficient {
+        return false;
+    }
+    if report
+        .completion_evidence_gaps
+        .iter()
+        .any(|gap| gap.missing_test_evidence)
+    {
+        return false;
+    }
+    let has_test_ref = report
+        .evidence_refs
+        .iter()
+        .any(|evidence_ref| evidence_ref.starts_with("test:"));
+    let has_strong_test_command = report
+        .tests_run
+        .iter()
+        .any(|command| strong_runtime_test_command(command));
+    let test_status_passed = matches!(
+        report.test_status.to_ascii_lowercase().as_str(),
+        "passed" | "pass" | "verified"
+    );
+    has_test_ref || (has_strong_test_command && test_status_passed)
+}
+
 fn step_completion_gate_error(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
@@ -144,7 +215,31 @@ fn step_completion_gate_error(
         metadata.worker_report.as_ref().is_some_and(|report| {
             contract_requires_verification_evidence(&report.stage_execution_contract)
         });
-    if !step_requires_verification_evidence(step) && !report_contract_requires_verification {
+    let step_contract_requires_runtime_test =
+        contract_requires_runtime_test_evidence(&step.stage_execution_contract);
+    let report_contract_requires_runtime_test = metadata.worker_report.as_ref().is_some_and(
+        |report| contract_requires_runtime_test_evidence(&report.stage_execution_contract),
+    );
+    if step_contract_requires_runtime_test || report_contract_requires_runtime_test {
+        let runtime_test_satisfied = metadata
+            .worker_report
+            .as_ref()
+            .is_some_and(worker_report_has_runtime_test_evidence);
+        if !runtime_test_satisfied {
+            return Some((
+                "completion gate rejected direct completion: runtime_test_passed evidence still missing or weak validation was used".into(),
+                StepFailureClassification::VerificationRepairContinuation,
+            ));
+        }
+        if !step_requires_verification_evidence(step) && !report_contract_requires_verification {
+            return None;
+        }
+    }
+    if !step_requires_verification_evidence(step)
+        && !report_contract_requires_verification
+        && !step_contract_requires_runtime_test
+        && !report_contract_requires_runtime_test
+    {
         return None;
     }
     let completion_sufficient = matches!(
@@ -1821,7 +1916,7 @@ fn general_worker_output_contract() -> String {
 }
 
 fn development_test_output_contract() -> String {
-    "Return concise implementation status plus the automated validation command, its outcome, and the minimal runtime evidence that the command passed. If the task has multiple input/output cases, edge conditions, or failure paths, proactively add the smallest representative extra test cases and report them. Do not treat this as a hard gate; prioritize coverage guidance and explain any omitted cases briefly. Do not omit the test command when validation was run.".into()
+    "Return concise implementation status plus the automated validation command, its outcome, and the minimal runtime evidence that the command passed. The automated validation command is a hard gate for code-change tasks in ST mode. If dependencies, pytest, editable installs, or import paths are missing, repair the repo-local test environment and rerun the relevant tests. Do not count py_compile, syntax-only checks, build-only checks, git diff, file existence checks, or self-authored smoke snippets as a replacement for automated tests. If official or targeted automated tests remain impossible after concrete environment repair attempts, report outcome: failed with the exact blocker and setup attempts. Do not omit the test command.".into()
 }
 
 fn target_scoped_verification_evidence(step: &BossPlanStep) -> Vec<String> {
@@ -11098,7 +11193,7 @@ impl BossCoordinator {
                 .collect::<Vec<_>>();
             if development_test_mode {
                 acceptance.push(
-                    "Run at least one deterministic automated validation command and include its pass/fail outcome in the final report. If the task spans multiple input/output cases or edge conditions, proactively add the smallest representative extra tests and mention them in the report; this is guidance, not a hard gate.".into(),
+                    "Run deterministic automated validation and include the pass/fail outcome in the final report. In ST mode this is a hard gate: missing dependencies or pytest require repo-local environment repair and rerun; py_compile, syntax-only checks, build-only checks, git diff, file existence checks, and self-authored smoke snippets do not replace automated tests.".into(),
                 );
             }
             acceptance
@@ -14838,6 +14933,126 @@ Requirements:
             failure.1,
             StepFailureClassification::VerificationRepairContinuation
         );
+    }
+
+    #[test]
+    fn st_runtime_test_gate_rejects_weak_validation_commands() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: vec!["runtime tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 6,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                task_profile: Some(TaskProfile::CodeChange),
+                tests: vec![TestContract {
+                    name: "st_auto_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: vec!["src/lib.py".into()],
+                tests_run: vec!["python -m py_compile src/lib.py".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: Vec::new(),
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("weak validation must not satisfy ST runtime test gate");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+        assert!(failure.0.contains("runtime_test_passed"));
+    }
+
+    #[test]
+    fn st_runtime_test_gate_accepts_strong_test_command() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: vec!["runtime tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 6,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                task_profile: Some(TaskProfile::CodeChange),
+                tests: vec![TestContract {
+                    name: "st_auto_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: vec!["src/lib.py".into()],
+                tests_run: vec!["python -m pytest tests/test_lib.py::test_fix".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["test:step0:bash".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        assert_eq!(step_completion_gate_error(&step, Some(&metadata)), None);
     }
 
     #[test]

@@ -224,7 +224,7 @@ impl Default for BossPlanStep {
 }
 
 fn default_retry_budget() -> u32 {
-    3
+    6
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
