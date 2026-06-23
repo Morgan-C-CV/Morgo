@@ -182,10 +182,6 @@ fn worker_report_has_runtime_test_evidence(
     {
         return false;
     }
-    let has_test_ref = report
-        .evidence_refs
-        .iter()
-        .any(|evidence_ref| evidence_ref.starts_with("test:"));
     let has_strong_test_command = report
         .tests_run
         .iter()
@@ -194,7 +190,7 @@ fn worker_report_has_runtime_test_evidence(
         report.test_status.to_ascii_lowercase().as_str(),
         "passed" | "pass" | "verified"
     );
-    has_test_ref || (has_strong_test_command && test_status_passed)
+    has_strong_test_command && test_status_passed
 }
 
 fn step_tool_records_have_runtime_test_pass(step: &BossPlanStep) -> bool {
@@ -561,7 +557,12 @@ fn record_boss_loop_guard(
         step.last_loop_fingerprint = Some(fingerprint);
         step.same_loop_fingerprint_count = 1;
     }
-    if step.same_loop_fingerprint_count >= 2 {
+    let limit = if contract_requires_runtime_test_evidence(&step.stage_execution_contract) {
+        6
+    } else {
+        2
+    };
+    if step.same_loop_fingerprint_count >= limit {
         let reason = "verification_loop_guard_exhausted".to_string();
         step.loop_guard_terminal_reason = Some(reason.clone());
         return BossLoopGuardDecision::Terminal(reason);
@@ -2974,6 +2975,18 @@ fn continuation_required_evidence_targets(
 ) -> Vec<String> {
     let mut targets = Vec::new();
     let action = next_action.unwrap_or_default();
+    if action == "run_required_runtime_tests_after_environment_repair" {
+        for test in &step.stage_execution_contract.tests {
+            for evidence in &test.required_evidence {
+                push_unique_required_evidence(&mut targets, evidence.clone());
+            }
+        }
+        for evidence in &step.stage_execution_contract.required_evidence {
+            if evidence == "runtime_test_passed" {
+                push_unique_required_evidence(&mut targets, evidence.clone());
+            }
+        }
+    }
     if action == "read_source_evidence"
         && !step
             .stage_execution_contract
@@ -3039,6 +3052,9 @@ fn continuation_modification_direction(
     required_evidence_targets: &[String],
 ) -> String {
     match next_action.unwrap_or_default() {
+        "run_required_runtime_tests_after_environment_repair" => {
+            "Repair the repo-local test environment if pytest, dependencies, editable installs, or imports are missing; then run the required automated tests and capture the exact command, exit code, and passing runtime output before claiming completion.".into()
+        }
         "worker_correction" => {
             "Run the required demo or validation command, capture stdout/stderr and exit code, then report the exact runtime evidence before claiming completion.".into()
         }
@@ -9541,11 +9557,18 @@ impl BossCoordinator {
                         } else {
                             verification_gap_target(step, routed_metadata.as_ref())
                         };
+                        let runtime_test_repair_requested =
+                            requested_action == "restricted_verification"
+                                && contract_requires_runtime_test_evidence(
+                                    &step.stage_execution_contract,
+                                );
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
                             failed_target,
-                            Some(if requested_action == "restricted_verification" {
+                            Some(if runtime_test_repair_requested {
+                                "run_required_runtime_tests_after_environment_repair".into()
+                            } else if requested_action == "restricted_verification" {
                                 "read_source_evidence".into()
                             } else {
                                 requested_action.clone()
@@ -15163,6 +15186,127 @@ Requirements:
         };
 
         assert_eq!(step_completion_gate_error(&step, Some(&metadata)), None);
+    }
+
+    #[test]
+    fn st_runtime_test_gate_rejects_report_test_ref_without_command() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: vec!["runtime tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 6,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                task_profile: Some(TaskProfile::CodeChange),
+                tests: vec![TestContract {
+                    name: "st_auto_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: vec!["src/lib.py".into()],
+                tests_run: Vec::new(),
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["test:step0:bash".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("test refs without a strong command must not satisfy ST runtime gate");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+    }
+
+    #[test]
+    fn st_runtime_test_loop_guard_allows_five_repairs_before_terminal() {
+        let mut step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: vec!["runtime tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Rejected,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            review_task_id: None,
+            attempt_count: 0,
+            retry_budget: 6,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                task_profile: Some(TaskProfile::CodeChange),
+                tests: vec![TestContract {
+                    name: "st_auto_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                required_actions: vec!["run_test".into()],
+                required_evidence: vec!["runtime_test_passed".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: Some(crate::core::state_frame::StageContinuationContext {
+                repair_intent: Some(crate::core::state_frame::RepairIntent {
+                    failed_target: Some("runtime_test_passed".into()),
+                    verified_facts: Vec::new(),
+                    next_action: Some(
+                        "run_required_runtime_tests_after_environment_repair".into(),
+                    ),
+                    continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+                }),
+                failed_target: Some("runtime_test_passed".into()),
+                verified_facts: Vec::new(),
+                next_action: Some("run_required_runtime_tests_after_environment_repair".into()),
+                continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
+            }),
+            executor_b_stage_memory: None,
+            tool_execution_records: Vec::new(),
+            ..Default::default()
+        };
+
+        for _ in 0..5 {
+            assert_eq!(
+                record_boss_loop_guard(&mut step, None),
+                BossLoopGuardDecision::Continue
+            );
+        }
+        assert!(matches!(
+            record_boss_loop_guard(&mut step, None),
+            BossLoopGuardDecision::Terminal(_)
+        ));
     }
 
     #[test]
