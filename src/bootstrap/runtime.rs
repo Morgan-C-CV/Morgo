@@ -6119,6 +6119,34 @@ fn preview_chars(value: &str, max_chars: usize) -> &str {
 }
 
 fn diagnostic_preview(value: &str, max_chars: usize) -> String {
+    let mut selected = Vec::new();
+    for line in value.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let lowered = line.to_ascii_lowercase();
+        if lowered.contains("pytest")
+            || lowered.starts_with("failed")
+            || lowered.contains(" failed")
+            || lowered.contains("error:")
+            || lowered.contains("traceback")
+            || lowered.contains("provider_request_failed")
+            || lowered.contains("provider_timeout")
+            || lowered.contains("compaction requested")
+            || lowered.contains("runtime_test_passed")
+            || lowered.contains("boss-task")
+        {
+            let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let compact = preview_chars(&compact, 240).trim().to_string();
+            if !compact.is_empty() && !selected.iter().any(|existing| existing == &compact) {
+                selected.push(compact);
+            }
+        }
+        if selected.len() >= 10 {
+            break;
+        }
+    }
+    if !selected.is_empty() {
+        return selected.join("\n");
+    }
+
     let total = value.chars().count();
     if total <= max_chars {
         return value.to_string();
@@ -6135,6 +6163,15 @@ fn diagnostic_preview(value: &str, max_chars: usize) -> String {
         total.saturating_sub(max_chars),
         &value[tail_start..]
     )
+}
+
+fn diagnostic_advance_result(
+    result: &anyhow::Result<Option<String>>,
+) -> anyhow::Result<Option<String>> {
+    result
+        .as_ref()
+        .map(|value| value.as_ref().map(|text| diagnostic_preview(text, 1_000)))
+        .map_err(|err| anyhow::anyhow!("{err:?}"))
 }
 
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS: u64 = 1_500;
@@ -6622,7 +6659,10 @@ impl RuntimeBootstrap {
                 boss.bind_app_state(app_arc.clone()).await;
                 boss.seed_plan_for_task(&task_desc).await;
                 let advance_msg = boss.advance_plan(&app_arc).await;
-                println!("[boss-task] advance_plan result: {:?}", advance_msg);
+                println!(
+                    "[boss-task] advance_plan result: {:?}",
+                    diagnostic_advance_result(&advance_msg)
+                );
                 // Poll until completion or terminal failure.
                 let timeout = std::time::Duration::from_secs(self.cli.boss_task_timeout_secs);
                 let deadline = std::time::Instant::now() + timeout;
@@ -6643,7 +6683,7 @@ impl RuntimeBootstrap {
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
-                            terminal_msg
+                            diagnostic_advance_result(&terminal_msg)
                         );
                         boss_task_outcome = BossTaskRunOutcome::TerminalFailure;
                         break;
@@ -6678,7 +6718,7 @@ impl RuntimeBootstrap {
                         let terminal_msg = boss.advance_plan(&app_arc).await;
                         println!(
                             "[boss-task] terminal advance_plan result: {:?}",
-                            terminal_msg
+                            diagnostic_advance_result(&terminal_msg)
                         );
                         if matches!(
                             boss.get_stage().await,
@@ -6772,7 +6812,7 @@ impl RuntimeBootstrap {
                         if let Some(slice) = task_manager.get_output(&b_id, 0) {
                             println!(
                                 "[boss-task] b_task output (diagnostic head/tail): {:?}",
-                                diagnostic_preview(&slice.content, 4_000)
+                                diagnostic_preview(&slice.content, 1_000)
                             );
                         }
                     }
