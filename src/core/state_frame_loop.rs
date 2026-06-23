@@ -1885,6 +1885,7 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
     }
     if completion_contract_requirement(frame, "test_evidence")
         && !missing_test_evidence_refs(frame).is_empty()
+        && !usage_runtime_test_passed(usage)
     {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
@@ -9168,6 +9169,45 @@ mod tests {
         assert!(gaps.iter().any(|gap| {
             gap.target_ref == "u9_analyzer_runtime" && gap.recommended_action == "run_test"
         }));
+    }
+
+    #[test]
+    fn current_usage_successful_pytest_satisfies_runtime_test_contract_before_ledger_sync() {
+        let mut frame = make_frame();
+        frame.recent_evidence.clear();
+        frame.stage_execution_contract.tests = vec![TestContract {
+            name: "auto_code_change_validation".into(),
+            required_actions: vec!["run_test".into()],
+            required_evidence: vec!["runtime_test_passed".into()],
+        }];
+        let mut usage = LoopUsage::default();
+        usage.tool_execution_records.push(ToolExecutionRecord {
+            tool_name: "Bash".into(),
+            outcome: "Text".into(),
+            kind: ToolExecutionOutcomeKind::Success,
+            summary: "Bash succeeded".into(),
+            detail: Some("exit_code: 0\n. [100%]\n3 passed".into()),
+            pending_approval: None,
+            report_modifier: crate::tool::result::ToolReportModifier::None,
+            observable_input: Some(ObservableInput {
+                value: r#"{"command":"pytest -q test/rules/std_L003_L036_L039_combo_test.py::test__rules__std_L003_L036_L039"}"#.into(),
+                source: ObservableInputSource::Raw,
+            }),
+            batch_context: ToolBatchContext {
+                batch_index: 0,
+                batch_size: 1,
+                executed_in_batch: false,
+            },
+        });
+
+        let completion = super::evaluate_completion_evidence(&frame, &usage);
+        assert_eq!(completion, CompletionEvidenceStatus::Sufficient);
+        let report = super::build_worker_structured_report(&frame, &usage, completion);
+        assert_eq!(
+            report.completion_evidence_status,
+            CompletionEvidenceStatus::Sufficient
+        );
+        assert!(report.completion_evidence_gaps.is_empty());
     }
 
     #[test]
