@@ -1477,6 +1477,35 @@ fn runtime_test_passed(frame: &StateFrame) -> bool {
     })
 }
 
+fn command_is_runtime_test_command(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    lowered.contains("cargo test")
+        || lowered.contains("pytest")
+        || lowered.contains("pnpm test")
+        || lowered.contains("npm test")
+        || lowered.contains("yarn test")
+        || lowered.contains("go test")
+        || lowered.contains("jest")
+        || lowered.contains("vitest")
+        || lowered.contains("bun test")
+        || lowered.contains("uv run pytest")
+}
+
+fn usage_runtime_test_passed(usage: &LoopUsage) -> bool {
+    usage.tool_execution_records.iter().any(|record| {
+        record.tool_name == "Bash"
+            && record.kind == ToolExecutionOutcomeKind::Success
+            && record
+                .detail
+                .as_deref()
+                .map(|detail| !detail.contains("exit_code:") || detail.contains("exit_code: 0"))
+                .unwrap_or(true)
+            && observable_command_from_input(record.observable_input.as_ref())
+                .as_deref()
+                .is_some_and(command_is_runtime_test_command)
+    })
+}
+
 fn runtime_test_contract_enabled(frame: &StateFrame) -> bool {
     frame.stage_execution_contract.tests.iter().any(|test| {
         test.required_evidence
@@ -1848,7 +1877,10 @@ fn evaluate_completion_evidence(frame: &StateFrame, usage: &LoopUsage) -> Comple
     {
         return CompletionEvidenceStatus::MissingArtifactEvidence;
     }
-    if runtime_test_contract_enabled(frame) && !runtime_test_passed(frame) {
+    if runtime_test_contract_enabled(frame)
+        && !runtime_test_passed(frame)
+        && !usage_runtime_test_passed(usage)
+    {
         return CompletionEvidenceStatus::MissingTestEvidence;
     }
     if completion_contract_requirement(frame, "test_evidence")
@@ -2180,9 +2212,14 @@ fn build_worker_structured_report_with_refs(
         || verification_runtime_read_anchor_closed(frame, usage);
     let completion_gate_reads_closed = completion_gate_required_reads_closed(frame, usage);
     let source_evidence_closed = missing_source_evidence_targets(frame, &evidence_refs).is_empty();
+    let runtime_test_closed = !runtime_test_contract_enabled(frame)
+        || runtime_test_passed(frame)
+        || usage_runtime_test_passed(usage);
     let independent_review_closed =
         independent_review_can_close_with_refs(frame, usage, &evidence_refs);
     let completion = if independent_review_closed
+        || (matches!(completion, CompletionEvidenceStatus::MissingTestEvidence)
+            && runtime_test_closed)
         || matches!(
             completion,
             CompletionEvidenceStatus::MissingVerificationEvidence
@@ -2197,6 +2234,9 @@ fn build_worker_structured_report_with_refs(
     };
     let mut completion_evidence_gaps =
         collect_completion_evidence_gaps_with_refs(frame, &evidence_refs);
+    if runtime_test_closed {
+        completion_evidence_gaps.retain(|gap| !gap.missing_test_evidence);
+    }
     if matches!(completion, CompletionEvidenceStatus::Sufficient)
         && (independent_review_closed
             || (source_evidence_closed && (read_anchor_closed || completion_gate_reads_closed)))
