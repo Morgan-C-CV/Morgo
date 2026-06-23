@@ -197,6 +197,28 @@ fn worker_report_has_runtime_test_evidence(
     has_test_ref || (has_strong_test_command && test_status_passed)
 }
 
+fn step_tool_records_have_runtime_test_pass(step: &BossPlanStep) -> bool {
+    step.tool_execution_records.iter().any(|record| {
+        record.tool_name == "Bash"
+            && record.kind == ToolExecutionOutcomeKind::Success
+            && observable_bash_command_local(record)
+                .as_deref()
+                .is_some_and(strong_runtime_test_command)
+            && record
+                .detail
+                .as_deref()
+                .map(|detail| {
+                    let lowered = detail.to_ascii_lowercase();
+                    (lowered.contains(" passed")
+                        || lowered.contains("test result: ok")
+                        || lowered.contains("[100%]"))
+                        && !lowered.contains("exit_code: 1")
+                        && !lowered.contains("exit code: 1")
+                })
+                .unwrap_or(true)
+    })
+}
+
 fn step_completion_gate_error(
     step: &BossPlanStep,
     metadata: Option<&BossStepRoutedMetadata>,
@@ -221,7 +243,8 @@ fn step_completion_gate_error(
         |report| contract_requires_runtime_test_evidence(&report.stage_execution_contract),
     );
     if step_contract_requires_runtime_test || report_contract_requires_runtime_test {
-        let runtime_test_satisfied = metadata
+        let runtime_test_satisfied = step_tool_records_have_runtime_test_pass(step)
+            || metadata
             .worker_report
             .as_ref()
             .is_some_and(worker_report_has_runtime_test_evidence);
@@ -5457,10 +5480,23 @@ fn guard_review_reject_against_closed_gate(
         return decision;
     }
     match decision {
+        crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary, ..
+        } if review_prose_runtime_gap_signal(&summary) => {
+            crate::core::boss_actor_runtime::ReviewDecision::Accept {
+                summary: format!(
+                    "{summary}\nAccepted because the coordinator completion gate is already closed by current runtime evidence; the review's missing-evidence claim is stale or local to the stateless verifier."
+                ),
+            }
+        }
         crate::core::boss_actor_runtime::ReviewDecision::Correct {
             summary,
             correction,
-        } if review_correction_only_restates_stale_blocker(correction.as_deref()) => {
+        } if review_correction_only_restates_stale_blocker(correction.as_deref())
+            || correction
+                .as_deref()
+                .is_some_and(review_prose_runtime_gap_signal) =>
+        {
             crate::core::boss_actor_runtime::ReviewDecision::Accept {
                 summary: format!(
                     "{summary}\nAccepted after current runtime evidence closed the stale review blocker; remaining prose-only claims are review risk, not runtime-verified facts."
@@ -5552,13 +5588,16 @@ fn review_decision_requests_restricted_verification(
     decision: &crate::core::boss_actor_runtime::ReviewDecision,
     completion_gate_closed: bool,
 ) -> bool {
+    if completion_gate_closed {
+        return false;
+    }
     match decision {
         crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence { .. } => true,
         crate::core::boss_actor_runtime::ReviewDecision::Correct { correction, .. } => {
             correction.as_deref().is_some_and(|value| {
                 missing_evidence_action_mentions_review_gap(value)
                     || review_prose_runtime_gap_signal(value)
-            }) && !completion_gate_closed
+            })
         }
         _ => false,
     }
@@ -18700,9 +18739,80 @@ Requirements:
         assert!(review_decision_requests_restricted_verification(
             &decision, false
         ));
-        assert!(review_decision_requests_restricted_verification(
+        assert!(!review_decision_requests_restricted_verification(
             &decision, true
         ));
+    }
+
+    #[test]
+    fn closed_completion_gate_ignores_stateless_runtime_evidence_gap_review() {
+        let decision = crate::core::boss_actor_runtime::ReviewDecision::RequestMissingEvidence {
+            summary: "I did not run automated validation in this verifier session, so runtime evidence is missing.".into(),
+            audited_items: vec!["pytest".into()],
+            evidence_used: Vec::new(),
+            missing_evidence: vec!["runtime evidence for pytest".into()],
+            weak_evidence_used: vec!["worker prose".into()],
+            required_next_action: Some("restricted_verification".into()),
+        };
+
+        let guarded = guard_review_reject_against_closed_gate(true, true, decision);
+
+        assert!(matches!(
+            guarded,
+            crate::core::boss_actor_runtime::ReviewDecision::Accept { .. }
+        ));
+    }
+
+    #[test]
+    fn completion_gate_accepts_successful_pytest_from_step_tool_records() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: Vec::new(),
+            requires_approval: false,
+            status: BossPlanStepStatus::Reviewing,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 3,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                tests: vec![TestContract {
+                    name: "auto_code_change_validation".into(),
+                    required_actions: vec!["run_test".into(), "run_command".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: vec![ToolExecutionRecord {
+                tool_name: "Bash".into(),
+                outcome: "Text".into(),
+                kind: ToolExecutionOutcomeKind::Success,
+                summary: "Bash succeeded".into(),
+                detail: Some("4 passed, 1 warning in 0.10s".into()),
+                pending_approval: None,
+                report_modifier: ToolReportModifier::None,
+                observable_input: Some(observable_input_json(json!({
+                    "command": "python -m pytest -q test/example_test.py::test_example"
+                }))),
+                batch_context: ToolBatchContext {
+                    batch_index: 0,
+                    batch_size: 1,
+                    executed_in_batch: false,
+                },
+            }],
+
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata::default();
+
+        assert_eq!(step_completion_gate_error(&step, Some(&metadata)), None);
     }
 
     #[test]

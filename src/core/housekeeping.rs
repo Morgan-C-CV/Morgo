@@ -173,6 +173,18 @@ impl HousekeepingDaemon {
         {
             let outcome = self.expire_hibernating_session(delta).await;
             debug!("Housekeeping expired zombie outcome: {:?}", outcome);
+        } else if delta > self.config.stale_threshold_secs
+            && self.has_running_tasks_for_active_session()
+        {
+            if let Some(app_state) = self.app_state.as_ref() {
+                app_state.record_activity();
+            }
+            self.zombie_handled.store(false, Ordering::Release);
+            self.mark_session_lifecycle(SessionLifecycleStatus::Active);
+            debug!(
+                "Housekeeping skipped zombie hibernation because session {} still owns running task(s).",
+                self.session_id_for_logs()
+            );
         } else if delta > self.config.stale_threshold_secs {
             warn!(
                 "CRITICAL: Zombie session detected! Last active {}s ago (threshold: {}s).",
@@ -191,6 +203,18 @@ impl HousekeepingDaemon {
             self.zombie_handled.store(false, Ordering::Release);
             self.mark_session_lifecycle(SessionLifecycleStatus::Active);
         }
+    }
+
+    fn has_running_tasks_for_active_session(&self) -> bool {
+        let Some(app_state) = self.app_state.as_ref() else {
+            return false;
+        };
+        app_state
+            .permission_context
+            .task_manager
+            .as_ref()
+            .map(|tasks| tasks.has_running_tasks_for_session(&app_state.active_session_id))
+            .unwrap_or(false)
     }
 
     async fn handle_zombie_session(&self, delta: u64) -> ZombieSessionOutcome {
@@ -946,6 +970,69 @@ mod tests {
 
         let repeated = daemon.handle_zombie_session(7200).await;
         assert_eq!(repeated, ZombieSessionOutcome::AlreadyInactive);
+    }
+
+    #[tokio::test]
+    async fn test_housekeeping_running_task_counts_as_activity() {
+        let token = CancellationToken::new();
+        let last_active = Arc::new(AtomicU64::new(0));
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let task_manager = Arc::new(TaskManager::default());
+        let app_state = test_app_state(
+            session_store.clone(),
+            task_manager.clone(),
+            last_active.clone(),
+            token.clone(),
+        );
+        let task =
+            task_manager.create("long task", "session-housekeeping", InteractionSurface::Cli);
+        task_manager.start(&task.id);
+        task_manager.set_activity_tracker(last_active.clone());
+
+        let daemon = HousekeepingDaemon::new(
+            HousekeepingConfig {
+                interval: Duration::from_secs(1),
+                stale_threshold_secs: 5,
+                expired_threshold_secs: 30,
+                session_retention_days: 7,
+                task_log_retention_days: 1,
+                max_gc_entries_per_tick: 2048,
+            },
+            token,
+            last_active.clone(),
+        )
+        .with_app_state(app_state.clone());
+
+        let old_activity_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            - 3600;
+        app_state
+            .last_activity_ts
+            .store(old_activity_ts, Ordering::Relaxed);
+        daemon.perform_maintenance().await;
+
+        assert_eq!(
+            session_store.load_lifecycle_status(&SessionId("session-housekeeping".into())),
+            SessionLifecycleStatus::Active
+        );
+        assert_eq!(
+            task_manager.status(&task.id),
+            Some(crate::task::types::TaskStatus::Running)
+        );
+        assert!(
+            app_state.last_activity_ts.load(Ordering::Acquire) > old_activity_ts,
+            "running task should refresh session activity instead of being hibernated"
+        );
+        assert!(
+            app_state
+                .notification_dispatcher
+                .delivered()
+                .iter()
+                .all(|notification| notification.notice_kind.as_deref()
+                    != Some("housekeeping.zombie_hibernated"))
+        );
     }
 
     #[tokio::test]
