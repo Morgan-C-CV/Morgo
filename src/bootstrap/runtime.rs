@@ -6620,24 +6620,7 @@ impl RuntimeBootstrap {
             let mut boss_task_outcome = BossTaskRunOutcome::MissingCoordinator;
             if let Some(boss) = app_arc.boss_coordinator.as_ref() {
                 boss.bind_app_state(app_arc.clone()).await;
-                boss.seed_documentation_plan_for_task(&task_desc).await;
-                let documentation_msg = boss
-                    .finalize_documentation_loop(
-                        "",
-                        "",
-                        "non-interactive boss-task approval",
-                        "",
-                        "",
-                    )
-                    .await;
-                println!("[boss-task] documentation result: {:?}", documentation_msg);
-                if let Err(error) = documentation_msg {
-                    anyhow::bail!(
-                        "boss-task documentation/review failed before execution: {error}"
-                    );
-                }
-                let approval_msg = boss.handle_user_approval("Y").await;
-                println!("[boss-task] approval result: {:?}", approval_msg);
+                boss.seed_plan_for_task(&task_desc).await;
                 let advance_msg = boss.advance_plan(&app_arc).await;
                 println!("[boss-task] advance_plan result: {:?}", advance_msg);
                 // Poll until completion or terminal failure.
@@ -8330,6 +8313,7 @@ impl RuntimeBootstrap {
         permission_context = permission_context
             .with_last_activity_ts(last_activity_ts.clone())
             .with_cancellation_token(cancellation_token.clone());
+        apply_boss_task_headless_allow_rules(&self.cli, &permission_context);
         apply_env_always_allow_rules(&permission_context);
         let app_state = AppState {
             surface: state.surface,
@@ -9224,6 +9208,15 @@ fn apply_env_always_allow_rules(permission_context: &ToolPermissionContext) {
     }
 }
 
+fn apply_boss_task_headless_allow_rules(
+    cli: &BootstrapCli,
+    permission_context: &ToolPermissionContext,
+) {
+    if cli.boss_task.is_some() && !cli.interactive {
+        permission_context.add_always_allow_rule("Bash");
+    }
+}
+
 pub async fn execute_runtime_shutdown(
     app_state: AppState,
     reason: &'static str,
@@ -9528,9 +9521,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS, preview_chars,
-        resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
-        terminal_tail_stalled, tui_input_suggestions,
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS,
+        apply_boss_task_headless_allow_rules, preview_chars, resolve_skill_project_root,
+        runtime_only_tui_suggestions, step_terminal_from_tracked_ids, terminal_tail_stalled,
+        tui_input_suggestions,
     };
     use crate::bootstrap::RuntimeBootstrap;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
@@ -9642,6 +9636,29 @@ mod tests {
     fn bootstrap_cli_parses_st_flag() {
         let cli = BootstrapCli::parse_from(["rust-agent", "--st"]);
         assert!(cli.st_mode);
+    }
+
+    #[test]
+    fn headless_boss_task_preapproves_bash_for_unattended_execution() {
+        let cli = BootstrapCli::parse_from(["rust-agent", "--boss-task", "run focused tests"]);
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+
+        apply_boss_task_headless_allow_rules(&cli, &permissions);
+
+        assert!(
+            permissions.always_allow_rules().iter().any(|rule| rule == "Bash"),
+            "non-interactive boss-task runs must not hang on Bash approval"
+        );
+    }
+
+    #[test]
+    fn ordinary_headless_cli_does_not_preapprove_bash() {
+        let cli = BootstrapCli::default();
+        let permissions = ToolPermissionContext::new(PermissionMode::Default);
+
+        apply_boss_task_headless_allow_rules(&cli, &permissions);
+
+        assert!(!permissions.always_allow_rules().iter().any(|rule| rule == "Bash"));
     }
 
     #[test]
