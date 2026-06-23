@@ -8775,7 +8775,6 @@ impl BossCoordinator {
             }
             TaskStatus::Failed | TaskStatus::Killed => {
                 step.completed = false;
-                step.status = BossPlanStepStatus::Failed;
                 step.worker_task_id = Some(event.task_id.clone());
                 sync_step_tool_execution_records(step, tasks.as_deref(), &event.task_id);
                 store_step_result_diff(step, &event.result, Some(&event.summary));
@@ -8832,24 +8831,59 @@ impl BossCoordinator {
                 } else {
                     update_verification_first_review_summary(step);
                 }
-                tracing::warn!("BossPlan: Step {} marked as failed", step_id);
-                if step.last_review_summary.is_some() {
-                    let next_action = artifact_verification_reason
-                        .as_deref()
-                        .and_then(|reason| build_artifact_repair_instruction(step, reason))
-                        .or_else(|| step.last_review_summary.clone());
+                let worker_failure_summary = step
+                    .last_review_summary
+                    .clone()
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "worker task {} ended with {:?} before producing an acceptable result",
+                            event.task_id, event.status
+                        )
+                    });
+                let next_action = artifact_verification_reason
+                    .as_deref()
+                    .and_then(|reason| build_artifact_repair_instruction(step, reason))
+                    .or_else(|| {
+                        build_artifact_repair_instruction(step, &worker_failure_summary)
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "retry_worker_after_failure: {worker_failure_summary}. Avoid broad commands with large output; inspect targeted files, make the required code change, and run focused validation."
+                        )
+                    });
+                step.attempt_count = step.attempt_count.saturating_add(1);
+                if step.attempt_count < step.retry_budget {
+                    step.status = BossPlanStepStatus::Rejected;
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(&current_task_contract_text(
-                            step.objective(),
-                        ))
-                        .into_iter()
-                        .next()
-                        .map(|expectation| expectation.path.display().to_string()),
-                        next_action,
+                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
+                        Some(next_action),
                         continuation_verified_facts(step),
                     );
+                    tracing::warn!(
+                        "BossPlan: Step {} worker failed; retrying attempt {}/{}",
+                        step_id,
+                        step.attempt_count,
+                        step.retry_budget
+                    );
+                } else {
+                    step.status = BossPlanStepStatus::Failed;
+                    update_step_continuation_context(
+                        step,
+                        crate::core::state_frame::ContinuityMode::Repair,
+                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
+                            .into_iter()
+                            .next()
+                            .map(|expectation| expectation.path.display().to_string()),
+                        Some(next_action),
+                        continuation_verified_facts(step),
+                    );
+                    tracing::warn!("BossPlan: Step {} marked as failed", step_id);
                 }
                 None
             }
@@ -12785,6 +12819,83 @@ Requirements:
                 .is_some_and(|value| value.contains("Boss plan complete"))
         );
         assert_ne!(coordinator.get_stage().await, BossStage::Execution);
+    }
+
+    #[tokio::test]
+    async fn failed_worker_child_sync_requeues_step_before_retry_budget_exhaustion() {
+        let coordinator = Arc::new(BossCoordinator::new());
+        let tasks = Arc::new(TaskManager::new_with_output_root(std::env::temp_dir()));
+        let app_state = test_app_state_with_tasks(tasks.clone(), coordinator.clone());
+        coordinator
+            .attach_app_state_for_report_testing(app_state.clone())
+            .await;
+        {
+            let mut status = coordinator.status.write().await;
+            status.stage = BossStage::Execution;
+            status.current_step = Some(0);
+        }
+        {
+            let mut plan = coordinator.plan.write().await;
+            *plan = Some(BossPlan {
+                accepted_by_user: true,
+                auto_sequence: true,
+                steps: vec![BossPlanStep {
+                    id: 0,
+                    description: "run worker".into(),
+                    objective: Some("write artifact".into()),
+                    acceptance: Vec::new(),
+                    requires_approval: false,
+                    status: BossPlanStepStatus::Running,
+                    completed: false,
+                    result_diff: None,
+                    worker_task_id: Some("task-0".into()),
+                    attempt_count: 0,
+                    retry_budget: 3,
+                    last_review_summary: None,
+                    last_correction: None,
+                    stage_execution_contract: StageExecutionContract::default(),
+                    stage_continuation_context: None,
+                    executor_b_stage_memory: None,
+                    review_task_id: None,
+                    tool_execution_records: Vec::new(),
+
+                    ..Default::default()
+                }],
+                ..BossPlan::default()
+            });
+        }
+        let record = tasks.create_with_type(
+            "worker",
+            TaskType::LocalAgent,
+            "test-session",
+            InteractionSurface::Cli,
+        );
+        assert_eq!(record.id, "task-0");
+        tasks.start("task-0");
+        tasks.append_output("task-0", "compaction requested before continuing the turn\n");
+        let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
+            .with_boss_coordinator(coordinator.clone());
+        tasks.fail("task-0", &dispatcher);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        coordinator
+            .sync_terminal_child_task_state(tasks.as_ref())
+            .await
+            .expect("sync");
+
+        let plan = coordinator.plan.read().await;
+        let step = &plan.as_ref().expect("plan").steps[0];
+        assert_eq!(step.status, BossPlanStepStatus::Running);
+        assert_eq!(step.attempt_count, 1);
+        assert!(step.last_correction.is_some());
+        assert!(
+            step.stage_continuation_context
+                .as_ref()
+                .and_then(|context| context.next_action.as_deref())
+                .is_some_and(|action| action.contains("compaction requested"))
+        );
+        assert!(!coordinator.has_terminal_failure().await);
+        assert_eq!(coordinator.status.read().await.current_step, Some(0));
     }
 
     #[tokio::test]

@@ -25,6 +25,8 @@ use crate::tool::definition::ModelToolDefinition;
 
 // Retry-After header is authoritative but bounded to prevent malicious or runaway values.
 const RETRY_AFTER_SAFETY_CAP_MS: u64 = 30_000;
+const OPENAI_COMPATIBLE_INSTRUCTIONS: &str =
+    "You are Morgo, an autonomous coding agent. Follow the user task and use the available tools when needed.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPricing {
@@ -1012,6 +1014,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
         };
         let mut payload = json!({
             "model": normalized_request_model(config),
+            "instructions": OPENAI_COMPATIBLE_INSTRUCTIONS,
             "messages": [{"role": "user", "content": message_content}],
             "stream": normalized_request_stream_flag(&profile)?,
             "stream_options": {"include_usage": true},
@@ -2494,6 +2497,8 @@ mod tests {
         );
         let msg = Message::user("hello");
         let payload = build_request_payload_for_provider(&config, &msg).unwrap();
+        assert!(payload["instructions"].as_str().unwrap().contains("Morgo"));
+        assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["messages"][0]["content"], "hello");
     }
 
@@ -2585,6 +2590,7 @@ mod tests {
         .expect("assembly payload");
 
         assert!(payload.get("system").is_none());
+        assert!(payload["instructions"].as_str().unwrap().contains("coding agent"));
         assert_eq!(
             payload["messages"][0]["content"].as_str(),
             Some("stable instruction\ndynamic state")
@@ -2907,6 +2913,7 @@ mod tests {
         .expect("openai-compatible payload should build");
 
         assert_eq!(payload["tool_choice"].as_str(), Some("auto"));
+        assert!(payload["instructions"].as_str().unwrap().contains("Morgo"));
         assert_eq!(payload["tools"][0]["type"].as_str(), Some("function"));
         assert_eq!(
             payload["tools"][0]["function"]["name"].as_str(),
