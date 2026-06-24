@@ -18,37 +18,34 @@
 
 ## 🛠️ Getting Started
 
-### 1. Prerequisites
-Make sure you have the Rust toolchain installed (edition 2024 is required).
+### 1. Installation
+Install the latest GitHub release binary:
 ```bash
-rustc --version # should be 1.82+ or support edition 2024
+curl -fsSL https://raw.githubusercontent.com/Morgan-C-CV/LearnCCfromCC/main/scripts/install.sh | sh
 ```
 
-### 2. Installation
-Clone this repository and build the binary in release mode:
+The installer downloads the right binary for your OS/CPU and installs it to
+`~/.local/bin/morgo` by default. If `morgo` is not found after installation, add
+this to your shell profile:
 ```bash
-# Clone the repository
-git clone https://github.com/Morgan-C-CV/morgo.git
-cd morgo
-
-# Build the release binary
-cargo build --release
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### 3. Configuration
+### 2. Configuration
 Configure your LLM provider credentials in a `.env` file at the root of the project:
 ```bash
 cp .env.example .env
 # Edit .env to set your API keys (e.g., Gemini, OpenRouter, Anthropic, etc.)
 ```
 
-### 4. Running the TUI
-To start the Morgo interactive TUI after installing or building the binary, run:
+### 3. Running the TUI
+To start the Morgo interactive TUI, run:
 ```bash
 morgo
 ```
 
-During development, you can run the same default TUI entrypoint with:
+### 4. Development Build
+If you are developing Morgo locally, use the Rust toolchain and run:
 ```bash
 cargo run --bin morgo
 ```
@@ -56,6 +53,18 @@ cargo run --bin morgo
 The published binary name is `morgo`. If you want the capitalized `Morgo`
 command on a case-sensitive shell, create an installation alias or symlink that
 points to the same binary.
+
+### 5. Publishing a Release
+Create and push a release tag:
+```bash
+git tag morgo-v0.1.0
+git push origin morgo-v0.1.0
+```
+
+GitHub Actions will build and attach release archives for:
+* `aarch64-apple-darwin`
+* `x86_64-apple-darwin`
+* `x86_64-unknown-linux-gnu`
 
 ---
 
