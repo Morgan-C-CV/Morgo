@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use anyhow::Context;
 use base64::Engine as _;
 use clap::Parser;
 use crossterm::event::{
@@ -212,11 +213,193 @@ pub fn has_explicit_provider_env_override() -> bool {
     })
 }
 
+#[derive(Debug, Clone)]
+struct ProviderSetupPreset {
+    id: &'static str,
+    label: &'static str,
+    env_name: &'static str,
+    base_url: &'static str,
+    chat_completions_path: &'static str,
+    default_model: &'static str,
+    protocol: &'static str,
+    compatibility_profile: &'static str,
+}
+
+const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
+    ProviderSetupPreset {
+        id: "openai",
+        label: "OpenAI",
+        env_name: "OPENAI_API_KEY",
+        base_url: "https://api.openai.com",
+        chat_completions_path: "/v1/chat/completions",
+        default_model: "gpt-4.1",
+        protocol: "openai-compatible",
+        compatibility_profile: "openai-compatible",
+    },
+    ProviderSetupPreset {
+        id: "openrouter",
+        label: "OpenRouter",
+        env_name: "OPENROUTER_API_KEY",
+        base_url: "https://openrouter.ai/api",
+        chat_completions_path: "/v1/chat/completions",
+        default_model: "anthropic/claude-sonnet-4",
+        protocol: "openai-compatible",
+        compatibility_profile: "openai-compatible",
+    },
+    ProviderSetupPreset {
+        id: "anthropic",
+        label: "Anthropic-compatible Messages API",
+        env_name: "ANTHROPIC_API_KEY",
+        base_url: "https://api.anthropic.com",
+        chat_completions_path: "/v1/messages",
+        default_model: "claude-sonnet-4-20250514",
+        protocol: "messages-api",
+        compatibility_profile: "messages-api",
+    },
+];
+
 fn extract_base_url_host(base_url: &str) -> String {
     reqwest::Url::parse(base_url)
         .ok()
         .and_then(|url| url.host_str().map(|host| host.to_string()))
         .unwrap_or_else(|| base_url.trim().to_string())
+}
+
+fn load_bootstrap_env_file() -> anyhow::Result<()> {
+    let Some(home_root) = preferred_home_config_root() else {
+        return Ok(());
+    };
+    let path = home_root.join("env");
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("invalid_configuration: failed to read {}", path.display()))?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        let value = unquote_env_value(value.trim());
+        unsafe { std::env::set_var(key, value) };
+    }
+    Ok(())
+}
+
+fn unquote_env_value(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if bytes[0] == b'"' && bytes[value.len() - 1] == b'"' {
+            return unescape_double_quoted_env_value(&value[1..value.len() - 1]);
+        }
+        if bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'' {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
+}
+
+fn unescape_double_quoted_env_value(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn double_quote_env_value(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn toml_basic_string_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn model_configuration_available(config_root: &std::path::Path) -> bool {
+    if has_explicit_provider_env_override() {
+        return true;
+    }
+    let home_root = preferred_home_config_root();
+    let home_models = home_root
+        .as_ref()
+        .is_some_and(|root| root.join("models.toml").exists());
+    let workspace_models = config_root.join("models.toml").exists();
+    home_models || workspace_models
+}
+
+fn should_run_provider_setup_wizard(cli: &BootstrapCli) -> bool {
+    cli.interactive && cli.tui
+}
+
+fn prompt_line(prompt: &str) -> anyhow::Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn write_provider_setup_files(
+    home_root: &std::path::Path,
+    preset: &ProviderSetupPreset,
+    model: &str,
+    api_key: &str,
+) -> anyhow::Result<()> {
+    let models_path = home_root.join("models.toml");
+    let env_path = home_root.join("env");
+    let models = format!(
+        r#"active = "{profile}"
+
+[profiles.{profile}]
+provider_id = "{provider_id}"
+protocol = "{protocol}"
+compatibility_profile = "{compatibility_profile}"
+base_url = "{base_url}"
+chat_completions_path = "{chat_completions_path}"
+model = "{model}"
+auth_strategy = "bearer"
+api_key_env = "{api_key_env}"
+"#,
+        profile = preset.id,
+        provider_id = preset.id,
+        protocol = preset.protocol,
+        compatibility_profile = preset.compatibility_profile,
+        base_url = preset.base_url,
+        chat_completions_path = preset.chat_completions_path,
+        model = toml_basic_string_value(model),
+        api_key_env = preset.env_name,
+    );
+    std::fs::write(&models_path, models).with_context(|| {
+        format!(
+            "invalid_configuration: failed to write {}",
+            models_path.display()
+        )
+    })?;
+    std::fs::write(
+        &env_path,
+        format!("{}={}\n", preset.env_name, double_quote_env_value(api_key)),
+    )
+    .with_context(|| {
+        format!(
+            "invalid_configuration: failed to write {}",
+            env_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 use crate::core::concurrency::SubagentLimiter;
@@ -6471,6 +6654,8 @@ impl RuntimeBootstrap {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        load_bootstrap_env_file()?;
+
         // Early-exit: print LisM A/B summary and return without bootstrapping the runtime.
         if let Some(path) = &self.cli.lism_ab_summarize {
             let records = LisMAbSampleSink::load_records(path);
@@ -8425,6 +8610,7 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
+        self.ensure_model_provider_configuration(&config_root)?;
         let (
             provider_config,
             active_model_profile_name,
@@ -9037,6 +9223,85 @@ impl RuntimeBootstrap {
         ))
     }
 
+    fn ensure_model_provider_configuration(
+        &self,
+        config_root: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        load_bootstrap_env_file()?;
+        if model_configuration_available(config_root) {
+            return Ok(());
+        }
+        if !should_run_provider_setup_wizard(&self.cli) {
+            return Ok(());
+        }
+        self.run_provider_setup_wizard()?;
+        load_bootstrap_env_file()?;
+        Ok(())
+    }
+
+    fn run_provider_setup_wizard(&self) -> anyhow::Result<()> {
+        let home_root = preferred_home_config_root().ok_or_else(|| {
+            anyhow::anyhow!("invalid_configuration: HOME is not set; cannot create ~/.morgo")
+        })?;
+        std::fs::create_dir_all(&home_root).with_context(|| {
+            format!(
+                "invalid_configuration: failed to create {}",
+                home_root.display()
+            )
+        })?;
+
+        println!("Morgo needs an LLM provider before starting the TUI.");
+        println!("Choose a provider:");
+        for (index, preset) in PROVIDER_SETUP_PRESETS.iter().enumerate() {
+            println!("  {}. {}", index + 1, preset.label);
+        }
+
+        let preset = loop {
+            let choice = prompt_line("Provider [1]: ")?;
+            let value = choice.trim();
+            let index = if value.is_empty() {
+                1
+            } else {
+                value.parse::<usize>().unwrap_or(0)
+            };
+            if let Some(preset) = PROVIDER_SETUP_PRESETS.get(index.saturating_sub(1)) {
+                break preset;
+            }
+            println!(
+                "Please choose a number from 1 to {}.",
+                PROVIDER_SETUP_PRESETS.len()
+            );
+        };
+
+        let model_prompt = format!("Model [{}]: ", preset.default_model);
+        let model = prompt_line(&model_prompt)?;
+        let model = model.trim();
+        let model = if model.is_empty() {
+            preset.default_model
+        } else {
+            model
+        };
+
+        let key_prompt = format!("Paste {}: ", preset.env_name);
+        let api_key = loop {
+            let value = prompt_line(&key_prompt)?;
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                break trimmed.to_string();
+            }
+            println!("API key cannot be empty.");
+        };
+
+        write_provider_setup_files(&home_root, preset, model, &api_key)?;
+        println!(
+            "Saved Morgo provider config to {} and {}.",
+            home_root.join("models.toml").display(),
+            home_root.join("env").display()
+        );
+        println!("Starting Morgo TUI...");
+        Ok(())
+    }
+
     fn build_model_provider_config_from_env(&self) -> anyhow::Result<ModelProviderConfig> {
         let provider_id = std::env::var("RUST_AGENT_PROVIDER_ID")
             .ok()
@@ -9584,15 +9849,17 @@ fn print_lism_ab_summary(
 mod tests {
     use clap::Parser;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use super::{
-        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, RUNTIME_ONLY_TUI_COMMANDS,
-        apply_boss_task_headless_allow_rules, preview_chars, resolve_skill_project_root,
-        runtime_only_tui_suggestions, step_terminal_from_tracked_ids, terminal_tail_stalled,
-        tui_input_suggestions,
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, PROVIDER_SETUP_PRESETS,
+        RUNTIME_ONLY_TUI_COMMANDS, apply_boss_task_headless_allow_rules, preview_chars,
+        load_bootstrap_env_file, resolve_skill_project_root, runtime_only_tui_suggestions,
+        step_terminal_from_tracked_ids, terminal_tail_stalled, tui_input_suggestions,
+        write_provider_setup_files,
     };
     use crate::bootstrap::RuntimeBootstrap;
+    use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
     use crate::bootstrap::{ClientType, InteractionSurface, SessionMode, SessionSource};
     use crate::command::builtin::register_builtin_commands;
     use crate::command::coding::register_coding_commands;
@@ -9610,6 +9877,11 @@ mod tests {
         PendingApproval, PermissionMode, ToolPermissionContext,
     };
     use anyhow::anyhow;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn test_app_state() -> AppState {
         AppState {
@@ -9710,6 +9982,32 @@ mod tests {
             .with_default_interactive_tui();
         assert!(!cli.interactive);
         assert!(!cli.tui);
+    }
+
+    #[test]
+    fn provider_setup_writes_loadable_home_models_and_env_files() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let original_home = std::env::var_os("HOME");
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        let temp = tempfile::tempdir().unwrap();
+        let home_root = temp.path().join(".morgo");
+        std::fs::create_dir_all(&home_root).unwrap();
+        let preset = &PROVIDER_SETUP_PRESETS[0];
+
+        write_provider_setup_files(&home_root, preset, "gpt-test\"quoted", "sk-test'key").unwrap();
+        let env_content = std::fs::read_to_string(home_root.join("env")).unwrap();
+        assert!(env_content.contains("OPENAI_API_KEY=\"sk-test'key\""));
+        unsafe { std::env::set_var("HOME", temp.path()) };
+        load_bootstrap_env_file().unwrap();
+        assert_eq!(std::env::var("OPENAI_API_KEY").unwrap(), "sk-test'key");
+        load_model_profiles_registry_from_root(&home_root)
+            .unwrap()
+            .expect("models.toml");
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     #[test]
