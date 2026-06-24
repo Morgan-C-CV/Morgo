@@ -9477,7 +9477,7 @@ mod tests {
             &["artifact:contract:0"],
         );
         let target = "RustAgent/Agent/src/core/state_frame_projection.rs";
-        let absolute = "/Users/wangmorgan/MProject/LearnCCfromCC/RustAgent/Agent/src/core/state_frame_projection.rs";
+        let absolute = "/Users/example/repo/RustAgent/Agent/src/core/state_frame_projection.rs";
         push_artifact_target_fact(&mut frame, "artifact:contract:0", target, "file");
         frame.recent_evidence.push(format!(
             "fact: file_facts ref=filefact:runtime:1:read path={absolute} kind=read_observation source=tool:Read source_event_id=tool-read:runtime:1 freshness=after-runtime-read confidence=1.00 status=active invalidated_by=none supersedes=none conflicts_with=none fact=runtime Read succeeded for {absolute}"

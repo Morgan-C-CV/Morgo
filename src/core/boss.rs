@@ -127,18 +127,79 @@ fn contract_requires_verification_evidence(contract: &StageExecutionContract) ->
 }
 
 fn contract_requires_runtime_test_evidence(contract: &StageExecutionContract) -> bool {
-    contract.required_actions.iter().any(|action| action == "run_test")
+    contract
+        .required_actions
+        .iter()
+        .any(|action| action == "run_test")
         || contract
             .required_evidence
             .iter()
             .any(|item| item == "runtime_test_passed")
         || contract.tests.iter().any(|test| {
-            test.required_actions.iter().any(|action| action == "run_test")
+            test.required_actions
+                .iter()
+                .any(|action| action == "run_test")
                 || test
                     .required_evidence
                     .iter()
                     .any(|item| item == "runtime_test_passed")
         })
+}
+
+fn contract_requires_repository_diff_evidence(contract: &StageExecutionContract) -> bool {
+    matches!(contract.task_profile, Some(TaskProfile::CodeChange))
+        || contract
+            .required_evidence
+            .iter()
+            .any(|item| item == "repository_diff")
+        || contract
+            .required_actions
+            .iter()
+            .any(|action| matches!(action.as_str(), "modify" | "write" | "edit_file"))
+}
+
+fn looks_like_repository_diff(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.contains("diff --git ")
+        || (trimmed.contains("\n--- ") && trimmed.contains("\n+++ "))
+        || trimmed
+            .lines()
+            .any(|line| line.starts_with("Files changed:") || line.starts_with("modified:"))
+}
+
+fn worker_report_has_repository_diff_evidence(
+    report: &crate::core::state_frame::WorkerStructuredReport,
+) -> bool {
+    !report.files_changed.is_empty()
+        || report.evidence_refs.iter().any(|evidence| {
+            let lowered = evidence.to_ascii_lowercase();
+            lowered.contains("repository_diff")
+                || lowered.contains("source_edit")
+                || lowered.contains("files_changed")
+        })
+}
+
+fn step_tool_records_have_source_edit(step: &BossPlanStep) -> bool {
+    step.tool_execution_records.iter().any(|record| {
+        record.kind == ToolExecutionOutcomeKind::Success
+            && matches!(record.tool_name.as_str(), "Edit" | "Write" | "MultiEdit")
+    })
+}
+
+fn step_has_repository_diff_evidence(
+    step: &BossPlanStep,
+    metadata: Option<&BossStepRoutedMetadata>,
+) -> bool {
+    step.result_diff
+        .as_deref()
+        .is_some_and(looks_like_repository_diff)
+        || step_tool_records_have_source_edit(step)
+        || metadata
+            .and_then(|metadata| metadata.worker_report.as_ref())
+            .is_some_and(worker_report_has_repository_diff_evidence)
 }
 
 fn strong_runtime_test_command(command: &str) -> bool {
@@ -235,18 +296,33 @@ fn step_completion_gate_error(
         });
     let step_contract_requires_runtime_test =
         contract_requires_runtime_test_evidence(&step.stage_execution_contract);
-    let report_contract_requires_runtime_test = metadata.worker_report.as_ref().is_some_and(
-        |report| contract_requires_runtime_test_evidence(&report.stage_execution_contract),
-    );
+    let report_contract_requires_runtime_test =
+        metadata.worker_report.as_ref().is_some_and(|report| {
+            contract_requires_runtime_test_evidence(&report.stage_execution_contract)
+        });
+    let step_contract_requires_repository_diff =
+        contract_requires_repository_diff_evidence(&step.stage_execution_contract);
+    let report_contract_requires_repository_diff =
+        metadata.worker_report.as_ref().is_some_and(|report| {
+            contract_requires_repository_diff_evidence(&report.stage_execution_contract)
+        });
+    let repository_diff_required =
+        step_contract_requires_repository_diff || report_contract_requires_repository_diff;
     if step_contract_requires_runtime_test || report_contract_requires_runtime_test {
         let runtime_test_satisfied = step_tool_records_have_runtime_test_pass(step)
             || metadata
-            .worker_report
-            .as_ref()
-            .is_some_and(worker_report_has_runtime_test_evidence);
+                .worker_report
+                .as_ref()
+                .is_some_and(worker_report_has_runtime_test_evidence);
         if !runtime_test_satisfied {
             return Some((
                 "completion gate rejected direct completion: runtime_test_passed evidence still missing or weak validation was used".into(),
+                StepFailureClassification::VerificationRepairContinuation,
+            ));
+        }
+        if repository_diff_required && !step_has_repository_diff_evidence(step, Some(metadata)) {
+            return Some((
+                "completion gate rejected direct completion: repository_diff evidence still missing; code-change tasks must modify source before completion".into(),
                 StepFailureClassification::VerificationRepairContinuation,
             ));
         }
@@ -258,6 +334,7 @@ fn step_completion_gate_error(
         && !report_contract_requires_verification
         && !step_contract_requires_runtime_test
         && !report_contract_requires_runtime_test
+        && !repository_diff_required
     {
         return None;
     }
@@ -2850,7 +2927,11 @@ fn compact_worker_failure_summary(value: &str) -> String {
     }
 
     let mut selected = Vec::new();
-    for line in normalized.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in normalized
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let lowered = line.to_ascii_lowercase();
         if lowered.contains("pytest")
             || lowered.starts_with("failed")
@@ -2877,7 +2958,11 @@ fn compact_worker_failure_summary(value: &str) -> String {
     }
 
     if selected.is_empty() {
-        for line in normalized.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in normalized
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let compact = compact_continuation_text(line);
             if !selected.iter().any(|existing| existing == &compact) {
                 selected.push(compact);
@@ -9066,10 +9151,12 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                            .into_iter()
-                            .next()
-                            .map(|expectation| expectation.path.display().to_string()),
+                        extract_artifact_expectations(&current_task_contract_text(
+                            step.objective(),
+                        ))
+                        .into_iter()
+                        .next()
+                        .map(|expectation| expectation.path.display().to_string()),
                         Some(next_action),
                         continuation_verified_facts(step),
                     );
@@ -9084,10 +9171,12 @@ impl BossCoordinator {
                     update_step_continuation_context(
                         step,
                         crate::core::state_frame::ContinuityMode::Repair,
-                        extract_artifact_expectations(&current_task_contract_text(step.objective()))
-                            .into_iter()
-                            .next()
-                            .map(|expectation| expectation.path.display().to_string()),
+                        extract_artifact_expectations(&current_task_contract_text(
+                            step.objective(),
+                        ))
+                        .into_iter()
+                        .next()
+                        .map(|expectation| expectation.path.display().to_string()),
                         Some(next_action),
                         continuation_verified_facts(step),
                     );
@@ -9557,11 +9646,11 @@ impl BossCoordinator {
                         } else {
                             verification_gap_target(step, routed_metadata.as_ref())
                         };
-                        let runtime_test_repair_requested =
-                            requested_action == "restricted_verification"
-                                && contract_requires_runtime_test_evidence(
-                                    &step.stage_execution_contract,
-                                );
+                        let runtime_test_repair_requested = requested_action
+                            == "restricted_verification"
+                            && contract_requires_runtime_test_evidence(
+                                &step.stage_execution_contract,
+                            );
                         update_step_continuation_context(
                             step,
                             crate::core::state_frame::ContinuityMode::Repair,
@@ -13100,7 +13189,10 @@ Requirements:
         );
         assert_eq!(record.id, "task-0");
         tasks.start("task-0");
-        tasks.append_output("task-0", "compaction requested before continuing the turn\n");
+        tasks.append_output(
+            "task-0",
+            "compaction requested before continuing the turn\n",
+        );
         let dispatcher = NotificationDispatcher::new(TelegramGateway::default())
             .with_boss_coordinator(coordinator.clone());
         tasks.fail("task-0", &dispatcher);
@@ -15189,6 +15281,69 @@ Requirements:
     }
 
     #[test]
+    fn st_code_change_gate_rejects_runtime_pass_without_repository_diff() {
+        let step = BossPlanStep {
+            id: 0,
+            description: "fix code".into(),
+            objective: Some("fix code".into()),
+            acceptance: vec!["runtime tests pass".into()],
+            requires_approval: false,
+            status: BossPlanStepStatus::Running,
+            completed: false,
+            result_diff: None,
+            worker_task_id: None,
+            attempt_count: 0,
+            retry_budget: 6,
+            last_review_summary: None,
+            last_correction: None,
+            stage_execution_contract: StageExecutionContract {
+                task_profile: Some(TaskProfile::CodeChange),
+                tests: vec![TestContract {
+                    name: "st_auto_validation".into(),
+                    required_actions: vec!["run_test".into()],
+                    required_evidence: vec!["runtime_test_passed".into()],
+                }],
+                required_actions: vec!["modify".into(), "run_test".into()],
+                required_evidence: vec!["repository_diff".into(), "runtime_test_passed".into()],
+                ..StageExecutionContract::default()
+            },
+            stage_continuation_context: None,
+            executor_b_stage_memory: None,
+            review_task_id: None,
+            tool_execution_records: Vec::new(),
+            ..Default::default()
+        };
+        let metadata = BossStepRoutedMetadata {
+            completion_evidence_status: Some("sufficient".into()),
+            worker_report: Some(WorkerStructuredReport {
+                worker_state: AgentState::Done,
+                last_tool_action: Some("Bash".into()),
+                files_changed: Vec::new(),
+                tests_run: vec!["python -m pytest tests/test_lib.py::test_fix".into()],
+                artifact_status: "verified".into(),
+                test_status: "passed".into(),
+                verification_status: "verified".into(),
+                stage_execution_contract: step.stage_execution_contract.clone(),
+                stage_continuation_context: None,
+                evidence_refs: vec!["test:step0:bash".into()],
+                completion_evidence_gaps: Vec::new(),
+                remaining_risks: Vec::new(),
+                completion_evidence_status: CompletionEvidenceStatus::Sufficient,
+            }),
+            completion_evidence_gaps: Vec::new(),
+            ..BossStepRoutedMetadata::default()
+        };
+
+        let failure = step_completion_gate_error(&step, Some(&metadata))
+            .expect("ST code-change tasks must not complete without a source diff");
+        assert_eq!(
+            failure.1,
+            StepFailureClassification::VerificationRepairContinuation
+        );
+        assert!(failure.0.contains("repository_diff"));
+    }
+
+    #[test]
     fn st_runtime_test_gate_rejects_report_test_ref_without_command() {
         let step = BossPlanStep {
             id: 0,
@@ -15282,9 +15437,7 @@ Requirements:
                 repair_intent: Some(crate::core::state_frame::RepairIntent {
                     failed_target: Some("runtime_test_passed".into()),
                     verified_facts: Vec::new(),
-                    next_action: Some(
-                        "run_required_runtime_tests_after_environment_repair".into(),
-                    ),
+                    next_action: Some("run_required_runtime_tests_after_environment_repair".into()),
                     continuity_mode: Some(crate::core::state_frame::ContinuityMode::Repair),
                 }),
                 failed_target: Some("runtime_test_passed".into()),
@@ -18373,7 +18526,7 @@ Requirements:
         let coordinator = BossCoordinator::new();
         coordinator.set_shared_memory_enabled(true).await;
         let target = "RustAgent/Agent/src/core/state_frame_projection.rs";
-        let absolute_target = "/Users/wangmorgan/MProject/LearnCCfromCC/RustAgent/Agent/src/core/state_frame_projection.rs";
+        let absolute_target = "/Users/example/repo/RustAgent/Agent/src/core/state_frame_projection.rs";
         let step =
             verification_first_review_step(target, Some("verification missing".into()), Vec::new());
         {
@@ -19250,7 +19403,7 @@ Requirements:
     fn restricted_verifier_targets_normalize_agent_relative_paths() {
         let normalized = normalize_review_verifier_target_with_cwd(
             "read:src/tool/definition.rs",
-            Some(Path::new("/Users/wangmorgan/MProject/LearnCCfromCC")),
+            Some(Path::new("/Users/example/repo")),
         );
         assert_eq!(normalized, "RustAgent/Agent/src/tool/definition.rs");
     }
@@ -24571,7 +24724,7 @@ Requirements:
 
     #[test]
     fn extract_relevant_file_handles_normalizes_agent_relative_paths() {
-        let repo_root = Path::new("/Users/wangmorgan/MProject/LearnCCfromCC");
+        let repo_root = Path::new("/Users/example/repo");
         assert_eq!(
             normalize_relevant_file_hint("src/tool/definition.rs", Some(repo_root)).as_deref(),
             Some("RustAgent/Agent/src/tool/definition.rs")
@@ -25018,7 +25171,7 @@ Requirements:
             id: 4,
             description: "write current demo".into(),
             objective: Some(format!(
-                "任务目标：\n- 目标目录：/tmp/current-demo\n\n参考材料摘录：\n- 已完成：/Users/wangmorgan/MProject/MorgoTest/reports/multistage-tools-memory-token-report.md\n- 目标目录：/Users/wangmorgan/MProject/MorgoTest/lism-jsonl-analyzer\n- src/tool/definition.rs\n- 目标文件：{target_path}"
+                "任务目标：\n- 目标目录：/tmp/current-demo\n\n参考材料摘录：\n- 已完成：/Users/example/MorgoTest/reports/multistage-tools-memory-token-report.md\n- 目标目录：/Users/example/MorgoTest/lism-jsonl-analyzer\n- src/tool/definition.rs\n- 目标文件：{target_path}"
             )),
             acceptance: vec![format!(
                 "target file exists and is non-empty: {target_path}"
@@ -25061,7 +25214,7 @@ Requirements:
     #[test]
     fn historical_target_directory_reference_does_not_become_declared_artifact() {
         let current_dir = "/tmp/current-demo-output";
-        let historical_dir = "/Users/wangmorgan/MProject/MorgoTest/lism-jsonl-analyzer";
+        let historical_dir = "/Users/example/MorgoTest/lism-jsonl-analyzer";
         let step = BossPlanStep {
             id: 5,
             description: "create current demo".into(),

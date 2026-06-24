@@ -3,7 +3,12 @@ name = "rust_agent"
 version = "0.1.0"
 edition = "2024"
 description = "Rust agent runtime scaffold for LearnCCfromCC"
-license = "MIT"
+license = "Apache-2.0"
+authors = ["Morgo Authors"]
+repository = "https://github.com/Morgan-C-CV/morgo"
+readme = "README.md"
+categories = ["development-tools", "command-line-utilities"]
+keywords = ["agent", "tui", "mcp", "llm", "ai"]
 
 [lib]
 name = "rust_agent"

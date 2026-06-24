@@ -5480,7 +5480,7 @@ mod tui_output_tests {
             "command: pwd && git status --short && ls -la",
             "exit_code: 0",
             "stdout:",
-            "/Users/wangmorgan/MProject/LearnCCfromCC",
+            "/Users/example/repo",
             " M RustAgent/Agent/src/bootstrap/runtime.rs",
             "",
             "Continue the interrupted user task using this tool result. Do not repeat the same approved tool call unless more evidence is needed.",
@@ -5498,7 +5498,7 @@ mod tui_output_tests {
         let transcript = strip_ansi_for_test(&super::tui_transcript_text(&app_state));
 
         assert!(transcript.contains("• Ran pwd && git status --short && ls -la"));
-        assert!(transcript.contains("└ /Users/wangmorgan/MProject/LearnCCfromCC"));
+        assert!(transcript.contains("└ /Users/example/repo"));
         assert!(transcript.contains("└ M RustAgent/Agent/src/bootstrap/runtime.rs"));
         assert!(!transcript.contains("Approval resolved for tool Bash"));
         assert!(!transcript.contains("Continue the interrupted user task"));

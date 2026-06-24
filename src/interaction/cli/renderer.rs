@@ -1919,11 +1919,11 @@ mod tests {
             "description: Inspect repo root and status",
             "command: pwd && git status --short && ls -la",
             "normalized_variants: [\"pwd && git status --short && ls -la\"]",
-            "cwd: /Users/wangmorgan/MProject/LearnCCfromCC",
+            "cwd: /Users/example/repo",
             "sandbox_policy: WorkspaceWrite",
             "exit_code: 0",
             "stdout:",
-            "/Users/wangmorgan/MProject/LearnCCfromCC",
+            "/Users/example/repo",
             " M RustAgent/Agent/src/bootstrap/runtime.rs",
             "",
             "Continue the interrupted user task using this tool result. Do not repeat the same approved tool call unless more evidence is needed.",
@@ -1937,7 +1937,7 @@ mod tests {
         let rendered = render_turn_tui_output(&turn);
         let plain = strip_ansi(&rendered);
         assert!(plain.contains("• Ran pwd && git status --short && ls -la"));
-        assert!(plain.contains("└ /Users/wangmorgan/MProject/LearnCCfromCC"));
+        assert!(plain.contains("└ /Users/example/repo"));
         assert!(plain.contains("└ M RustAgent/Agent/src/bootstrap/runtime.rs"));
         assert!(!plain.contains("Approval resolved for tool Bash"));
         assert!(!plain.contains("Continue the interrupted user task"));
