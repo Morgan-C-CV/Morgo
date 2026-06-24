@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    let cli = BootstrapCli::parse();
+    let cli = BootstrapCli::parse().with_default_interactive_tui();
     let runtime = RuntimeBootstrap::from_cli(cli);
     runtime.run().await
 }

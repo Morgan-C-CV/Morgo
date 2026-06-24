@@ -6256,7 +6256,7 @@ pub enum ShutdownOutcome {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "rust-agent", about = "Rust agent runtime")]
+#[command(name = "morgo", about = "Morgo agent runtime")]
 pub struct BootstrapCli {
     #[arg(long)]
     pub print: Option<String>,
@@ -6338,6 +6338,28 @@ impl Default for BootstrapCli {
             boss_task: None,
             boss_task_timeout_secs: DEFAULT_BOSS_TASK_TIMEOUT_SECS,
         }
+    }
+}
+
+impl BootstrapCli {
+    pub fn should_start_interactive_tui_by_default(&self) -> bool {
+        self.print.is_none()
+            && !self.interactive
+            && !self.init_only
+            && !self.continue_session
+            && self.resume.is_none()
+            && !self.show_tools
+            && self.lism_ab_summarize.is_none()
+            && self.lism_ab_conclude.is_none()
+            && self.boss_task.is_none()
+    }
+
+    pub fn with_default_interactive_tui(mut self) -> Self {
+        if self.should_start_interactive_tui_by_default() {
+            self.interactive = true;
+            self.tui = true;
+        }
+        self
     }
 }
 
@@ -9243,7 +9265,11 @@ fn apply_env_always_allow_rules(permission_context: &ToolPermissionContext) {
     let Ok(raw_rules) = std::env::var("MORGO_ALWAYS_ALLOW_BASH_RULES") else {
         return;
     };
-    for rule in raw_rules.split(',').map(str::trim).filter(|rule| !rule.is_empty()) {
+    for rule in raw_rules
+        .split(',')
+        .map(str::trim)
+        .filter(|rule| !rule.is_empty())
+    {
         permission_context.add_always_allow_rule(rule.to_string());
     }
 }
@@ -9667,26 +9693,49 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_cli_defaults_to_interactive_tui_for_plain_morgo_command() {
+        let cli = BootstrapCli::parse_from(["morgo"]).with_default_interactive_tui();
+        assert!(cli.interactive);
+        assert!(cli.tui);
+    }
+
+    #[test]
+    fn bootstrap_cli_keeps_headless_mode_for_one_shot_commands() {
+        let cli =
+            BootstrapCli::parse_from(["morgo", "--show-tools"]).with_default_interactive_tui();
+        assert!(!cli.interactive);
+        assert!(!cli.tui);
+
+        let cli = BootstrapCli::parse_from(["morgo", "--boss-task", "run focused tests"])
+            .with_default_interactive_tui();
+        assert!(!cli.interactive);
+        assert!(!cli.tui);
+    }
+
+    #[test]
     fn bootstrap_cli_parses_shared_memory_enabled_flag() {
-        let cli = BootstrapCli::parse_from(["rust-agent", "--shared-memory-enabled"]);
+        let cli = BootstrapCli::parse_from(["morgo", "--shared-memory-enabled"]);
         assert!(cli.shared_memory_enabled);
     }
 
     #[test]
     fn bootstrap_cli_parses_st_flag() {
-        let cli = BootstrapCli::parse_from(["rust-agent", "--st"]);
+        let cli = BootstrapCli::parse_from(["morgo", "--st"]);
         assert!(cli.st_mode);
     }
 
     #[test]
     fn headless_boss_task_preapproves_bash_for_unattended_execution() {
-        let cli = BootstrapCli::parse_from(["rust-agent", "--boss-task", "run focused tests"]);
+        let cli = BootstrapCli::parse_from(["morgo", "--boss-task", "run focused tests"]);
         let permissions = ToolPermissionContext::new(PermissionMode::Default);
 
         apply_boss_task_headless_allow_rules(&cli, &permissions);
 
         assert!(
-            permissions.always_allow_rules().iter().any(|rule| rule == "Bash"),
+            permissions
+                .always_allow_rules()
+                .iter()
+                .any(|rule| rule == "Bash"),
             "non-interactive boss-task runs must not hang on Bash approval"
         );
     }
@@ -9698,7 +9747,12 @@ mod tests {
 
         apply_boss_task_headless_allow_rules(&cli, &permissions);
 
-        assert!(!permissions.always_allow_rules().iter().any(|rule| rule == "Bash"));
+        assert!(
+            !permissions
+                .always_allow_rules()
+                .iter()
+                .any(|rule| rule == "Bash")
+        );
     }
 
     #[test]

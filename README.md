@@ -43,10 +43,19 @@ cp .env.example .env
 ```
 
 ### 4. Running the TUI
-To start the Morgo interactive TUI, run:
+To start the Morgo interactive TUI after installing or building the binary, run:
 ```bash
-cargo run --bin morgo -- --interactive --tui
+morgo
 ```
+
+During development, you can run the same default TUI entrypoint with:
+```bash
+cargo run --bin morgo
+```
+
+The published binary name is `morgo`. If you want the capitalized `Morgo`
+command on a case-sensitive shell, create an installation alias or symlink that
+points to the same binary.
 
 ---
 
