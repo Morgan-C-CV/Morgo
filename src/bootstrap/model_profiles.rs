@@ -190,7 +190,7 @@ pub fn parse_model_profiles_registry(content: &str) -> anyhow::Result<ModelProfi
         }
     }
     for (name, spec) in &file.profiles {
-        let config = spec.to_model_provider_config(name)?;
+        let config = spec.to_model_provider_config_for_validation(name)?;
         validate_provider_config(&config).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
     Ok(ModelProfileRegistry {
@@ -358,7 +358,22 @@ impl ModelLevelsFile {
 }
 
 impl ModelProfileSpec {
+    fn to_model_provider_config_for_validation(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<ModelProviderConfig> {
+        self.to_model_provider_config_inner(name, false)
+    }
+
     fn to_model_provider_config(&self, name: &str) -> anyhow::Result<ModelProviderConfig> {
+        self.to_model_provider_config_inner(name, true)
+    }
+
+    fn to_model_provider_config_inner(
+        &self,
+        name: &str,
+        require_api_key: bool,
+    ) -> anyhow::Result<ModelProviderConfig> {
         if self.provider_id.trim().is_empty() {
             bail!("invalid_configuration: model profile '{name}' missing provider_id");
         }
@@ -373,13 +388,24 @@ impl ModelProfileSpec {
         let auth_strategy = parse_auth_strategy(&self.auth_strategy)?;
         let api_key = match auth_strategy {
             ProviderAuthStrategy::BearerApiKey => {
-                let env_name = self.api_key_env.as_deref().filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("invalid_configuration: bearer model profile '{name}' requires api_key_env"))?;
-                Some(std::env::var(env_name).map_err(|_| {
-                    anyhow::anyhow!(
-                        "invalid_configuration: model profile '{name}' api_key_env {env_name} is not set"
-                    )
-                })?)
+                let env_name = self
+                    .api_key_env
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invalid_configuration: bearer model profile '{name}' requires api_key_env"
+                        )
+                    })?;
+                if require_api_key {
+                    Some(std::env::var(env_name).map_err(|_| {
+                        anyhow::anyhow!(
+                            "invalid_configuration: model profile '{name}' api_key_env {env_name} is not set"
+                        )
+                    })?)
+                } else {
+                    Some("__morgo_registry_validation_key__".to_string())
+                }
             }
             ProviderAuthStrategy::NoAuth => None,
         };

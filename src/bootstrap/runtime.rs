@@ -329,6 +329,88 @@ fn toml_basic_string_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn default_home_models_toml_content() -> String {
+    let openai = &PROVIDER_SETUP_PRESETS[0];
+    format!(
+        r#"active = "local"
+
+[profiles.local]
+provider_id = "local"
+protocol = "messages-api"
+compatibility_profile = "messages-api"
+base_url = "http://localhost"
+chat_completions_path = "/v1/messages"
+model = "local"
+auth_strategy = "none"
+
+[profiles.{profile}]
+provider_id = "{provider_id}"
+protocol = "{protocol}"
+compatibility_profile = "{compatibility_profile}"
+base_url = "{base_url}"
+chat_completions_path = "{chat_completions_path}"
+model = "{model}"
+auth_strategy = "bearer"
+api_key_env = "{api_key_env}"
+# proxy_url = "http://127.0.0.1:7890"
+# no_proxy = "localhost,127.0.0.1,::1"
+"#,
+        profile = openai.id,
+        provider_id = openai.id,
+        protocol = openai.protocol,
+        compatibility_profile = openai.compatibility_profile,
+        base_url = openai.base_url,
+        chat_completions_path = openai.chat_completions_path,
+        model = openai.default_model,
+        api_key_env = openai.env_name,
+    )
+}
+
+fn default_home_env_content() -> &'static str {
+    r#"# Morgo loads this file before starting.
+# Uncomment and fill these values to use OpenAI through the bundled profile.
+# OPENAI_API_KEY="sk-..."
+
+# Optional proxy configuration for OpenAI-compatible providers.
+# RUST_AGENT_PROXY_URL="http://127.0.0.1:7890"
+# RUST_AGENT_NO_PROXY="localhost,127.0.0.1,::1"
+"#
+}
+
+fn ensure_home_config_scaffold() -> anyhow::Result<()> {
+    let Some(home_root) = preferred_home_config_root() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&home_root).with_context(|| {
+        format!(
+            "invalid_configuration: failed to create {}",
+            home_root.display()
+        )
+    })?;
+
+    let models_path = home_root.join("models.toml");
+    if !models_path.exists() {
+        std::fs::write(&models_path, default_home_models_toml_content()).with_context(|| {
+            format!(
+                "invalid_configuration: failed to write {}",
+                models_path.display()
+            )
+        })?;
+    }
+
+    let env_path = home_root.join("env");
+    if !env_path.exists() {
+        std::fs::write(&env_path, default_home_env_content()).with_context(|| {
+            format!(
+                "invalid_configuration: failed to write {}",
+                env_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn model_configuration_available(config_root: &std::path::Path) -> bool {
     if has_explicit_provider_env_override() {
         return true;
@@ -9227,6 +9309,7 @@ impl RuntimeBootstrap {
         &self,
         config_root: &std::path::Path,
     ) -> anyhow::Result<()> {
+        ensure_home_config_scaffold()?;
         load_bootstrap_env_file()?;
         if model_configuration_available(config_root) {
             return Ok(());
@@ -9853,10 +9936,10 @@ mod tests {
 
     use super::{
         BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, PROVIDER_SETUP_PRESETS,
-        RUNTIME_ONLY_TUI_COMMANDS, apply_boss_task_headless_allow_rules, preview_chars,
-        load_bootstrap_env_file, resolve_skill_project_root, runtime_only_tui_suggestions,
-        step_terminal_from_tracked_ids, terminal_tail_stalled, tui_input_suggestions,
-        write_provider_setup_files,
+        RUNTIME_ONLY_TUI_COMMANDS, apply_boss_task_headless_allow_rules,
+        ensure_home_config_scaffold, load_bootstrap_env_file, preview_chars,
+        resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
+        terminal_tail_stalled, tui_input_suggestions, write_provider_setup_files,
     };
     use crate::bootstrap::RuntimeBootstrap;
     use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
@@ -10005,6 +10088,51 @@ mod tests {
             .unwrap()
             .expect("models.toml");
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn home_config_scaffold_creates_loadable_defaults_without_overwriting() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", temp.path()) };
+
+        ensure_home_config_scaffold().unwrap();
+
+        let home_root = temp.path().join(".morgo");
+        let models_path = home_root.join("models.toml");
+        let env_path = home_root.join("env");
+        let models_content = std::fs::read_to_string(&models_path).unwrap();
+        let env_content = std::fs::read_to_string(&env_path).unwrap();
+        assert!(models_content.contains("active = \"local\""));
+        assert!(models_content.contains("[profiles.openai]"));
+        assert!(models_content.contains("model = \"gpt-5.5\""));
+        assert!(models_content.contains("# proxy_url = \"http://127.0.0.1:7890\""));
+        assert!(env_content.contains("# OPENAI_API_KEY=\"sk-...\""));
+        assert!(env_content.contains("# RUST_AGENT_PROXY_URL=\"http://127.0.0.1:7890\""));
+
+        let registry = load_model_profiles_registry_from_root(&home_root)
+            .unwrap()
+            .expect("models.toml");
+        assert_eq!(registry.active.as_deref(), Some("local"));
+        assert!(registry.profiles.contains_key("openai"));
+
+        std::fs::write(&models_path, "active = \"custom\"\n").unwrap();
+        std::fs::write(&env_path, "OPENAI_API_KEY=\"custom\"\n").unwrap();
+        ensure_home_config_scaffold().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&models_path).unwrap(),
+            "active = \"custom\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            "OPENAI_API_KEY=\"custom\"\n"
+        );
+
         match original_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
