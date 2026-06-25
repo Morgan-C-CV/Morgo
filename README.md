@@ -18,7 +18,7 @@
 
 ## 🛠️ Getting Started
 
-### 1. Installation
+### 1. Install the Release Binary
 Install the latest GitHub release binary:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Morgan-C-CV/LearnCCfromCC/main/scripts/install.sh | sh
@@ -31,22 +31,66 @@ this to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### 2. Configuration
-Configure your LLM provider credentials in a `.env` file at the root of the project:
+For zsh users, you can make that permanent with:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+You can verify the binary is available with:
+```bash
+which morgo
+```
+
+### 2. Configure Provider Credentials
+Morgo needs an LLM provider API key before it can answer inside the TUI.
+
+For one-off usage, export the key directly in your shell:
+```bash
+export OPENAI_API_KEY="your-api-key"
+```
+
+Or use OpenRouter / Anthropic:
+```bash
+export OPENROUTER_API_KEY="your-api-key"
+export ANTHROPIC_API_KEY="your-api-key"
+```
+
+When running from this repository, you can also keep credentials in a `.env`
+file at the repository root:
 ```bash
 cp .env.example .env
 # Edit .env to set your API keys (e.g., Gemini, OpenRouter, Anthropic, etc.)
 ```
 
-### 3. Running the TUI
+Then load it before starting Morgo:
+```bash
+cd /path/to/LearnCCfromCC
+source ./load-env.sh
+```
+
+For OpenAI-compatible providers, you can explicitly select the provider and
+model with:
+```bash
+export RUST_AGENT_PROVIDER_ID=openai
+export RUST_AGENT_PROVIDER_API_KEY="$OPENAI_API_KEY"
+export RUST_AGENT_PROVIDER_BASE_URL="https://api.openai.com"
+export RUST_AGENT_PROVIDER_MODEL="gpt-4.1"
+```
+
+### 3. Start the Interactive TUI
 To start the Morgo interactive TUI, run:
 ```bash
 morgo
 ```
 
-### 4. Development Build
+Running `morgo` without extra arguments starts the interactive terminal UI by
+default.
+
+### 4. Run from Source
 If you are developing Morgo locally, use the Rust toolchain and run:
 ```bash
+cd RustAgent/Agent
 cargo run --bin morgo
 ```
 
