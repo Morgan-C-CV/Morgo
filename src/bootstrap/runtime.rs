@@ -232,7 +232,7 @@ const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
         env_name: "OPENAI_API_KEY",
         base_url: "https://api.openai.com",
         chat_completions_path: "/v1/chat/completions",
-        default_model: "gpt-4.1",
+        default_model: "gpt-5.5",
         protocol: "openai-compatible",
         compatibility_profile: "openai-compatible",
     },
@@ -9993,6 +9993,7 @@ mod tests {
         let home_root = temp.path().join(".morgo");
         std::fs::create_dir_all(&home_root).unwrap();
         let preset = &PROVIDER_SETUP_PRESETS[0];
+        assert_eq!(preset.default_model, "gpt-5.5");
 
         write_provider_setup_files(&home_root, preset, "gpt-test\"quoted", "sk-test'key").unwrap();
         let env_content = std::fs::read_to_string(home_root.join("env")).unwrap();

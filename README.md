@@ -75,7 +75,7 @@ model with:
 export RUST_AGENT_PROVIDER_ID=openai
 export RUST_AGENT_PROVIDER_API_KEY="$OPENAI_API_KEY"
 export RUST_AGENT_PROVIDER_BASE_URL="https://api.openai.com"
-export RUST_AGENT_PROVIDER_MODEL="gpt-4.1"
+export RUST_AGENT_PROVIDER_MODEL="gpt-5.5"
 ```
 
 ### 3. Start the Interactive TUI
