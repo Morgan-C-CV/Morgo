@@ -4875,7 +4875,7 @@ mod tui_output_tests {
 
         let status_pos = rendered.find("Worked for 2m 37s").expect("worked status");
         let model_pos = rendered
-            .rfind("default-model · ~/MProject/LearnCCfromCC")
+            .rfind("default-model · ~/MProject/Morgo")
             .expect("model and cwd line should render");
         let input_pos = rendered.find(">").expect("input prompt should render");
 
@@ -5962,7 +5962,7 @@ mod tui_output_tests {
             .unwrap_or(0)];
         assert!(animated_faces.iter().any(|face| rendered.contains(face)));
         assert!(rendered.contains("model:     default-model   /model to change"));
-        assert!(rendered.contains("directory: ~/MProject/LearnCCfromCC"));
+        assert!(rendered.contains("directory: ~/MProject/Morgo"));
         assert!(rendered.contains("Morgo is ready for coding tasks."));
         assert!(
             rendered.contains("Ask me to inspect code, edit files, or run verification commands.")

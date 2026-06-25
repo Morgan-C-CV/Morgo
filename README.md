@@ -21,7 +21,7 @@
 ### 1. Install the Release Binary
 Install the latest GitHub release binary:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Morgan-C-CV/LearnCCfromCC/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Morgan-C-CV/Morgo/main/scripts/install.sh | sh
 ```
 
 The installer downloads the right binary for your OS/CPU and installs it to
@@ -65,7 +65,7 @@ cp .env.example .env
 
 Then load it before starting Morgo:
 ```bash
-cd /path/to/LearnCCfromCC
+cd /path/to/Morgo
 source ./load-env.sh
 ```
 

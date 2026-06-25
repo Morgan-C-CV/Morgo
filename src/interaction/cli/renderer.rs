@@ -2159,7 +2159,7 @@ mod tests {
                 }),
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::ToolCallStarted {
                     tool_name: "Grep".into(),
-                    input: r#"{"pattern":"stream|streaming|timer","path":"LearnCCfromCC"}"#.into(),
+                    input: r#"{"pattern":"stream|streaming|timer","path":"Morgo"}"#.into(),
                 }),
                 CliDisplayEvent::RuntimeEvent(CliRuntimeEvent::AssistantMessageCommitted {
                     text: "我先直接定位 TUI/计时器/流式输出相关代码。\n".into(),
@@ -2185,7 +2185,7 @@ mod tests {
 
         let rendered = strip_ansi(&render_turn_tui_output(&turn));
         let first_activity_pos = rendered
-            .find("SEARCH stream|streaming|timer in LearnCCfromCC")
+            .find("SEARCH stream|streaming|timer in Morgo")
             .unwrap();
         let text_pos = rendered
             .find("我先直接定位 TUI/计时器/流式输出相关代码。")

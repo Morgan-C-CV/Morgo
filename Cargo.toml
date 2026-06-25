@@ -2,7 +2,7 @@
 name = "rust_agent"
 version = "0.1.0"
 edition = "2024"
-description = "Rust agent runtime scaffold for LearnCCfromCC"
+description = "Rust agent runtime scaffold for Morgo"
 license = "Apache-2.0"
 authors = ["Morgo Authors"]
 repository = "https://github.com/Morgan-C-CV/morgo"
