@@ -799,6 +799,17 @@ fn normalized_request_model(config: &ModelProviderConfig) -> &str {
     }
 }
 
+fn max_tokens_param_for_config(config: &ModelProviderConfig) -> &str {
+    if let Some(param) = config.max_tokens_param.as_deref() {
+        return param;
+    }
+    if config.provider_id.eq_ignore_ascii_case("openai") {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
 fn normalized_request_message(input: &Message) -> Value {
     use crate::core::message::ContentBlock;
     let content_blocks: Vec<Value> = input
@@ -1020,7 +1031,7 @@ impl ProviderAdapter for OpenAICompatibleAdapter {
             "stream": normalized_request_stream_flag(&profile)?,
             "stream_options": {"include_usage": true},
         });
-        let max_tokens_key = config.max_tokens_param.as_deref().unwrap_or("max_tokens");
+        let max_tokens_key = max_tokens_param_for_config(config);
         payload[max_tokens_key] = json!(options.max_tokens);
         if let Some(temperature) = options.temperature {
             payload["temperature"] = json!(temperature);
@@ -2508,6 +2519,25 @@ mod tests {
         );
         assert_eq!(payload["messages"][1]["role"], "user");
         assert_eq!(payload["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn openai_provider_uses_chat_completions_token_parameter() {
+        use crate::core::message::Message;
+        let mut config = test_provider(
+            ProviderProtocol::OpenAICompatible,
+            ProviderCompatibilityProfileKind::OpenAICompatible,
+        );
+        config.provider_id = "openai".into();
+
+        let payload = build_request_payload_for_provider(&config, &Message::user("hello")).unwrap();
+
+        assert!(payload.get("instructions").is_none());
+        assert!(payload.get("max_tokens").is_none());
+        assert_eq!(
+            payload.get("max_completion_tokens").and_then(Value::as_u64),
+            Some(4096)
+        );
     }
 
     #[test]

@@ -222,6 +222,7 @@ struct ProviderSetupPreset {
     base_url: &'static str,
     chat_completions_path: &'static str,
     default_model: &'static str,
+    max_tokens_param: Option<&'static str>,
     protocol: &'static str,
     compatibility_profile: &'static str,
 }
@@ -234,6 +235,7 @@ const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
         base_url: "https://api.openai.com",
         chat_completions_path: "/v1/chat/completions",
         default_model: "gpt-5.5",
+        max_tokens_param: Some("max_completion_tokens"),
         protocol: "openai-compatible",
         compatibility_profile: "openai-compatible",
     },
@@ -244,6 +246,7 @@ const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
         base_url: "https://openrouter.ai/api",
         chat_completions_path: "/v1/chat/completions",
         default_model: "anthropic/claude-sonnet-4",
+        max_tokens_param: None,
         protocol: "openai-compatible",
         compatibility_profile: "openai-compatible",
     },
@@ -254,6 +257,7 @@ const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
         base_url: "https://api.anthropic.com",
         chat_completions_path: "/v1/messages",
         default_model: "claude-sonnet-4-20250514",
+        max_tokens_param: None,
         protocol: "messages-api",
         compatibility_profile: "messages-api",
     },
@@ -496,6 +500,12 @@ api_key_env = "{}"
         toml_basic_string_value(model),
         preset.env_name,
     );
+    if let Some(max_tokens_param) = preset.max_tokens_param {
+        models.push_str(&format!(
+            "max_tokens_param = \"{}\"\n",
+            toml_basic_string_value(max_tokens_param)
+        ));
+    }
     if let Some(proxy_url) = proxy_url {
         models.push_str(&format!(
             "proxy_url = \"{}\"\n",
@@ -10205,8 +10215,10 @@ mod tests {
         )
         .unwrap();
         let env_content = std::fs::read_to_string(home_root.join("env")).unwrap();
+        let models_content = std::fs::read_to_string(home_root.join("models.toml")).unwrap();
         assert!(env_content.contains("OPENAI_API_KEY=\"sk-test'key\""));
         assert!(env_content.contains("RUST_AGENT_PROXY_URL=\"http://127.0.0.1:7890\""));
+        assert!(models_content.contains("max_tokens_param = \"max_completion_tokens\""));
         unsafe { std::env::set_var("HOME", temp.path()) };
         load_bootstrap_env_file().unwrap();
         assert_eq!(std::env::var("OPENAI_API_KEY").unwrap(), "sk-test'key");
