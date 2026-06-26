@@ -329,88 +329,6 @@ fn toml_basic_string_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn default_home_models_toml_content() -> String {
-    let openai = &PROVIDER_SETUP_PRESETS[0];
-    format!(
-        r#"active = "local"
-
-[profiles.local]
-provider_id = "local"
-protocol = "messages-api"
-compatibility_profile = "messages-api"
-base_url = "http://localhost"
-chat_completions_path = "/v1/messages"
-model = "local"
-auth_strategy = "none"
-
-[profiles.{profile}]
-provider_id = "{provider_id}"
-protocol = "{protocol}"
-compatibility_profile = "{compatibility_profile}"
-base_url = "{base_url}"
-chat_completions_path = "{chat_completions_path}"
-model = "{model}"
-auth_strategy = "bearer"
-api_key_env = "{api_key_env}"
-# proxy_url = "http://127.0.0.1:7890"
-# no_proxy = "localhost,127.0.0.1,::1"
-"#,
-        profile = openai.id,
-        provider_id = openai.id,
-        protocol = openai.protocol,
-        compatibility_profile = openai.compatibility_profile,
-        base_url = openai.base_url,
-        chat_completions_path = openai.chat_completions_path,
-        model = openai.default_model,
-        api_key_env = openai.env_name,
-    )
-}
-
-fn default_home_env_content() -> &'static str {
-    r#"# Morgo loads this file before starting.
-# Uncomment and fill these values to use OpenAI through the bundled profile.
-# OPENAI_API_KEY="sk-..."
-
-# Optional proxy configuration for OpenAI-compatible providers.
-# RUST_AGENT_PROXY_URL="http://127.0.0.1:7890"
-# RUST_AGENT_NO_PROXY="localhost,127.0.0.1,::1"
-"#
-}
-
-fn ensure_home_config_scaffold() -> anyhow::Result<()> {
-    let Some(home_root) = preferred_home_config_root() else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&home_root).with_context(|| {
-        format!(
-            "invalid_configuration: failed to create {}",
-            home_root.display()
-        )
-    })?;
-
-    let models_path = home_root.join("models.toml");
-    if !models_path.exists() {
-        std::fs::write(&models_path, default_home_models_toml_content()).with_context(|| {
-            format!(
-                "invalid_configuration: failed to write {}",
-                models_path.display()
-            )
-        })?;
-    }
-
-    let env_path = home_root.join("env");
-    if !env_path.exists() {
-        std::fs::write(&env_path, default_home_env_content()).with_context(|| {
-            format!(
-                "invalid_configuration: failed to write {}",
-                env_path.display()
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
 fn model_configuration_available(config_root: &std::path::Path) -> bool {
     if has_explicit_provider_env_override() {
         return true;
@@ -418,13 +336,44 @@ fn model_configuration_available(config_root: &std::path::Path) -> bool {
     let home_root = preferred_home_config_root();
     let home_models = home_root
         .as_ref()
-        .is_some_and(|root| root.join("models.toml").exists());
+        .is_some_and(|root| root.join("models.toml").exists())
+        && !home_models_toml_is_legacy_local_scaffold();
     let workspace_models = config_root.join("models.toml").exists();
     home_models || workspace_models
 }
 
+fn home_models_toml_is_legacy_local_scaffold() -> bool {
+    let Some(home_root) = preferred_home_config_root() else {
+        return false;
+    };
+    let Ok(Some(registry)) = load_model_profiles_registry_from_root(&home_root) else {
+        return false;
+    };
+    if registry.active.as_deref() != Some("local") {
+        return false;
+    }
+    let Some(local) = registry.profiles.get("local") else {
+        return false;
+    };
+    local.provider_id.trim() == "local"
+        && local.protocol.trim() == "messages-api"
+        && local.compatibility_profile.trim() == "messages-api"
+        && local.base_url.trim() == "http://localhost"
+        && local.model.trim() == "local"
+        && local.auth_strategy.trim() == "none"
+}
+
 fn should_run_provider_setup_wizard(cli: &BootstrapCli) -> bool {
     cli.interactive && cli.tui
+}
+
+fn cli_can_boot_without_provider_configuration(cli: &BootstrapCli) -> bool {
+    cli.show_tools
+        || cli.init_only
+        || cli
+            .print
+            .as_deref()
+            .is_some_and(|input| input.trim_start().starts_with("/model"))
 }
 
 fn prompt_line(prompt: &str) -> anyhow::Result<String> {
@@ -455,6 +404,8 @@ chat_completions_path = "{chat_completions_path}"
 model = "{model}"
 auth_strategy = "bearer"
 api_key_env = "{api_key_env}"
+# proxy_url = "http://127.0.0.1:7890"
+# no_proxy = "localhost,127.0.0.1,::1"
 "#,
         profile = preset.id,
         provider_id = preset.id,
@@ -473,7 +424,16 @@ api_key_env = "{api_key_env}"
     })?;
     std::fs::write(
         &env_path,
-        format!("{}={}\n", preset.env_name, double_quote_env_value(api_key)),
+        format!(
+            r#"{env_name}={api_key}
+
+# Optional proxy configuration for OpenAI-compatible providers.
+# RUST_AGENT_PROXY_URL="http://127.0.0.1:7890"
+# RUST_AGENT_NO_PROXY="localhost,127.0.0.1,::1"
+"#,
+            env_name = preset.env_name,
+            api_key = double_quote_env_value(api_key)
+        ),
     )
     .with_context(|| {
         format!(
@@ -9309,17 +9269,21 @@ impl RuntimeBootstrap {
         &self,
         config_root: &std::path::Path,
     ) -> anyhow::Result<()> {
-        ensure_home_config_scaffold()?;
         load_bootstrap_env_file()?;
         if model_configuration_available(config_root) {
             return Ok(());
         }
-        if !should_run_provider_setup_wizard(&self.cli) {
+        if should_run_provider_setup_wizard(&self.cli) {
+            self.run_provider_setup_wizard()?;
+            load_bootstrap_env_file()?;
             return Ok(());
         }
-        self.run_provider_setup_wizard()?;
-        load_bootstrap_env_file()?;
-        Ok(())
+        if cli_can_boot_without_provider_configuration(&self.cli) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "invalid_configuration: Morgo needs an LLM provider before it can answer. Run `morgo` in an interactive terminal to complete setup, or create ~/.morgo/models.toml and ~/.morgo/env with a valid API key."
+        )
     }
 
     fn run_provider_setup_wizard(&self) -> anyhow::Result<()> {
@@ -9937,9 +9901,10 @@ mod tests {
     use super::{
         BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, PROVIDER_SETUP_PRESETS,
         RUNTIME_ONLY_TUI_COMMANDS, apply_boss_task_headless_allow_rules,
-        ensure_home_config_scaffold, load_bootstrap_env_file, preview_chars,
-        resolve_skill_project_root, runtime_only_tui_suggestions, step_terminal_from_tracked_ids,
-        terminal_tail_stalled, tui_input_suggestions, write_provider_setup_files,
+        home_models_toml_is_legacy_local_scaffold, load_bootstrap_env_file,
+        model_configuration_available, preview_chars, resolve_skill_project_root,
+        runtime_only_tui_suggestions, step_terminal_from_tracked_ids, terminal_tail_stalled,
+        tui_input_suggestions, write_provider_setup_files,
     };
     use crate::bootstrap::RuntimeBootstrap;
     use crate::bootstrap::model_profiles::load_model_profiles_registry_from_root;
@@ -10095,43 +10060,43 @@ mod tests {
     }
 
     #[test]
-    fn home_config_scaffold_creates_loadable_defaults_without_overwriting() {
+    fn legacy_local_home_scaffold_is_treated_as_unconfigured() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let original_home = std::env::var_os("HOME");
         let temp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HOME", temp.path()) };
-
-        ensure_home_config_scaffold().unwrap();
-
         let home_root = temp.path().join(".morgo");
-        let models_path = home_root.join("models.toml");
-        let env_path = home_root.join("env");
-        let models_content = std::fs::read_to_string(&models_path).unwrap();
-        let env_content = std::fs::read_to_string(&env_path).unwrap();
-        assert!(models_content.contains("active = \"local\""));
-        assert!(models_content.contains("[profiles.openai]"));
-        assert!(models_content.contains("model = \"gpt-5.5\""));
-        assert!(models_content.contains("# proxy_url = \"http://127.0.0.1:7890\""));
-        assert!(env_content.contains("# OPENAI_API_KEY=\"sk-...\""));
-        assert!(env_content.contains("# RUST_AGENT_PROXY_URL=\"http://127.0.0.1:7890\""));
+        std::fs::create_dir_all(&home_root).unwrap();
+        std::fs::write(
+            home_root.join("models.toml"),
+            r#"active = "local"
 
-        let registry = load_model_profiles_registry_from_root(&home_root)
-            .unwrap()
-            .expect("models.toml");
-        assert_eq!(registry.active.as_deref(), Some("local"));
-        assert!(registry.profiles.contains_key("openai"));
+[profiles.local]
+provider_id = "local"
+protocol = "messages-api"
+compatibility_profile = "messages-api"
+base_url = "http://localhost"
+chat_completions_path = "/v1/messages"
+model = "local"
+auth_strategy = "none"
 
-        std::fs::write(&models_path, "active = \"custom\"\n").unwrap();
-        std::fs::write(&env_path, "OPENAI_API_KEY=\"custom\"\n").unwrap();
-        ensure_home_config_scaffold().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&models_path).unwrap(),
-            "active = \"custom\"\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&env_path).unwrap(),
-            "OPENAI_API_KEY=\"custom\"\n"
-        );
+[profiles.openai]
+provider_id = "openai"
+protocol = "openai-compatible"
+compatibility_profile = "openai-compatible"
+base_url = "https://api.openai.com"
+chat_completions_path = "/v1/chat/completions"
+model = "gpt-5.5"
+auth_strategy = "bearer"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .unwrap();
+
+        assert!(home_models_toml_is_legacy_local_scaffold());
+        assert!(!model_configuration_available(
+            &temp.path().join(".workspace-morgo")
+        ));
 
         match original_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },

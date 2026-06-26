@@ -43,26 +43,21 @@ which morgo
 ```
 
 ### 2. Configure Provider Credentials
-Morgo creates its default configuration under `~/.morgo` on first startup:
+Morgo needs an LLM provider API key before it can answer inside the TUI. On
+first interactive startup, run:
+
+```bash
+morgo
+```
+
+If no provider has been configured yet, Morgo opens a setup guide that asks for
+the provider, model, and API key. The guide writes:
 
 * `~/.morgo/models.toml`: model profiles and the active profile.
 * `~/.morgo/env`: local environment variables loaded before Morgo starts.
 
-The generated `models.toml` includes a local placeholder profile and an
-OpenAI profile. To use OpenAI, edit `~/.morgo/env` and set:
-
-```bash
-OPENAI_API_KEY="your-api-key"
-```
-
-Then edit `~/.morgo/models.toml` and set:
-
-```toml
-active = "openai"
-```
-
-Morgo uses `gpt-5.5` in the generated OpenAI profile. You can inspect the
-available profiles from inside the TUI with:
+The OpenAI setup default model is `gpt-5.5`. You can inspect the available
+profiles from inside the TUI with:
 
 ```text
 /model list
@@ -86,8 +81,6 @@ no_proxy = "localhost,127.0.0.1,::1"
 
 This is the recommended fix when OpenAI requests fail with errors such as
 `tls handshake eof`.
-
-Morgo needs an LLM provider API key before it can answer inside the TUI.
 
 For one-off usage, export the key directly in your shell:
 ```bash
