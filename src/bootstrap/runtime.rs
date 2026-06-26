@@ -259,6 +259,8 @@ const PROVIDER_SETUP_PRESETS: &[ProviderSetupPreset] = &[
     },
 ];
 
+const DEFAULT_NO_PROXY: &str = "localhost,127.0.0.1,::1";
+
 fn extract_base_url_host(base_url: &str) -> String {
     reqwest::Url::parse(base_url)
         .ok()
@@ -464,54 +466,85 @@ fn write_provider_setup_files(
     preset: &ProviderSetupPreset,
     model: &str,
     api_key: &str,
+    proxy_url: Option<&str>,
+    no_proxy: Option<&str>,
 ) -> anyhow::Result<()> {
     let models_path = home_root.join("models.toml");
     let env_path = home_root.join("env");
-    let models = format!(
-        r#"active = "{profile}"
+    let proxy_url = proxy_url.map(str::trim).filter(|value| !value.is_empty());
+    let no_proxy = no_proxy.map(str::trim).filter(|value| !value.is_empty());
+    let mut models = format!(
+        r#"active = "{}"
 
-[profiles.{profile}]
-provider_id = "{provider_id}"
-protocol = "{protocol}"
-compatibility_profile = "{compatibility_profile}"
-base_url = "{base_url}"
-chat_completions_path = "{chat_completions_path}"
-model = "{model}"
+[profiles.{}]
+provider_id = "{}"
+protocol = "{}"
+compatibility_profile = "{}"
+base_url = "{}"
+chat_completions_path = "{}"
+model = "{}"
 auth_strategy = "bearer"
-api_key_env = "{api_key_env}"
-# proxy_url = "http://127.0.0.1:7890"
-# no_proxy = "localhost,127.0.0.1,::1"
+api_key_env = "{}"
 "#,
-        profile = preset.id,
-        provider_id = preset.id,
-        protocol = preset.protocol,
-        compatibility_profile = preset.compatibility_profile,
-        base_url = preset.base_url,
-        chat_completions_path = preset.chat_completions_path,
-        model = toml_basic_string_value(model),
-        api_key_env = preset.env_name,
+        preset.id,
+        preset.id,
+        preset.id,
+        preset.protocol,
+        preset.compatibility_profile,
+        preset.base_url,
+        preset.chat_completions_path,
+        toml_basic_string_value(model),
+        preset.env_name,
     );
+    if let Some(proxy_url) = proxy_url {
+        models.push_str(&format!(
+            "proxy_url = \"{}\"\n",
+            toml_basic_string_value(proxy_url)
+        ));
+        if let Some(no_proxy) = no_proxy {
+            models.push_str(&format!(
+                "no_proxy = \"{}\"\n",
+                toml_basic_string_value(no_proxy)
+            ));
+        }
+    } else {
+        models.push_str("# proxy_url = \"http://127.0.0.1:7890\"\n");
+        models.push_str(&format!("# no_proxy = \"{}\"\n", DEFAULT_NO_PROXY));
+    }
     std::fs::write(&models_path, models).with_context(|| {
         format!(
             "invalid_configuration: failed to write {}",
             models_path.display()
         )
     })?;
-    std::fs::write(
-        &env_path,
-        format!(
-            r#"{env_name}={api_key}
+    let mut env_content = format!(
+        r#"{env_name}={api_key}
 
-# Optional proxy configuration for OpenAI-compatible providers.
+"#,
+        env_name = preset.env_name,
+        api_key = double_quote_env_value(api_key)
+    );
+    if let Some(proxy_url) = proxy_url {
+        env_content.push_str(&format!(
+            "RUST_AGENT_PROXY_URL={}\n",
+            double_quote_env_value(proxy_url)
+        ));
+        if let Some(no_proxy) = no_proxy {
+            env_content.push_str(&format!(
+                "RUST_AGENT_NO_PROXY={}\n",
+                double_quote_env_value(no_proxy)
+            ));
+        }
+        env_content.push('\n');
+    }
+    env_content.push_str(
+        r#"# Optional proxy/TLS configuration for OpenAI-compatible providers.
 # RUST_AGENT_PROXY_URL="http://127.0.0.1:7890"
 # RUST_AGENT_NO_PROXY="localhost,127.0.0.1,::1"
 # RUST_AGENT_CA_BUNDLE="/absolute/path/to/ca.pem"
 "#,
-            env_name = preset.env_name,
-            api_key = double_quote_env_value(api_key)
-        ),
-    )
-    .with_context(|| {
+    );
+    std::fs::write(&env_path, env_content).with_context(|| {
         format!(
             "invalid_configuration: failed to write {}",
             env_path.display()
@@ -9431,7 +9464,30 @@ impl RuntimeBootstrap {
             println!("API key cannot be empty.");
         };
 
-        write_provider_setup_files(&home_root, preset, model, &api_key)?;
+        println!("If this network needs a proxy, enter it now. Leave blank to connect directly.");
+        let proxy_url = prompt_line("Proxy URL [none]: ")?;
+        let proxy_url = proxy_url.trim().to_string();
+        let no_proxy = if proxy_url.is_empty() {
+            String::new()
+        } else {
+            let prompt = format!("No proxy [{}]: ", DEFAULT_NO_PROXY);
+            let value = prompt_line(&prompt)?;
+            let value = value.trim();
+            if value.is_empty() {
+                DEFAULT_NO_PROXY.to_string()
+            } else {
+                value.to_string()
+            }
+        };
+
+        write_provider_setup_files(
+            &home_root,
+            preset,
+            model,
+            &api_key,
+            (!proxy_url.is_empty()).then_some(proxy_url.as_str()),
+            (!no_proxy.is_empty()).then_some(no_proxy.as_str()),
+        )?;
         println!(
             "Saved Morgo provider config to {} and {}.",
             home_root.join("models.toml").display(),
@@ -9990,7 +10046,7 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock};
 
     use super::{
-        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, PROVIDER_SETUP_PRESETS,
+        BootstrapCli, DEFAULT_BOSS_TASK_TIMEOUT_SECS, DEFAULT_NO_PROXY, PROVIDER_SETUP_PRESETS,
         RUNTIME_ONLY_TUI_COMMANDS, apply_boss_task_headless_allow_rules,
         home_models_toml_is_legacy_local_scaffold, load_bootstrap_env_file,
         model_configuration_available, preview_chars, resolve_skill_project_root,
@@ -10127,23 +10183,52 @@ mod tests {
     fn provider_setup_writes_loadable_home_models_and_env_files() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let original_home = std::env::var_os("HOME");
+        let original_openai_key = std::env::var_os("OPENAI_API_KEY");
+        let original_proxy_url = std::env::var_os("RUST_AGENT_PROXY_URL");
+        let original_no_proxy = std::env::var_os("RUST_AGENT_NO_PROXY");
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        unsafe { std::env::remove_var("RUST_AGENT_PROXY_URL") };
+        unsafe { std::env::remove_var("RUST_AGENT_NO_PROXY") };
         let temp = tempfile::tempdir().unwrap();
         let home_root = temp.path().join(".morgo");
         std::fs::create_dir_all(&home_root).unwrap();
         let preset = &PROVIDER_SETUP_PRESETS[0];
         assert_eq!(preset.default_model, "gpt-5.5");
 
-        write_provider_setup_files(&home_root, preset, "gpt-test\"quoted", "sk-test'key").unwrap();
+        write_provider_setup_files(
+            &home_root,
+            preset,
+            "gpt-test\"quoted",
+            "sk-test'key",
+            Some("http://127.0.0.1:7890"),
+            Some(DEFAULT_NO_PROXY),
+        )
+        .unwrap();
         let env_content = std::fs::read_to_string(home_root.join("env")).unwrap();
         assert!(env_content.contains("OPENAI_API_KEY=\"sk-test'key\""));
+        assert!(env_content.contains("RUST_AGENT_PROXY_URL=\"http://127.0.0.1:7890\""));
         unsafe { std::env::set_var("HOME", temp.path()) };
         load_bootstrap_env_file().unwrap();
         assert_eq!(std::env::var("OPENAI_API_KEY").unwrap(), "sk-test'key");
+        assert_eq!(
+            std::env::var("RUST_AGENT_PROXY_URL").unwrap(),
+            "http://127.0.0.1:7890"
+        );
         load_model_profiles_registry_from_root(&home_root)
             .unwrap()
             .expect("models.toml");
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        match original_openai_key {
+            Some(value) => unsafe { std::env::set_var("OPENAI_API_KEY", value) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        }
+        match original_proxy_url {
+            Some(value) => unsafe { std::env::set_var("RUST_AGENT_PROXY_URL", value) },
+            None => unsafe { std::env::remove_var("RUST_AGENT_PROXY_URL") },
+        }
+        match original_no_proxy {
+            Some(value) => unsafe { std::env::set_var("RUST_AGENT_NO_PROXY", value) },
+            None => unsafe { std::env::remove_var("RUST_AGENT_NO_PROXY") },
+        }
         match original_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },

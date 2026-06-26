@@ -4,17 +4,7 @@ pub const PRIMARY_CONFIG_DIR: &str = ".morgo";
 pub const LEGACY_CONFIG_DIR: &str = ".claude";
 
 pub fn preferred_workspace_config_root(cwd: &Path) -> PathBuf {
-    let primary = cwd.join(PRIMARY_CONFIG_DIR);
-    if primary.exists() {
-        return primary;
-    }
-
-    let legacy = cwd.join(LEGACY_CONFIG_DIR);
-    if legacy.exists() {
-        return legacy;
-    }
-
-    primary
+    cwd.join(PRIMARY_CONFIG_DIR)
 }
 
 pub fn preferred_home_config_root() -> Option<PathBuf> {
@@ -44,8 +34,8 @@ pub fn is_managed_config_root(path: &Path) -> bool {
 /// If `RUST_AGENT_CONFIG_ROOT` is set, it must be an absolute path — relative paths
 /// are rejected with an error to prevent silent misconfiguration.
 ///
-/// If unset, falls back to `cwd/.morgo`, while still preferring an existing legacy
-/// `cwd/.claude` directory for compatibility.
+/// If unset, falls back to `cwd/.morgo`. Legacy `cwd/.claude` is never selected
+/// implicitly; use `RUST_AGENT_CONFIG_ROOT` for a deliberate legacy override.
 pub fn resolve_config_root(cwd: &Path) -> anyhow::Result<PathBuf> {
     if let Ok(raw) = std::env::var("RUST_AGENT_CONFIG_ROOT") {
         let trimmed = raw.trim();
@@ -90,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_claude_dir_is_still_preferred_when_present() {
+    fn legacy_claude_dir_is_not_selected_implicitly() {
         let _guard = lock_env();
         unsafe { std::env::remove_var("RUST_AGENT_CONFIG_ROOT") };
         let temp = tempfile::tempdir().unwrap();
@@ -99,7 +89,7 @@ mod tests {
 
         let root = resolve_config_root(cwd).unwrap();
 
-        assert_eq!(root, cwd.join(".claude"));
+        assert_eq!(root, cwd.join(".morgo"));
     }
 
     #[test]
