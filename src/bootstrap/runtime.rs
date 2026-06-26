@@ -399,12 +399,54 @@ fn should_run_provider_setup_wizard(cli: &BootstrapCli) -> bool {
 }
 
 fn cli_can_boot_without_provider_configuration(cli: &BootstrapCli) -> bool {
-    cli.show_tools
-        || cli.init_only
-        || cli
-            .print
-            .as_deref()
-            .is_some_and(|input| input.trim_start().starts_with("/model"))
+    cli.show_tools || cli.init_only
+}
+
+async fn preflight_provider_connectivity(config: &ModelProviderConfig) -> anyhow::Result<()> {
+    let timeout_ms = config.timeout.request_timeout_ms.clamp(1_000, 5_000);
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms));
+    if let Some(path) = config.ca_bundle_path.as_deref() {
+        let pem = std::fs::read(path).with_context(|| {
+            format!("invalid_configuration: failed to read CA bundle at {path}")
+        })?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .with_context(|| format!("invalid_configuration: invalid CA bundle PEM at {path}"))?;
+        builder = builder.add_root_certificate(cert);
+    }
+
+    let proxy_resolution = resolve_proxy_env_contract();
+    let proxy_url = config
+        .proxy_url
+        .as_deref()
+        .or(proxy_resolution.proxy_url.as_deref());
+    let no_proxy = config
+        .no_proxy
+        .as_deref()
+        .or(proxy_resolution.no_proxy.as_deref());
+    if let Some(url) = proxy_url {
+        let mut proxy = reqwest::Proxy::all(url)
+            .with_context(|| format!("invalid_configuration: invalid proxy URL '{url}'"))?;
+        if let Some(no_proxy) = no_proxy {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+        }
+        builder = builder.proxy(proxy);
+    }
+
+    let client = builder.build()?;
+    let base_url = config.base_url.trim().trim_end_matches('/');
+    let url = reqwest::Url::parse(base_url)
+        .with_context(|| format!("invalid_configuration: invalid provider base_url {base_url}"))?;
+    client
+        .get(url)
+        .send()
+        .await
+        .map(|_| ())
+        .with_context(|| {
+            format!(
+                "invalid_configuration: provider '{}' at {} is not reachable. Check the API key provider, network, proxy, or CA bundle. You can set RUST_AGENT_PROXY_URL, RUST_AGENT_NO_PROXY, or RUST_AGENT_CA_BUNDLE in ~/.morgo/env, then complete Morgo provider setup again.",
+                config.provider_id, config.base_url
+            )
+        })
 }
 
 fn prompt_line(prompt: &str) -> anyhow::Result<String> {
@@ -463,6 +505,7 @@ api_key_env = "{api_key_env}"
 # Optional proxy configuration for OpenAI-compatible providers.
 # RUST_AGENT_PROXY_URL="http://127.0.0.1:7890"
 # RUST_AGENT_NO_PROXY="localhost,127.0.0.1,::1"
+# RUST_AGENT_CA_BUNDLE="/absolute/path/to/ca.pem"
 "#,
             env_name = preset.env_name,
             api_key = double_quote_env_value(api_key)
@@ -6813,6 +6856,9 @@ impl RuntimeBootstrap {
         );
 
         state.record_phase(BootstrapPhase::InitializeRuntime);
+        let config_root = resolve_config_root(&state.current_cwd)?;
+        self.ensure_model_provider_configuration(&config_root)
+            .await?;
         let initialize_bundle = self.initialize_runtime(
             &state,
             active_session_id.clone(),
@@ -8685,7 +8731,6 @@ impl RuntimeBootstrap {
         };
         let snapshot = build_runtime_plugin_snapshot(&app_state);
         let command_registry = snapshot.command_registry.clone();
-        self.ensure_model_provider_configuration(&config_root)?;
         let (
             provider_config,
             active_model_profile_name,
@@ -9298,17 +9343,31 @@ impl RuntimeBootstrap {
         ))
     }
 
-    fn ensure_model_provider_configuration(
+    async fn ensure_model_provider_configuration(
         &self,
         config_root: &std::path::Path,
     ) -> anyhow::Result<()> {
         load_bootstrap_env_file()?;
         if model_configuration_available(config_root) {
+            if should_run_provider_setup_wizard(&self.cli) {
+                let (provider_config, _, _, _) = self.build_model_provider_config(config_root)?;
+                if let Err(error) = preflight_provider_connectivity(&provider_config).await {
+                    println!("{error:#}");
+                    println!("Morgo will reopen provider setup so this install becomes usable.");
+                    self.run_provider_setup_wizard()?;
+                    load_bootstrap_env_file()?;
+                    let (provider_config, _, _, _) =
+                        self.build_model_provider_config(config_root)?;
+                    preflight_provider_connectivity(&provider_config).await?;
+                }
+            }
             return Ok(());
         }
         if should_run_provider_setup_wizard(&self.cli) {
             self.run_provider_setup_wizard()?;
             load_bootstrap_env_file()?;
+            let (provider_config, _, _, _) = self.build_model_provider_config(config_root)?;
+            preflight_provider_connectivity(&provider_config).await?;
             return Ok(());
         }
         if cli_can_boot_without_provider_configuration(&self.cli) {
@@ -9378,7 +9437,6 @@ impl RuntimeBootstrap {
             home_root.join("models.toml").display(),
             home_root.join("env").display()
         );
-        println!("Starting Morgo TUI...");
         Ok(())
     }
 
