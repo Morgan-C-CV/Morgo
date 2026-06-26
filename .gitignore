@@ -6,7 +6,10 @@
 tui-runtime.log
 .env
 .claude/
+.morgo/
 .codex/
+models.toml
+
 
 # OS-generated files
 .DS_Store
