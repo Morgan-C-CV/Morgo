@@ -26,8 +26,9 @@ use crate::bootstrap::config_root::{
     is_managed_config_root, preferred_home_config_root, resolve_config_root,
 };
 use crate::bootstrap::model_profiles::{
-    ModelLevel, load_model_profiles_registry_from_root, merge_model_profiles_registry,
-    resolve_active_model_profile_from_registry, resolve_model_level_from_registry,
+    ModelLevel, ModelProfileRegistry, load_model_profiles_registry_from_root,
+    merge_model_profiles_registry, resolve_active_model_profile_from_registry,
+    resolve_model_level_from_registry,
 };
 use crate::bootstrap::proxy_env::resolve_proxy_env_contract;
 use crate::bootstrap::setup::SetupContext;
@@ -334,12 +335,42 @@ fn model_configuration_available(config_root: &std::path::Path) -> bool {
         return true;
     }
     let home_root = preferred_home_config_root();
-    let home_models = home_root
-        .as_ref()
-        .is_some_and(|root| root.join("models.toml").exists())
-        && !home_models_toml_is_legacy_local_scaffold();
-    let workspace_models = config_root.join("models.toml").exists();
+    let home_models = home_root.as_ref().is_some_and(|root| {
+        !home_models_toml_is_legacy_local_scaffold() && model_registry_credentials_available(root)
+    });
+    let workspace_models = model_registry_credentials_available(config_root);
     home_models || workspace_models
+}
+
+fn model_registry_credentials_available(config_root: &std::path::Path) -> bool {
+    let Ok(Some(registry)) = load_model_profiles_registry_from_root(config_root) else {
+        return false;
+    };
+    registry_active_credentials_available(&registry)
+}
+
+fn registry_active_credentials_available(registry: &ModelProfileRegistry) -> bool {
+    let active_profile = match registry.active_level {
+        Some(level) => registry.levels.get(&level).map(String::as_str),
+        None => registry.active.as_deref(),
+    };
+    let Some(active_profile) = active_profile else {
+        return false;
+    };
+    let Some(spec) = registry.profiles.get(active_profile) else {
+        return false;
+    };
+    match spec.auth_strategy.trim() {
+        "none" | "no_auth" | "no-auth" => true,
+        "bearer" | "bearer_api_key" | "bearer-api-key" => spec
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|env_name| !env_name.is_empty())
+            .and_then(|env_name| std::env::var(env_name).ok())
+            .is_some_and(|value| !value.trim().is_empty()),
+        _ => false,
+    }
 }
 
 fn home_models_toml_is_legacy_local_scaffold() -> bool {
@@ -380,7 +411,9 @@ fn prompt_line(prompt: &str) -> anyhow::Result<String> {
     print!("{prompt}");
     io::stdout().flush()?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    if io::stdin().read_line(&mut input)? == 0 {
+        anyhow::bail!("invalid_configuration: setup input closed before configuration completed");
+    }
     Ok(input.trim_end_matches(['\r', '\n']).to_string())
 }
 
@@ -10101,6 +10134,92 @@ api_key_env = "OPENAI_API_KEY"
         match original_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn bearer_home_profile_without_api_key_is_treated_as_unconfigured() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let original_key = std::env::var_os("OPENAI_API_KEY");
+        let temp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let home_root = temp.path().join(".morgo");
+        std::fs::create_dir_all(&home_root).unwrap();
+        std::fs::write(
+            home_root.join("models.toml"),
+            r#"active = "openai"
+
+[profiles.openai]
+provider_id = "openai"
+protocol = "openai-compatible"
+compatibility_profile = "openai-compatible"
+base_url = "https://api.openai.com"
+chat_completions_path = "/v1/chat/completions"
+model = "gpt-5.5"
+auth_strategy = "bearer"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .unwrap();
+
+        assert!(!model_configuration_available(
+            &temp.path().join(".workspace-morgo")
+        ));
+
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match original_key {
+            Some(value) => unsafe { std::env::set_var("OPENAI_API_KEY", value) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        }
+    }
+
+    #[test]
+    fn bearer_home_profile_with_api_key_is_available() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let original_key = std::env::var_os("OPENAI_API_KEY");
+        let temp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("OPENAI_API_KEY", "sk-test");
+        }
+        let home_root = temp.path().join(".morgo");
+        std::fs::create_dir_all(&home_root).unwrap();
+        std::fs::write(
+            home_root.join("models.toml"),
+            r#"active = "openai"
+
+[profiles.openai]
+provider_id = "openai"
+protocol = "openai-compatible"
+compatibility_profile = "openai-compatible"
+base_url = "https://api.openai.com"
+chat_completions_path = "/v1/chat/completions"
+model = "gpt-5.5"
+auth_strategy = "bearer"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .unwrap();
+
+        assert!(model_configuration_available(
+            &temp.path().join(".workspace-morgo")
+        ));
+
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match original_key {
+            Some(value) => unsafe { std::env::set_var("OPENAI_API_KEY", value) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
         }
     }
 
